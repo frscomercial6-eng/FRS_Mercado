@@ -1,0 +1,45 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+installer/*.exe
+installer/*.zip
+portable_build/
+*.spec.bak
+
+# Local runtime data
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+fiscal_in/
+fiscal_out/
+exportacao_fiscal/
+data/
+
+# OS/editor
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets and credentials
+credentials.json
+google-services.json
+_build_support/credentials.json
+_build_support/google-services.json
+portable_build/credentials.json
+portable_build/google-services.json
+
+# Local config state (machine/user specific)
+update_state.json

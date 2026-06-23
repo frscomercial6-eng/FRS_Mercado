@@ -1,0 +1,36 @@
+FRS SOLUTIONS - TERMO DE LICENCA DE USO (EULA)
+Versao 1.0.0
+Data de vigencia: 23/06/2026
+
+IMPORTANTE: LEIA ATENTAMENTE ESTE TERMO ANTES DE INSTALAR OU USAR O SOFTWARE.
+Ao prosseguir com a instalacao, voce declara que leu, compreendeu e aceita integralmente os termos abaixo.
+
+1. LICENCA DE USO
+A FRS Solutions concede ao cliente uma licenca limitada, nao exclusiva e intransferivel para uso do sistema FRS Mercado.
+
+2. RESTRICOES
+E proibido:
+- copiar, revender, sublicenciar ou redistribuir o software sem autorizacao expressa da FRS Solutions;
+- tentar descompilar, engenharia reversa ou modificar o software para burlar seguranca e licenciamento;
+- compartilhar chaves de ativacao com terceiros nao autorizados.
+
+3. LICENCIAMENTO E RENOVACAO
+O uso do software esta sujeito a licenciamento valido e pode exigir renovacao periodica.
+A renovacao sera realizada por meio do canal oficial de pagamento informado pela FRS Solutions.
+
+4. PRIVACIDADE E DADOS
+O cliente e responsavel pela guarda e integridade dos dados gerados em seu ambiente.
+A FRS Solutions nao se responsabiliza por perdas decorrentes de uso indevido, falhas de infraestrutura local ou alteracoes nao autorizadas.
+
+5. GARANTIAS E LIMITACAO DE RESPONSABILIDADE
+O software e fornecido no estado em que se encontra.
+Na maxima extensao permitida por lei, a FRS Solutions nao sera responsavel por danos indiretos, lucros cessantes ou perdas consequenciais.
+
+6. SUPORTE E ATUALIZACOES
+Atualizacoes e suporte seguem o plano comercial contratado.
+
+7. ACEITE
+Ao clicar em "Aceito" no instalador, voce concorda com todos os termos deste EULA.
+
+FRS Solutions
+Todos os direitos reservados.
