@@ -1,5 +1,5 @@
 #define MyAppName "FRS Mercado"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "FRS Solutions"
 #define MyAppExeName "FRS_Mercado.exe"
 #define PaymentURL "https://invoice.infinitepay.io/plans/frsoficinadepesca/avka57U38g"
@@ -14,7 +14,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=EULA.txt
 OutputDir=installer
-OutputBaseFilename=FRS_Mercado_Setup_1.0.0
+OutputBaseFilename=FRS_Mercado_Setup_1.0.3
 SetupIconFile=assets\logo.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2

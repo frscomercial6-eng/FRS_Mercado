@@ -1,5 +1,5 @@
 """Arquivo gerado automaticamente pelo release_manager. Não editar manualmente."""
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.3"
 RELEASE_DATE = "23/06/2026"
-GITHUB_REPOSITORY = ""
+GITHUB_REPOSITORY = "frscomercial6-eng/FRS_Mercado"

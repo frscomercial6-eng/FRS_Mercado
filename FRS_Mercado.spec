@@ -58,5 +58,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version='D:\\PROGRAMA\\FRS_MERCADO\\_build_support\\version_info.txt',
     icon=['assets\\logo.ico'],
 )
