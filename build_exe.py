@@ -2,6 +2,7 @@ import os
 import importlib.util
 import shutil
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -14,6 +15,11 @@ RUNTIME_HOOK_PATH = ROOT_DIR / "_runtime_hook_error_logger.py"
 SUPPORT_DIR = ROOT_DIR / "_build_support"
 APP_EXE_NAME = "FRS_Mercado.exe"
 WINDOWS_VERSION_INFO_PATH = ROOT_DIR / "_build_support" / "version_info.txt"
+
+
+def _confirm(prompt: str) -> bool:
+    ans = input(f"{prompt} ").strip().lower()
+    return ans in {"s", "sim", "y", "yes"}
 
 
 def _read_current_file(path: Path) -> str:
@@ -365,6 +371,17 @@ def main() -> None:
     installer_path = _build_installer(app_version)
     if installer_path:
         print(f"Instalador gerado: {installer_path}")
+
+    pergunta_deploy = "Build concluído com sucesso. Deseja realizar o deploy para o GitHub agora? [S/N]"
+    if not _confirm(pergunta_deploy):
+        print("Deploy cancelado. Artefatos mantidos localmente para revisão")
+        return
+
+    subprocess.run(
+        [sys.executable, "deploy.py", "--skip-build", "--yes"],
+        cwd=str(ROOT_DIR),
+        check=True,
+    )
 
 
 if __name__ == "__main__":

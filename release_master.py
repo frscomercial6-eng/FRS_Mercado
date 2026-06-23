@@ -22,10 +22,7 @@ def main() -> None:
 
     if _confirm("Deseja executar o build agora?"):
         subprocess.run([sys.executable, "build_exe.py"], cwd=str(ROOT_DIR), check=True)
-        print("Build concluído.")
-
-    if _confirm("Deseja iniciar o deploy (commit/tag/push/release)?"):
-        subprocess.run([sys.executable, "deploy.py"], cwd=str(ROOT_DIR), check=True)
+        print("Build concluído. O deploy agora é decidido ao final do build, após gerar artefatos.")
 
 
 if __name__ == "__main__":

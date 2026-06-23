@@ -1,3 +1,4 @@
+import argparse
 import json
 import mimetypes
 import os
@@ -10,6 +11,13 @@ from release_manager import read_version
 
 
 ROOT_DIR = Path(__file__).resolve().parent
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Deploy Git/GitHub do FRS Mercado")
+    parser.add_argument("--skip-build", action="store_true", help="Pula etapa de build local")
+    parser.add_argument("--yes", action="store_true", help="Confirma automaticamente push/release")
+    return parser.parse_args()
 
 
 def _run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -147,21 +155,22 @@ def _release_assets(version: str) -> list[Path]:
 
 
 def main() -> None:
+    args = _parse_args()
     version = read_version()
     tag = f"v{version}"
 
     print(f"Versão detectada: {version}")
 
-    if not _confirm("Executar build antes do deploy?"):
-        print("Deploy cancelado: build não autorizado.")
-        return
-
-    subprocess.run([sys.executable, "build_exe.py"], cwd=str(ROOT_DIR), check=True)
+    if not args.skip_build:
+        if not _confirm("Executar build antes do deploy?"):
+            print("Deploy cancelado: build não autorizado.")
+            return
+        subprocess.run([sys.executable, "build_exe.py"], cwd=str(ROOT_DIR), check=True)
 
     _ensure_git_commit(version)
     _ensure_tag(version)
 
-    if not _confirm("Confirmar push para o remoto (branch + tag)?"):
+    if not args.yes and not _confirm("Confirmar push para o remoto (branch + tag)?"):
         print("Push cancelado pelo operador.")
         return
 
@@ -170,13 +179,13 @@ def main() -> None:
     _push(branch, tag)
     print(f"Push concluído em origin/{branch} e tag {tag}.")
 
-    if not _confirm("Deseja publicar/atualizar release no GitHub e subir artefatos?"):
+    if not args.yes and not _confirm("Deseja publicar/atualizar release no GitHub e subir artefatos?"):
         print("Publicação de release ignorada pelo operador.")
         return
 
-    token = os.getenv("GITHUB_TOKEN", "").strip()
+    token = os.getenv("GITHUB_TOKEN", "").strip() or os.getenv("GH_TOKEN", "").strip()
     if not token:
-        print("GITHUB_TOKEN não definido. Release no GitHub não foi publicada.")
+        print("GITHUB_TOKEN/GH_TOKEN não definido. Release no GitHub não foi publicada.")
         return
 
     repo = os.getenv("GITHUB_REPOSITORY", "").strip() or _git_repo_from_remote()
