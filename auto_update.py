@@ -40,6 +40,66 @@ class AutoUpdateManager:
         thread = threading.Thread(target=self._check_worker, daemon=True)
         thread.start()
 
+    def force_check_now(self):
+        """Executa verificação imediata sob demanda do usuário."""
+        if not self.repo:
+            messagebox.showwarning(
+                "Atualização",
+                "Repositório de atualização não configurado.",
+                parent=self.app,
+            )
+            return
+
+        if self._check_running:
+            messagebox.showinfo(
+                "Atualização",
+                "Já existe uma verificação em andamento. Aguarde alguns segundos.",
+                parent=self.app,
+            )
+            return
+
+        self._check_running = True
+        threading.Thread(target=self._force_check_worker, daemon=True).start()
+
+    def _force_check_worker(self):
+        try:
+            local_version = get_local_version()
+            release = fetch_latest_release(self.repo)
+            if release is None:
+                self.app.after(
+                    0,
+                    lambda: messagebox.showwarning(
+                        "Atualização",
+                        "Não foi possível consultar o GitHub agora. Tente novamente em instantes.",
+                        parent=self.app,
+                    ),
+                )
+                return
+
+            if compare_versions(release.version, local_version) > 0:
+                self.app.after(0, lambda: self._show_update_dialog(local_version, release))
+                return
+
+            self.app.after(
+                0,
+                lambda: messagebox.showinfo(
+                    "Atualização",
+                    "Você já está usando a versão mais atual do FRS Mercado",
+                    parent=self.app,
+                ),
+            )
+        except Exception:
+            self.app.after(
+                0,
+                lambda: messagebox.showwarning(
+                    "Atualização",
+                    "Falha ao verificar atualização no momento.",
+                    parent=self.app,
+                ),
+            )
+        finally:
+            self._check_running = False
+
     def _check_worker(self):
         try:
             local_version = get_local_version()

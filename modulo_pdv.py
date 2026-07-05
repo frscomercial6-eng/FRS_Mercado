@@ -18,6 +18,38 @@ from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
 from webhook_delivery import iniciar_servidor_webhook
 
 
+def calcular_impostos_liquidos(valor_venda, ncm):
+    """Calcula imposto retido e valor líquido da venda com base no NCM."""
+    try:
+        valor = float(valor_venda or 0.0)
+    except Exception:
+        valor = 0.0
+
+    if valor <= 0:
+        return {"aliquota": 0.0, "valor_imposto": 0.0, "valor_liquido": 0.0}
+
+    try:
+        from modulo_financeiro import obter_aliquota_por_ncm
+
+        aliquota = float(obter_aliquota_por_ncm(ncm) or 0.0)
+    except Exception:
+        aliquota = 0.0
+
+    if aliquota < 0:
+        aliquota = 0.0
+
+    valor_imposto = round(valor * (aliquota / 100.0), 2)
+    valor_liquido = round(valor - valor_imposto, 2)
+    if valor_liquido < 0:
+        valor_liquido = 0.0
+
+    return {
+        "aliquota": aliquota,
+        "valor_imposto": valor_imposto,
+        "valor_liquido": valor_liquido,
+    }
+
+
 class ModuloPDV(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
@@ -36,6 +68,7 @@ class ModuloPDV(ctk.CTkToplevel):
         self.modal_abertura = None
         self._id_after_verificacao_caixa = None
         self.forma_pagamento_selecionada = "DINHEIRO"
+        self.clientes_orcamento_map = {}
 
         if master is not None and not getattr(master, "usuario_atual", None):
             self.destroy()
@@ -99,7 +132,9 @@ class ModuloPDV(ctk.CTkToplevel):
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT id FROM caixa_operacao WHERE status = 'ABERTO' ORDER BY id DESC LIMIT 1")
+                cursor.execute(
+                    "SELECT id, data_abertura FROM caixa_operacao WHERE status = 'ABERTO' ORDER BY id DESC LIMIT 1"
+                )
                 res = cursor.fetchone()
         except Exception as e:
             registrar_log(None, "Verificação de Caixa", "Falha", f"Erro: {e}")
@@ -107,12 +142,33 @@ class ModuloPDV(ctk.CTkToplevel):
             return
 
         if res:
-            self.caixa_id = res[0]
-            registrar_log(None, "Verificação de Caixa", "Sucesso", f"Caixa {res[0]} já aberto.")
-            self._set_status(f"Caixa {res[0]} aberto. PDV pronto para operação.", "#2ecc71")
-            self._safe_focus(self.ent_quantidade)
-        else:
-            self.abrir_caixa_modal()
+            caixa_id, data_abertura = res
+            data_abertura = str(data_abertura or "")[:10]
+            hoje = datetime.now().strftime("%Y-%m-%d")
+
+            if data_abertura == hoje:
+                self.caixa_id = caixa_id
+                registrar_log(None, "Verificação de Caixa", "Sucesso", f"Caixa {caixa_id} já aberto hoje.")
+                self._set_status(f"Caixa {caixa_id} aberto. PDV pronto para operação.", "#2ecc71")
+                self._safe_focus(self.ent_quantidade)
+                return
+
+            try:
+                with get_db_connection() as conn:
+                    conn.execute(
+                        "UPDATE caixa_operacao SET status = 'FECHADO', data_fechamento = CURRENT_TIMESTAMP WHERE id = ?",
+                        (caixa_id,),
+                    )
+                registrar_log(
+                    None,
+                    "Verificação de Caixa",
+                    "Aviso",
+                    f"Caixa {caixa_id} de dia anterior foi fechado automaticamente para exigir nova abertura.",
+                )
+            except Exception as e:
+                registrar_log(None, "Verificação de Caixa", "Falha", f"Erro ao fechar caixa antigo: {e}")
+
+        self.abrir_caixa_modal()
 
     def abrir_caixa_modal(self):
         try:
@@ -293,6 +349,24 @@ class ModuloPDV(ctk.CTkToplevel):
         ).pack(fill="x", padx=10, pady=5)
         ctk.CTkButton(self.painel_lateral, text="CANCELAR ITEM", fg_color="#d35400", command=self.cancelar_item).pack(fill="x", padx=10, pady=5)
 
+        ctk.CTkLabel(self.painel_lateral, text="CLIENTE (ORÇAMENTO)", font=("Roboto", 11, "bold"), text_color="gray").pack(pady=(10, 2))
+        self.combo_cliente_orcamento = ctk.CTkOptionMenu(self.painel_lateral, values=["Sem clientes cadastrados"], width=180)
+        self.combo_cliente_orcamento.pack(padx=10, pady=(0, 8))
+        self._carregar_clientes_orcamento()
+
+        ctk.CTkButton(
+            self.painel_lateral,
+            text="SALVAR ORÇAMENTO",
+            fg_color="#1565c0",
+            command=self.salvar_orcamento_atual,
+        ).pack(fill="x", padx=10, pady=4)
+        ctk.CTkButton(
+            self.painel_lateral,
+            text="ABRIR ORÇAMENTOS",
+            fg_color="#5d4037",
+            command=self.abrir_tela_orcamentos,
+        ).pack(fill="x", padx=10, pady=4)
+
         ctk.CTkLabel(self.painel_lateral, text="VALOR PAGO", font=("Roboto", 11, "bold"), text_color="gray").pack(pady=(8, 2))
         self.ent_valor_pago = ctk.CTkEntry(self.painel_lateral, width=180, placeholder_text="0,00")
         self.ent_valor_pago.pack(padx=10, pady=(0, 8))
@@ -382,6 +456,195 @@ class ModuloPDV(ctk.CTkToplevel):
         finally:
             self._safe_after(300, self._processar_fila_delivery)
 
+    def _normalizar_bool(self, valor):
+        if isinstance(valor, bool):
+            return valor
+        if isinstance(valor, (int, float)):
+            return valor == 1
+        txt = str(valor or "").strip().lower()
+        return txt in {"1", "true", "sim", "yes", "ok", "aprovado", "pago"}
+
+    def _normalizar_origem_venda(self, payload):
+        origem_raw = str(payload.get("origem") or payload.get("canal") or payload.get("plataforma") or "DELIVERY").strip()
+        origem_upper = origem_raw.upper()
+        if "IFOOD" in origem_upper:
+            return "IFOOD", "iFood"
+        if "APP" in origem_upper and "PROPR" in origem_upper:
+            return "APP_PROPRIO", "App Próprio"
+        if "LOJA" in origem_upper or "BALCAO" in origem_upper:
+            return "LOJA_FISICA", "Loja Física"
+        return "APP_PROPRIO", origem_raw or "Delivery"
+
+    def _resolver_item_delivery(self, item, idx):
+        nome = str(item.get("nome") or item.get("descricao") or f"Item Delivery {idx}").strip()
+        codigo = str(item.get("codigo") or item.get("id") or "").strip()
+
+        try:
+            quantidade = parse_numero(item.get("quantidade", 1), "Quantidade", inteiro=True, minimo=1)
+        except Exception:
+            quantidade = 1
+        quantidade = max(1, quantidade)
+
+        try:
+            preco = parse_numero(item.get("preco", 0), "Preço", permitir_vazio=True, default=0.0, minimo=0)
+        except Exception:
+            preco = 0.0
+        preco = max(0.0, preco)
+
+        produto = None
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            if codigo:
+                cursor.execute(
+                    "SELECT id, codigo_barras, nome, ncm FROM produtos WHERE codigo_barras = ? LIMIT 1",
+                    (codigo,),
+                )
+                produto = cursor.fetchone()
+
+                if not produto and codigo.isdigit():
+                    cursor.execute(
+                        "SELECT id, codigo_barras, nome, ncm FROM produtos WHERE id = ? LIMIT 1",
+                        (int(codigo),),
+                    )
+                    produto = cursor.fetchone()
+
+            if not produto and nome:
+                cursor.execute(
+                    "SELECT id, codigo_barras, nome, ncm FROM produtos WHERE UPPER(nome) = UPPER(?) LIMIT 1",
+                    (nome,),
+                )
+                produto = cursor.fetchone()
+
+        if not produto:
+            return None
+
+        total_item = round(preco * quantidade, 2)
+        return {
+            "id": int(produto[0]),
+            "barcode": produto[1] or "",
+            "nome": nome or (produto[2] or "Item Delivery"),
+            "preco": preco,
+            "quantidade": quantidade,
+            "total": total_item,
+            "ncm": produto[3] or "",
+            "origem": "DELIVERY",
+        }
+
+    def _alertar_novo_pedido(self, canal_label):
+        aviso = f"Novo Pedido {canal_label} Chegou"
+        self._set_status(aviso, "#f1c40f")
+        try:
+            self.bell()
+        except Exception:
+            pass
+
+    def _carregar_clientes_orcamento(self):
+        try:
+            with get_db_connection() as conn:
+                clientes = conn.execute(
+                    "SELECT id, nome FROM clientes ORDER BY nome COLLATE NOCASE ASC"
+                ).fetchall()
+        except Exception:
+            clientes = []
+
+        self.clientes_orcamento_map = {}
+        labels = []
+        for cliente_id, nome in clientes:
+            label = f"{cliente_id} - {nome}"
+            self.clientes_orcamento_map[label] = int(cliente_id)
+            labels.append(label)
+
+        if not labels:
+            labels = ["Sem clientes cadastrados"]
+
+        self.combo_cliente_orcamento.configure(values=labels)
+        self.combo_cliente_orcamento.set(labels[0])
+
+    def salvar_orcamento_atual(self):
+        if not self.itens_carrinho:
+            self._set_status("Adicione itens antes de salvar orçamento.", "#ff6666")
+            return
+
+        cliente_label = self.combo_cliente_orcamento.get() if hasattr(self, "combo_cliente_orcamento") else ""
+        cliente_id = self.clientes_orcamento_map.get(cliente_label)
+        if not cliente_id:
+            self._set_status("Selecione um cliente válido para o orçamento.", "#ff6666")
+            return
+
+        valor_total = round(sum(float(i.get("total", 0.0)) for i in self.itens_carrinho), 2)
+        valor_impostos = 0.0
+        itens_preparados = []
+        for item in self.itens_carrinho:
+            resultado = calcular_impostos_liquidos(item.get("total", 0.0), item.get("ncm", ""))
+            valor_impostos += resultado["valor_imposto"]
+            itens_preparados.append((item, resultado))
+
+        valor_impostos = round(valor_impostos, 2)
+        valor_liquido = round(valor_total - valor_impostos, 2)
+        if valor_liquido < 0:
+            valor_liquido = 0.0
+
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO orcamentos (cliente_id, status, valor_total, valor_impostos_retidos, valor_liquido)
+                    VALUES (?, 'ORCAMENTO', ?, ?, ?)
+                    """,
+                    (cliente_id, valor_total, valor_impostos, valor_liquido),
+                )
+                orcamento_id = cursor.lastrowid
+
+                for item, resultado in itens_preparados:
+                    produto_id = item.get("id")
+                    try:
+                        produto_id = int(produto_id)
+                    except Exception:
+                        produto_id = None
+
+                    cursor.execute(
+                        """
+                        INSERT INTO orcamento_itens (
+                            orcamento_id, produto_id, codigo_barras, descricao_produto, ncm,
+                            quantidade, valor_unitario, subtotal
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            orcamento_id,
+                            produto_id,
+                            str(item.get("barcode", "") or ""),
+                            str(item.get("nome", "Item")),
+                            str(item.get("ncm", "") or ""),
+                            int(item.get("quantidade", 0) or 0),
+                            float(item.get("preco", 0.0) or 0.0),
+                            float(item.get("total", 0.0) or 0.0),
+                        ),
+                    )
+
+            self._set_status(
+                f"Orçamento #{orcamento_id} salvo | Total: {self._formatar_moeda_br(valor_total)}",
+                "#4aa3ff",
+            )
+            registrar_log(None, "PDV Orçamento", "Sucesso", f"Orçamento {orcamento_id} salvo para cliente {cliente_id}")
+            self.itens_carrinho = []
+            self._renderizar_carrinho()
+            self.atualizar_total_display()
+            self.ent_valor_pago.delete(0, "end")
+            self.lbl_troco_venda.configure(text="TROCO R$ 0,00")
+        except Exception as e:
+            self._set_status(f"Falha ao salvar orçamento: {e}", "#ff6666")
+            registrar_log(None, "PDV Orçamento", "Falha", f"Erro ao salvar orçamento: {e}")
+
+    def abrir_tela_orcamentos(self):
+        try:
+            from modulo_orcamento import ModuloOrcamento
+
+            ModuloOrcamento(self)
+        except Exception as e:
+            self._set_status(f"Erro ao abrir orçamentos: {e}", "#ff6666")
+
     def _aplicar_pedido_delivery(self, payload):
         if not isinstance(payload, dict):
             self._set_status("Webhook delivery recebido em formato inválido.", "#ff6666")
@@ -390,10 +653,67 @@ class ModuloPDV(ctk.CTkToplevel):
         itens = payload.get("itens")
         cliente = str(payload.get("cliente", "Cliente Delivery")).strip() or "Cliente Delivery"
         valor_total_informado = payload.get("valor", None)
+        pagamento_aprovado = self._normalizar_bool(payload.get("pagamento_aprovado"))
+        origem_canal, origem_label = self._normalizar_origem_venda(payload)
 
         if not isinstance(itens, list) or not itens:
             self._set_status("Pedido delivery ignorado: sem itens.", "#ff6666")
             return
+
+        self._alertar_novo_pedido(origem_label)
+
+        if pagamento_aprovado:
+            itens_resolvidos = []
+            nao_resolvidos = []
+            for idx, item in enumerate(itens, start=1):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    resolvido = self._resolver_item_delivery(item, idx)
+                except Exception:
+                    resolvido = None
+                if resolvido:
+                    itens_resolvidos.append(resolvido)
+                else:
+                    nome_item = str(item.get("nome") or item.get("descricao") or f"Item {idx}")
+                    nao_resolvidos.append(nome_item)
+
+            if itens_resolvidos and not nao_resolvidos:
+                self.itens_carrinho = itens_resolvidos
+                valor_pago = 0.0
+                if valor_total_informado is not None:
+                    try:
+                        valor_pago = parse_numero(valor_total_informado, "Valor pago", permitir_vazio=True, default=0.0, minimo=0)
+                    except Exception:
+                        valor_pago = 0.0
+
+                self.finalizar_venda_pdv(
+                    "PIX",
+                    valor_pago=valor_pago,
+                    imprimir_cupom=False,
+                    origem_venda=origem_canal,
+                    status_pedido="APROVADO",
+                    status_pagamento="PAGO",
+                )
+                self._set_status(f"Novo Pedido {origem_label} Chegou | Venda registrada automaticamente.", "#2ecc71")
+                registrar_log(
+                    None,
+                    "Webhook Delivery",
+                    "Sucesso",
+                    f"Pedido {origem_label} pago e aprovado processado automaticamente. Cliente: {cliente}",
+                )
+                return
+
+            self._set_status(
+                f"Pedido {origem_label} pago recebido, mas itens sem cadastro: {', '.join(nao_resolvidos[:3])}",
+                "#ff6666",
+            )
+            registrar_log(
+                None,
+                "Webhook Delivery",
+                "Falha",
+                f"Falha no processamento automático ({origem_label}). Itens não reconhecidos: {nao_resolvidos}",
+            )
 
         adicionados = 0
         total_calculado = 0.0
@@ -428,6 +748,7 @@ class ModuloPDV(ctk.CTkToplevel):
                     "preco": preco,
                     "quantidade": quantidade,
                     "total": total_item,
+                    "ncm": "",
                     "origem": "DELIVERY",
                     "cliente": cliente,
                 }
@@ -522,6 +843,7 @@ class ModuloPDV(ctk.CTkToplevel):
             "preco": preco_unitario,
             "quantidade": qtd_item,
             "total": preco_unitario * qtd_item,
+            "ncm": produto[7] if len(produto) > 7 else "",
             "origem": "BALCAO",
         }
         self.itens_carrinho.append(item)
@@ -736,7 +1058,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao
+                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao, ncm
                     FROM produtos WHERE codigo_barras = ?
                     """,
                     (codigo_barras,),
@@ -757,7 +1079,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao
+                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao, ncm
                     FROM produtos
                     WHERE UPPER(nome) LIKE UPPER(?)
                     ORDER BY nome ASC
@@ -777,7 +1099,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao
+                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao, ncm
                     FROM produtos
                     WHERE codigo_barras LIKE ? OR UPPER(nome) LIKE UPPER(?)
                     ORDER BY nome ASC
@@ -1108,32 +1430,86 @@ class ModuloPDV(ctk.CTkToplevel):
 
         self._safe_after(0, update)
 
-    def finalizar_venda_pdv(self, forma_pgto, valor_pago=None, imprimir_cupom=False):
+    def finalizar_venda_pdv(
+        self,
+        forma_pgto,
+        valor_pago=None,
+        imprimir_cupom=False,
+        origem_venda="LOJA_FISICA",
+        status_pedido="APROVADO",
+        status_pagamento="PAGO",
+    ):
         if not self.itens_carrinho:
             return
 
         valor_bruto = sum(i["quantidade"] * i["preco"] for i in self.itens_carrinho)
+        valor_impostos = 0.0
+        for item in self.itens_carrinho:
+            resultado_impostos = calcular_impostos_liquidos(item.get("total", 0.0), item.get("ncm", ""))
+            item["aliquota_imposto"] = resultado_impostos["aliquota"]
+            item["valor_imposto"] = resultado_impostos["valor_imposto"]
+            item["valor_liquido"] = resultado_impostos["valor_liquido"]
+            valor_impostos += resultado_impostos["valor_imposto"]
+
+        valor_impostos = round(valor_impostos, 2)
         taxas = modulo_financeiro.obter_taxas()
-        valor_liquido = valor_bruto
+        valor_liquido = round(valor_bruto - valor_impostos, 2)
         taxa_aplicada = 0.0
 
         if forma_pgto in ["DEBITO", "CREDITO"]:
             taxa_aplicada = taxas.get(forma_pgto, 0.0)
-            valor_liquido = round(valor_bruto - (valor_bruto * (taxa_aplicada / 100)), 2)
+            valor_liquido = round(valor_liquido - (valor_bruto * (taxa_aplicada / 100)), 2)
+        if valor_liquido < 0:
+            valor_liquido = 0.0
 
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("INSERT INTO vendas_dia (valor_total, forma_pagamento) VALUES (?, ?)", (valor_bruto, forma_pgto))
-                venda_id = cursor.lastrowid
-
-                desc = f"Venda PDV #{venda_id} ({forma_pgto})"
                 cursor.execute(
                     """
-                    INSERT INTO financeiro (valor, tipo, valor_bruto, taxa_aplicada, descricao)
-                    VALUES (?, 'Entrada', ?, ?, ?)
+                    INSERT INTO vendas (
+                        valor_total, valor_impostos_retidos, valor_liquido,
+                        origem, status_pedido, status_pagamento, forma_pagamento
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (valor_liquido, valor_bruto, taxa_aplicada, desc),
+                    (
+                        valor_bruto,
+                        valor_impostos,
+                        valor_liquido,
+                        str(origem_venda or "LOJA_FISICA").upper(),
+                        str(status_pedido or "APROVADO").upper(),
+                        str(status_pagamento or "PAGO").upper(),
+                        forma_pgto,
+                    ),
+                )
+                venda_id = cursor.lastrowid
+                cursor.execute(
+                    """
+                    INSERT INTO vendas_dia (
+                        valor_total, valor_impostos_retidos, valor_liquido,
+                        origem, status_pedido, status_pagamento, forma_pagamento
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        valor_bruto,
+                        valor_impostos,
+                        valor_liquido,
+                        str(origem_venda or "LOJA_FISICA").upper(),
+                        str(status_pedido or "APROVADO").upper(),
+                        str(status_pagamento or "PAGO").upper(),
+                        forma_pgto,
+                    ),
+                )
+
+                desc = f"Venda PDV #{venda_id} ({forma_pgto}) [{str(origem_venda or 'LOJA_FISICA').upper()}]"
+                cursor.execute(
+                    """
+                    INSERT INTO financeiro (valor, tipo, valor_bruto, valor_impostos_retidos, taxa_aplicada, descricao)
+                    VALUES (?, 'Entrada', ?, ?, ?, ?)
+                    """,
+                    (valor_liquido, valor_bruto, valor_impostos, taxa_aplicada, desc),
                 )
 
                 for item in self.itens_carrinho:
@@ -1145,6 +1521,14 @@ class ModuloPDV(ctk.CTkToplevel):
 
                     if quantidade_vendida <= 0:
                         continue
+
+                    cursor.execute(
+                        """
+                        INSERT INTO itens_venda (venda_id, produto_id, quantidade, subtotal)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (venda_id, produto_id, quantidade_vendida, float(item.get("total", 0.0))),
+                    )
 
                     cursor.execute(
                         """
@@ -1164,7 +1548,14 @@ class ModuloPDV(ctk.CTkToplevel):
 
         sucesso, _caminho = self.fiscal.exportar_venda(venda_id, self.itens_carrinho, forma_pgto, valor_bruto)
 
-        dados_json = {"id": venda_id, "total": valor_bruto, "pagamento": forma_pgto, "itens": self.itens_carrinho}
+        dados_json = {
+            "id": venda_id,
+            "total": valor_bruto,
+            "impostos_retidos": valor_impostos,
+            "liquido": valor_liquido,
+            "pagamento": forma_pgto,
+            "itens": self.itens_carrinho,
+        }
         self.exportar_venda_fiscal(dados_json)
         if imprimir_cupom:
             self._executar_automacao_pos_venda(
@@ -1172,6 +1563,8 @@ class ModuloPDV(ctk.CTkToplevel):
                     "id": venda_id,
                     "itens": self.itens_carrinho,
                     "total": valor_bruto,
+                    "impostos_retidos": valor_impostos,
+                    "liquido": valor_liquido,
                     "forma_pagamento": forma_pgto,
                 }
             )
@@ -1179,7 +1572,7 @@ class ModuloPDV(ctk.CTkToplevel):
         if sucesso:
             recebido_txt = f" | Recebido: {self._formatar_moeda_br(valor_pago)}" if valor_pago is not None else ""
             self._set_status(
-                f"Venda {forma_pgto} concluída | Bruto: {self._formatar_moeda_br(valor_bruto)} | Líquido: {self._formatar_moeda_br(valor_liquido)}{recebido_txt}",
+                f"Venda {forma_pgto} concluída | Bruto: {self._formatar_moeda_br(valor_bruto)} | Impostos: {self._formatar_moeda_br(valor_impostos)} | Líquido: {self._formatar_moeda_br(valor_liquido)}{recebido_txt}",
                 "#2ecc71",
             )
             registrar_log(None, "PDV", "Sucesso", f"Venda {venda_id} ({forma_pgto}) exportada.")
@@ -1209,7 +1602,17 @@ class ModuloPDV(ctk.CTkToplevel):
             saldo_inicial = float(saldo_row[0] or 0.0) if saldo_row else 0.0
 
             vendas_dinheiro_row = conn.execute(
-                "SELECT SUM(valor_total) FROM vendas_dia WHERE forma_pagamento = 'DINHEIRO'"
+                """
+                SELECT SUM(
+                    CASE
+                        WHEN COALESCE(valor_liquido, 0) = 0 AND COALESCE(valor_impostos_retidos, 0) = 0
+                            THEN valor_total
+                        ELSE valor_liquido
+                    END
+                )
+                FROM vendas_dia
+                WHERE forma_pagamento = 'DINHEIRO'
+                """
             ).fetchone()
             vendas_dinheiro = float(vendas_dinheiro_row[0] or 0.0) if vendas_dinheiro_row else 0.0
 

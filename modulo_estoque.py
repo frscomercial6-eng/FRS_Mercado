@@ -85,33 +85,38 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.ent_variacao = ctk.CTkEntry(campos_frame, placeholder_text="Variação (cor, tamanho, etc.)", width=300)
         self.ent_variacao.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="w")
 
+        ctk.CTkLabel(campos_frame, text="Código NCM", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=2, column=0, padx=5, pady=(0, 2), sticky="w")
+        self.ent_ncm = ctk.CTkEntry(campos_frame, placeholder_text="NCM (somente números)", width=145)
+        self.ent_ncm.grid(row=3, column=0, padx=5, pady=5, sticky="w")
+        aplicar_padrao_entrada_numerica(self.ent_ncm, inteiro=True)
+
         # Labels explícitos para manter legibilidade independentemente do placeholder.
-        ctk.CTkLabel(campos_frame, text="Custo", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=2, column=0, padx=5, pady=(0, 2), sticky="w")
-        ctk.CTkLabel(campos_frame, text="Margem", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=2, column=1, padx=5, pady=(0, 2), sticky="w")
+        ctk.CTkLabel(campos_frame, text="Custo", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=2, column=1, padx=5, pady=(0, 2), sticky="w")
+        ctk.CTkLabel(campos_frame, text="Margem", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=4, column=0, padx=5, pady=(0, 2), sticky="w")
 
         self.ent_preco_custo = ctk.CTkEntry(campos_frame, placeholder_text="Preço Custo R$", width=145, textvariable=self.var_preco_custo)
-        self.ent_preco_custo.grid(row=3, column=0, padx=5, pady=5, sticky="w")
+        self.ent_preco_custo.grid(row=3, column=1, padx=5, pady=5, sticky="w")
 
         self.ent_margem_lucro = ctk.CTkEntry(campos_frame, placeholder_text="Margem Lucro %", width=145, textvariable=self.var_margem_lucro)
-        self.ent_margem_lucro.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        self.ent_margem_lucro.grid(row=5, column=0, padx=5, pady=5, sticky="w")
 
-        ctk.CTkLabel(campos_frame, text="Preço Venda", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=4, column=0, padx=5, pady=(0, 2), sticky="w")
-        ctk.CTkLabel(campos_frame, text="QTD", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=4, column=1, padx=5, pady=(0, 2), sticky="w")
+        ctk.CTkLabel(campos_frame, text="Preço Venda", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=4, column=1, padx=5, pady=(0, 2), sticky="w")
+        ctk.CTkLabel(campos_frame, text="QTD", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=6, column=0, padx=5, pady=(0, 2), sticky="w")
 
         self.ent_preco_venda = ctk.CTkEntry(campos_frame, placeholder_text="Preço Venda R$", width=145, textvariable=self.var_preco_venda)
-        self.ent_preco_venda.grid(row=5, column=0, padx=5, pady=5, sticky="w")
+        self.ent_preco_venda.grid(row=5, column=1, padx=5, pady=5, sticky="w")
 
         self.ent_qtd = ctk.CTkEntry(campos_frame, placeholder_text="Qtd Atual", width=145)
-        self.ent_qtd.grid(row=5, column=1, padx=5, pady=5, sticky="w")
+        self.ent_qtd.grid(row=7, column=0, padx=5, pady=5, sticky="w")
 
-        ctk.CTkLabel(campos_frame, text="Validade", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=6, column=0, padx=5, pady=(0, 2), sticky="w")
-        ctk.CTkLabel(campos_frame, text="QTD Mínima", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=6, column=1, padx=5, pady=(0, 2), sticky="w")
+        ctk.CTkLabel(campos_frame, text="Validade", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=6, column=1, padx=5, pady=(0, 2), sticky="w")
+        ctk.CTkLabel(campos_frame, text="QTD Mínima", font=("Arial", 11, "bold"), text_color="#DCE4EE").grid(row=8, column=0, padx=5, pady=(0, 2), sticky="w")
 
         self.ent_val = ctk.CTkEntry(campos_frame, placeholder_text="Validade (AAAA-MM-DD)", width=145)
-        self.ent_val.grid(row=7, column=0, padx=5, pady=5, sticky="w")
+        self.ent_val.grid(row=7, column=1, padx=5, pady=5, sticky="w")
 
         self.ent_qtd_min = ctk.CTkEntry(campos_frame, placeholder_text="Qtd Mínima", width=145)
-        self.ent_qtd_min.grid(row=7, column=1, padx=5, pady=5, sticky="w")
+        self.ent_qtd_min.grid(row=9, column=0, padx=5, pady=5, sticky="w")
 
         aplicar_padrao_entrada_numerica(self.ent_preco_custo, inteiro=False, casas_decimais=2)
         aplicar_padrao_entrada_numerica(self.ent_margem_lucro, inteiro=False, casas_decimais=2)
@@ -175,8 +180,8 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.frame_header = ctk.CTkFrame(self, fg_color="gray20")
         self.frame_header.grid(row=3, column=0, padx=20, pady=(10, 0), sticky="ew")
         
-        headers = ["ID", "Tipo Código", "Código", "Nome", "Variação", "Custo", "Margem", "Preço", "QTD", "Validade", "Ações"]
-        widths = [40, 95, 105, 140, 120, 75, 70, 75, 60, 95, 120]
+        headers = ["ID", "Tipo Código", "Código", "Nome", "Variação", "NCM", "Custo", "Margem", "Preço", "QTD", "Validade", "Ações"]
+        widths = [40, 95, 95, 140, 110, 85, 70, 65, 75, 55, 90, 110]
         for i, text in enumerate(headers):
             lbl = ctk.CTkLabel(self.frame_header, text=text, width=widths[i], font=("Arial", 11, "bold"), text_color="#F5F5F5")
             lbl.pack(side="left", padx=5)
@@ -240,7 +245,7 @@ class ModuloEstoque(ctk.CTkToplevel):
             cursor.execute(
                 """
                   SELECT id, codigo_barras, nome, variacao, preco_venda, quantidade_atual, validade,
-                       preco_custo, margem_lucro, quantidade_minima
+                       preco_custo, margem_lucro, quantidade_minima, ncm
                 FROM produtos
                 ORDER BY id DESC
                 LIMIT ? OFFSET ?
@@ -459,6 +464,8 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.ent_nome.insert(0, prod[2])
         self.ent_variacao.delete(0, 'end')
         self.ent_variacao.insert(0, str(prod[3] or ""))
+        self.ent_ncm.delete(0, 'end')
+        self.ent_ncm.insert(0, str(prod[10] or ""))
         custo = float(prod[7] if prod[7] is not None else 0.0)
         margem = float(prod[8] if prod[8] is not None else 0.0)
         preco = float(prod[4] if prod[4] is not None else 0.0)
@@ -487,6 +494,7 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.entry_barcode.delete(0, 'end')
         self.ent_nome.delete(0, 'end')
         self.ent_variacao.delete(0, 'end')
+        self.ent_ncm.delete(0, 'end')
         self._preencher_precificacao(custo="", margem="", preco="", margem_manual=False)
         self.ent_qtd.delete(0, 'end')
         self.ent_val.delete(0, 'end')
@@ -533,6 +541,7 @@ class ModuloEstoque(ctk.CTkToplevel):
                 ctk.CTkLabel(row_frame, text=prod[1], width=105).pack(side="left", padx=5)
                 ctk.CTkLabel(row_frame, text=prod[2], width=140, anchor="w", text_color=cor_texto).pack(side="left", padx=5)
                 ctk.CTkLabel(row_frame, text=str(prod[3] or "-"), width=120, anchor="w").pack(side="left", padx=5)
+                ctk.CTkLabel(row_frame, text=str(prod[10] or "-"), width=85).pack(side="left", padx=5)
                 ctk.CTkLabel(row_frame, text=f"R$ {float(prod[7] or 0):.2f}", width=75).pack(side="left", padx=5)
                 ctk.CTkLabel(row_frame, text=formatar_percentual_inteiro(prod[8]), width=70).pack(side="left", padx=5)
                 ctk.CTkLabel(row_frame, text=f"R$ {prod[4]:.2f}", width=75).pack(side="left", padx=5)
@@ -571,7 +580,7 @@ class ModuloEstoque(ctk.CTkToplevel):
                 cursor.execute(
                     """
                           SELECT id, codigo_barras, nome, variacao, preco_venda, quantidade_atual, validade,
-                           preco_custo, margem_lucro, quantidade_minima
+                           preco_custo, margem_lucro, quantidade_minima, ncm
                     FROM produtos
                     WHERE codigo_barras = ?
                     """,
@@ -665,6 +674,7 @@ class ModuloEstoque(ctk.CTkToplevel):
                 permitir_vazio=not bool(preco_venda_digitado),
                 default=calcular_preco_venda(preco_custo, margem_lucro),
             )
+            ncm = self.ent_ncm.get().strip()
             qtd = self._parse_numero(self.ent_qtd.get(), "Estoque", permitir_vazio=False, inteiro=True)
             qtd_min = self._parse_numero(self.ent_qtd_min.get(), "Quantidade mínima", permitir_vazio=True, default=0, inteiro=True)
             validade = self.ent_val.get().strip()
@@ -677,19 +687,19 @@ class ModuloEstoque(ctk.CTkToplevel):
                 if self.current_editing_id:
                     cursor.execute("""
                         UPDATE produtos 
-                        SET codigo_barras = ?, nome = ?, variacao = ?, preco_custo = ?, margem_lucro = ?, preco_venda = ?,
+                        SET codigo_barras = ?, nome = ?, variacao = ?, ncm = ?, preco_custo = ?, margem_lucro = ?, preco_venda = ?,
                             quantidade_atual = ?, quantidade_minima = ?, validade = ? 
                         WHERE id = ?
-                    """, (barcode, nome, variacao, preco_custo, margem_lucro, preco_venda, qtd, qtd_min, validade, self.current_editing_id))
+                    """, (barcode, nome, variacao, ncm, preco_custo, margem_lucro, preco_venda, qtd, qtd_min, validade, self.current_editing_id))
                     registrar_log(None, "Edição Produto", "Sucesso", f"ID {self.current_editing_id} atualizado.")
                 else:
                     cursor.execute("""
                         INSERT INTO produtos (
-                            codigo_barras, nome, variacao, preco_custo, margem_lucro, preco_venda,
+                            codigo_barras, nome, variacao, ncm, preco_custo, margem_lucro, preco_venda,
                             quantidade_atual, quantidade_minima, validade, imagem_path
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (barcode, nome, variacao, preco_custo, margem_lucro, preco_venda, qtd, qtd_min, validade, self.temp_image_path))
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (barcode, nome, variacao, ncm, preco_custo, margem_lucro, preco_venda, qtd, qtd_min, validade, self.temp_image_path))
                     registrar_log(None, "Novo Produto", "Sucesso", f"Barcode {barcode} cadastrado.")
 
             if barcode_gerado:

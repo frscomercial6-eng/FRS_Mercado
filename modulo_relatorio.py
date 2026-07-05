@@ -1,6 +1,7 @@
 import customtkinter as ctk
 from tkinter import messagebox
 import sqlite3
+import csv
 from datetime import datetime
 import os
 import shutil
@@ -65,14 +66,22 @@ class ModuloRelatorio(ctk.CTkToplevel):
         self.btn_pdf = ctk.CTkButton(self.frame_filtros, text="Exportar PDF & Drive", fg_color="#2c3e50", command=self.gerar_e_subir_pdf)
         self.btn_pdf.pack(side="right", padx=10)
 
+        self.btn_sped_base = ctk.CTkButton(
+            self.frame_filtros,
+            text="Esboço SPED (CSV)",
+            fg_color="#5a3d00",
+            command=self.gerar_esboco_sped,
+        )
+        self.btn_sped_base.pack(side="right", padx=10)
+
         # --- Dashboard de Cartões ---
         self.frame_cards = ctk.CTkFrame(self, fg_color="transparent")
         self.frame_cards.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
         self.frame_cards.grid_columnconfigure((0, 1, 2), weight=1)
 
-        self.card_vendas = self.criar_card(self.frame_cards, "Total Vendido", "R$ 0,00", "#27ae60", 0)
-        self.card_despesas = self.criar_card(self.frame_cards, "Total Despesas", "R$ 0,00", "#c0392b", 1)
-        self.card_lucro = self.criar_card(self.frame_cards, "Lucro Líquido", "R$ 0,00", "#2980b9", 2)
+        self.card_vendas = self.criar_card(self.frame_cards, "Valor Bruto", "R$ 0,00", "#1f77b4", 0)
+        self.card_despesas = self.criar_card(self.frame_cards, "Impostos Retidos", "R$ 0,00", "#c0392b", 1)
+        self.card_lucro = self.criar_card(self.frame_cards, "Valor Líquido", "R$ 0,00", "#27ae60", 2)
 
         # --- Visualização de Tabelas (Produtos) ---
         self.scroll_tabelas = ctk.CTkScrollableFrame(self)
@@ -95,21 +104,12 @@ class ModuloRelatorio(ctk.CTkToplevel):
         fim = self.data_fim.get()
 
         try:
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                
-                # Financeiro
-                cursor.execute("SELECT SUM(valor_total) FROM vendas WHERE data_venda BETWEEN ? AND ?", (ini, fim))
-                vendas = cursor.fetchone()[0] or 0.0
-                
-                cursor.execute("SELECT SUM(valor) FROM financeiro WHERE tipo = 'Saída' AND data_registro BETWEEN ? AND ?", (ini, fim))
-                despesas = cursor.fetchone()[0] or 0.0
+            import modulo_financeiro
 
-                lucro = vendas - despesas
-
-                self.card_vendas.configure(text=f"R$ {vendas:,.2f}")
-                self.card_despesas.configure(text=f"R$ {despesas:,.2f}")
-                self.card_lucro.configure(text=f"R$ {lucro:,.2f}")
+            resumo = modulo_financeiro.obter_resumo_fluxo_caixa_periodo(ini, fim)
+            self.card_vendas.configure(text=f"R$ {resumo['valor_bruto']:,.2f}")
+            self.card_despesas.configure(text=f"R$ {resumo['valor_impostos']:,.2f}")
+            self.card_lucro.configure(text=f"R$ {resumo['valor_liquido']:,.2f}")
 
         except Exception as e:
             messagebox.showerror("Erro BI", f"Erro ao processar dados: {e}")
@@ -133,15 +133,17 @@ class ModuloRelatorio(ctk.CTkToplevel):
 
             # Sessão Financeira
             elements.append(Paragraph("1. RESUMO FINANCEIRO", styles['Heading2']))
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT SUM(valor_total) FROM vendas WHERE data_venda BETWEEN ? AND ?", (ini, fim))
-                v_total = cursor.fetchone()[0] or 0.0
-                
-                data_fin = [["Descrição", "Valor"], ["Total de Vendas", f"R$ {v_total:.2f}"]]
-                t_fin = Table(data_fin, colWidths=[300, 150])
-                t_fin.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.grey), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke)]))
-                elements.append(t_fin)
+            import modulo_financeiro
+            resumo = modulo_financeiro.obter_resumo_fluxo_caixa_periodo(ini, fim)
+            data_fin = [
+                ["Descrição", "Valor"],
+                ["Valor Bruto", f"R$ {resumo['valor_bruto']:.2f}"],
+                ["Impostos Retidos", f"R$ {resumo['valor_impostos']:.2f}"],
+                ["Valor Líquido", f"R$ {resumo['valor_liquido']:.2f}"],
+            ]
+            t_fin = Table(data_fin, colWidths=[300, 150])
+            t_fin.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.grey), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke)]))
+            elements.append(t_fin)
 
             # Sessão Estoque Crítico
             elements.append(Spacer(1, 20))
@@ -166,6 +168,72 @@ class ModuloRelatorio(ctk.CTkToplevel):
         except Exception as e:
             messagebox.showerror("Erro PDF/Drive", f"Falha na exportação: {e}")
             registrar_log(None, "Relatório BI", "Falha", str(e))
+
+    def gerar_esboco_sped(self):
+        """Gera CSV base para futura integração SPED Fiscal."""
+        ini, fim = self.data_ini.get(), self.data_fim.get()
+        nome_arquivo = f"esboco_sped_fiscal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        caminho_csv = Path(obter_caminho_dados("relatorios", nome_arquivo)).resolve()
+
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT
+                        date(v.data_venda) AS data_movimento,
+                        v.id AS venda_id,
+                        p.codigo_barras,
+                        p.ncm,
+                        iv.quantidade,
+                        iv.subtotal AS valor_bruto_item,
+                        ROUND(
+                            CASE WHEN v.valor_total > 0
+                                THEN (iv.subtotal / v.valor_total) * v.valor_impostos_retidos
+                                ELSE 0
+                            END,
+                            2
+                        ) AS impostos_item,
+                        ROUND(
+                            iv.subtotal -
+                            CASE WHEN v.valor_total > 0
+                                THEN (iv.subtotal / v.valor_total) * v.valor_impostos_retidos
+                                ELSE 0
+                            END,
+                            2
+                        ) AS valor_liquido_item,
+                        v.forma_pagamento
+                    FROM vendas v
+                    JOIN itens_venda iv ON iv.venda_id = v.id
+                    JOIN produtos p ON p.id = iv.produto_id
+                    WHERE date(v.data_venda) BETWEEN date(?) AND date(?)
+                    ORDER BY v.data_venda, v.id, iv.id
+                    """,
+                    (ini, fim),
+                )
+                linhas = cursor.fetchall()
+
+            caminho_csv.parent.mkdir(parents=True, exist_ok=True)
+            with caminho_csv.open("w", newline="", encoding="utf-8") as arq:
+                writer = csv.writer(arq, delimiter=';')
+                writer.writerow([
+                    "data_movimento",
+                    "venda_id",
+                    "codigo_barras",
+                    "ncm",
+                    "quantidade",
+                    "valor_bruto_item",
+                    "impostos_item",
+                    "valor_liquido_item",
+                    "forma_pagamento",
+                ])
+                writer.writerows(linhas)
+
+            messagebox.showinfo("Sucesso", f"Esboço SPED gerado em:\n{caminho_csv}")
+            registrar_log(None, "Relatório SPED Base", "Sucesso", f"Arquivo gerado: {nome_arquivo}")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao gerar esboço SPED: {e}")
+            registrar_log(None, "Relatório SPED Base", "Falha", str(e))
 
     @staticmethod
     def _obter_drive_service():

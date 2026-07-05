@@ -170,6 +170,7 @@ def init_db():
                 codigo_barras TEXT UNIQUE NOT NULL,
                 nome TEXT NOT NULL,
                 variacao TEXT,
+                ncm TEXT,
                 preco_custo REAL NOT NULL,
                 margem_lucro REAL NOT NULL DEFAULT 0.0,
                 preco_venda REAL NOT NULL,
@@ -203,9 +204,55 @@ def init_db():
             CREATE TABLE IF NOT EXISTS entradas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 produto_id INTEGER NOT NULL,
+                fornecedor_id INTEGER,
                 quantidade INTEGER NOT NULL,
                 data_entrada DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (produto_id) REFERENCES produtos (id)
+            )
+        ''')
+        cursor.execute("PRAGMA table_info(entradas)")
+        entradas_cols = [row[1] for row in cursor.fetchall()]
+        if "fornecedor_id" not in entradas_cols:
+            cursor.execute("ALTER TABLE entradas ADD COLUMN fornecedor_id INTEGER")
+
+        # Tabela de Clientes
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS clientes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT NOT NULL,
+                documento TEXT,
+                telefone TEXT,
+                email TEXT,
+                endereco TEXT,
+                data_cadastro DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Tabela de Fornecedores
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fornecedores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT NOT NULL,
+                cnpj_cpf TEXT,
+                telefone TEXT,
+                email TEXT,
+                endereco TEXT,
+                data_cadastro DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Vínculo de fornecedores com produtos comprados
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS fornecedor_produtos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fornecedor_id INTEGER NOT NULL,
+                produto_id INTEGER NOT NULL,
+                codigo_fornecedor TEXT,
+                custo_compra_padrao REAL DEFAULT 0.0,
+                data_vinculo DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (fornecedor_id, produto_id),
+                FOREIGN KEY (fornecedor_id) REFERENCES fornecedores (id) ON DELETE CASCADE,
+                FOREIGN KEY (produto_id) REFERENCES produtos (id) ON DELETE CASCADE
             )
         ''')
 
@@ -215,7 +262,59 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 data_venda DATETIME DEFAULT CURRENT_TIMESTAMP,
                 valor_total NUMERIC NOT NULL,
+                valor_impostos_retidos NUMERIC NOT NULL DEFAULT 0.0,
+                valor_liquido NUMERIC NOT NULL DEFAULT 0.0,
+                origem TEXT NOT NULL DEFAULT 'LOJA_FISICA',
+                status_pedido TEXT NOT NULL DEFAULT 'APROVADO',
+                status_pagamento TEXT NOT NULL DEFAULT 'PAGO',
                 forma_pagamento TEXT NOT NULL
+            )
+        ''')
+        cursor.execute("PRAGMA table_info(vendas)")
+        vendas_cols = [row[1] for row in cursor.fetchall()]
+        if "valor_impostos_retidos" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_impostos_retidos NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_liquido" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_liquido NUMERIC NOT NULL DEFAULT 0.0")
+        if "origem" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN origem TEXT NOT NULL DEFAULT 'LOJA_FISICA'")
+        if "status_pedido" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN status_pedido TEXT NOT NULL DEFAULT 'APROVADO'")
+        if "status_pagamento" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN status_pagamento TEXT NOT NULL DEFAULT 'PAGO'")
+
+        # Tabela de Orçamentos (Propostas Comerciais)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS orcamentos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                data_orcamento DATETIME DEFAULT CURRENT_TIMESTAMP,
+                cliente_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ORCAMENTO',
+                valor_total NUMERIC NOT NULL DEFAULT 0.0,
+                valor_impostos_retidos NUMERIC NOT NULL DEFAULT 0.0,
+                valor_liquido NUMERIC NOT NULL DEFAULT 0.0,
+                forma_pagamento TEXT,
+                convertido_venda_id INTEGER,
+                observacao TEXT,
+                FOREIGN KEY (cliente_id) REFERENCES clientes (id),
+                FOREIGN KEY (convertido_venda_id) REFERENCES vendas (id)
+            )
+        ''')
+
+        # Tabela de Itens do Orçamento
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS orcamento_itens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                orcamento_id INTEGER NOT NULL,
+                produto_id INTEGER,
+                codigo_barras TEXT,
+                descricao_produto TEXT NOT NULL,
+                ncm TEXT,
+                quantidade INTEGER NOT NULL,
+                valor_unitario NUMERIC NOT NULL,
+                subtotal NUMERIC NOT NULL,
+                FOREIGN KEY (orcamento_id) REFERENCES orcamentos (id) ON DELETE CASCADE,
+                FOREIGN KEY (produto_id) REFERENCES produtos (id)
             )
         ''')
 
@@ -264,9 +363,26 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 data_venda DATETIME DEFAULT CURRENT_TIMESTAMP,
                 valor_total NUMERIC NOT NULL,
+                valor_impostos_retidos NUMERIC NOT NULL DEFAULT 0.0,
+                valor_liquido NUMERIC NOT NULL DEFAULT 0.0,
+                origem TEXT NOT NULL DEFAULT 'LOJA_FISICA',
+                status_pedido TEXT NOT NULL DEFAULT 'APROVADO',
+                status_pagamento TEXT NOT NULL DEFAULT 'PAGO',
                 forma_pagamento TEXT NOT NULL
             )
         ''')
+        cursor.execute("PRAGMA table_info(vendas_dia)")
+        vendas_dia_cols = [row[1] for row in cursor.fetchall()]
+        if "valor_impostos_retidos" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_impostos_retidos NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_liquido" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_liquido NUMERIC NOT NULL DEFAULT 0.0")
+        if "origem" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN origem TEXT NOT NULL DEFAULT 'LOJA_FISICA'")
+        if "status_pedido" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN status_pedido TEXT NOT NULL DEFAULT 'APROVADO'")
+        if "status_pagamento" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN status_pagamento TEXT NOT NULL DEFAULT 'PAGO'")
 
         # Tabela de Licenciamento
         cursor.execute('''
@@ -296,8 +412,24 @@ def init_db():
                 valor NUMERIC NOT NULL,
                 tipo TEXT NOT NULL, -- 'Entrada' ou 'Saída'
                 valor_bruto NUMERIC,
+                valor_impostos_retidos NUMERIC NOT NULL DEFAULT 0.0,
                 taxa_aplicada NUMERIC,
                 descricao TEXT
+            )
+        ''')
+        cursor.execute("PRAGMA table_info(financeiro)")
+        financeiro_cols = [row[1] for row in cursor.fetchall()]
+        if "valor_impostos_retidos" not in financeiro_cols:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_impostos_retidos NUMERIC NOT NULL DEFAULT 0.0")
+
+        # Configuração de alíquotas de retenção por NCM (SPED/tributário)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS config_aliquotas_ncm (
+                ncm_prefixo TEXT PRIMARY KEY,
+                aliquota_percentual REAL NOT NULL,
+                descricao TEXT,
+                ativo INTEGER NOT NULL DEFAULT 1,
+                atualizado_em DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
 
@@ -350,6 +482,9 @@ def init_db():
         cursor.execute("INSERT OR IGNORE INTO config_taxas (tipo, percentual) VALUES ('CREDITO', 0.0)")
         cursor.execute("INSERT OR IGNORE INTO config_sistema (chave, valor) VALUES ('limite_caixa', '500.00')")
         cursor.execute("INSERT OR IGNORE INTO config_fiscal (id, api_key, ambiente, webhook_token_hash) VALUES (1, '', 'HOMOLOGACAO', '')")
+        cursor.execute(
+            "INSERT OR IGNORE INTO config_aliquotas_ncm (ncm_prefixo, aliquota_percentual, descricao, ativo) VALUES ('*', 0.0, 'Aliquota padrao/fallback', 1)"
+        )
 
         conn.commit()
         print("Banco de dados inicializado com sucesso.")

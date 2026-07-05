@@ -329,7 +329,14 @@ class AppPrincipal(ctk.CTk):
     def _obter_total_vendas_dia(self):
         try:
             with get_db_connection() as conn:
-                return conn.execute("SELECT COUNT(*) FROM vendas_dia").fetchone()[0]
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM vendas WHERE date(data_venda) = date('now', 'localtime')"
+                ).fetchone()[0]
+                if total == 0:
+                    total = conn.execute(
+                        "SELECT COUNT(*) FROM vendas_dia WHERE date(data_venda) = date('now', 'localtime')"
+                    ).fetchone()[0]
+                return total
         except Exception:
             return 0
 
@@ -467,12 +474,32 @@ class AppPrincipal(ctk.CTk):
         ctk.CTkLabel(self.sidebar, text="MONITORAMENTO", font=("Roboto", 14, "bold"), text_color="gray").pack(pady=(20, 10))
 
         # Card Vendas
-        self.card_vendas = ctk.CTkFrame(self.sidebar, width=200, height=90, corner_radius=15, fg_color="#1a1a1a")
+        self.card_vendas = ctk.CTkFrame(self.sidebar, width=200, height=190, corner_radius=15, fg_color="#1a1a1a")
         self.card_vendas.pack(padx=10, pady=10)
         self.card_vendas.pack_propagate(False)
-        ctk.CTkLabel(self.card_vendas, text="Vendas Hoje", font=("Roboto", 11)).pack(pady=(10, 0))
-        self.label_valor_vendas = ctk.CTkLabel(self.card_vendas, text="R$ 0,00", font=("Roboto", 20, "bold"), text_color="#2ecc71")
-        self.label_valor_vendas.pack()
+        ctk.CTkLabel(self.card_vendas, text="Fluxo de Caixa (Hoje)", font=("Roboto", 11, "bold")).pack(pady=(8, 2))
+
+        linha_headers = ctk.CTkFrame(self.card_vendas, fg_color="transparent")
+        linha_headers.pack(fill="x", padx=8)
+        ctk.CTkLabel(linha_headers, text="Bruto", width=60, font=("Roboto", 10, "bold"), text_color="#9ec5ff").pack(side="left")
+        ctk.CTkLabel(linha_headers, text="Impostos", width=70, font=("Roboto", 10, "bold"), text_color="#ffb3b3").pack(side="left")
+        ctk.CTkLabel(linha_headers, text="Líquido", width=60, font=("Roboto", 10, "bold"), text_color="#a6f4c5").pack(side="left")
+
+        linha_valores = ctk.CTkFrame(self.card_vendas, fg_color="transparent")
+        linha_valores.pack(fill="x", padx=8, pady=(2, 8))
+        self.label_valor_bruto_dashboard = ctk.CTkLabel(linha_valores, text="R$ 0,00", width=60, font=("Roboto", 10, "bold"), text_color="#9ec5ff")
+        self.label_valor_bruto_dashboard.pack(side="left")
+        self.label_valor_impostos_dashboard = ctk.CTkLabel(linha_valores, text="R$ 0,00", width=70, font=("Roboto", 10, "bold"), text_color="#ffb3b3")
+        self.label_valor_impostos_dashboard.pack(side="left")
+        self.label_valor_liquido_dashboard = ctk.CTkLabel(linha_valores, text="R$ 0,00", width=60, font=("Roboto", 10, "bold"), text_color="#a6f4c5")
+        self.label_valor_liquido_dashboard.pack(side="left")
+
+        self.lbl_origem_ifood = ctk.CTkLabel(self.card_vendas, text="iFood: R$ 0,00", font=("Roboto", 9, "bold"), text_color="#b7d9ff")
+        self.lbl_origem_ifood.pack(anchor="w", padx=10)
+        self.lbl_origem_app = ctk.CTkLabel(self.card_vendas, text="App Próprio: R$ 0,00", font=("Roboto", 9, "bold"), text_color="#b7d9ff")
+        self.lbl_origem_app.pack(anchor="w", padx=10)
+        self.lbl_origem_loja = ctk.CTkLabel(self.card_vendas, text="Loja Física: R$ 0,00", font=("Roboto", 9, "bold"), text_color="#b7d9ff")
+        self.lbl_origem_loja.pack(anchor="w", padx=10)
 
         # Card Promoções
         self.card_promo = ctk.CTkFrame(self.sidebar, width=200, height=70, corner_radius=15, fg_color="#f1c40f")
@@ -536,9 +563,13 @@ class AppPrincipal(ctk.CTk):
             ("🚀 ABRIR PDV", "#27ae60", self.abrir_pdv),
             ("📦 ESTOQUE", "#2980b9", self.abrir_estoque),
             ("📊 RELATÓRIOS", "#16a085", self.abrir_relatorios),
+            ("🧾 ORÇAMENTOS", "#8d6e63", self.abrir_orcamentos),
+            ("👥 CLIENTES", "#0f766e", self.abrir_clientes),
+            ("🏭 FORNECEDORES", "#6d28d9", self.abrir_fornecedores),
             ("👤 USUÁRIOS", "#e67e22", self.abrir_usuarios),
             ("⚙️ CONFIGS", "#7f8c8d", self.abrir_configuracoes),
-            ("💰 TAXAS", "#8e44ad", self.abrir_financeiro)
+            ("💰 TAXAS", "#8e44ad", self.abrir_financeiro),
+            ("⬆️ VERIFICAR ATUALIZAÇÕES", "#2c3e50", self.verificar_atualizacoes_manual),
         ]
 
         for i, (texto, cor, cmd) in enumerate(botoes):
@@ -603,6 +634,27 @@ class AppPrincipal(ctk.CTk):
         from modulo_usuario import ModuloUsuario
         return ModuloUsuario(self, is_admin_user=(self.usuario_atual.get("permissao") == "Administrador"))
 
+    def abrir_clientes(self):
+        self._abrir_modulo_seguro("CLIENTES", self._abrir_clientes_impl)
+
+    def _abrir_clientes_impl(self):
+        from modulo_cliente import ModuloCliente
+        return ModuloCliente(self)
+
+    def abrir_fornecedores(self):
+        self._abrir_modulo_seguro("FORNECEDORES", self._abrir_fornecedores_impl)
+
+    def _abrir_fornecedores_impl(self):
+        from modulo_fornecedor import ModuloFornecedor
+        return ModuloFornecedor(self)
+
+    def abrir_orcamentos(self):
+        self._abrir_modulo_seguro("ORÇAMENTOS", self._abrir_orcamentos_impl)
+
+    def _abrir_orcamentos_impl(self):
+        from modulo_orcamento import ModuloOrcamento
+        return ModuloOrcamento(self)
+
     def abrir_configuracoes(self):
         self._abrir_modulo_seguro("CONFIGURAÇÕES", self._abrir_configuracoes_impl)
 
@@ -616,6 +668,23 @@ class AppPrincipal(ctk.CTk):
     def _abrir_financeiro_impl(self):
         from modulo_financeiro import JanelaConfigTaxas
         return JanelaConfigTaxas(self, self.usuario_atual)
+
+    def verificar_atualizacoes_manual(self):
+        """Gatilho manual para checagem imediata de atualização no GitHub."""
+        try:
+            if self._auto_update_manager is None:
+                config = carregar_configuracoes()
+                repo = str(config.get("auto_update_repo", "") or "").strip()
+                remind_hours = int(config.get("auto_update_remind_hours", 24) or 24)
+                self._auto_update_manager = AutoUpdateManager(
+                    app=self,
+                    repo=repo,
+                    enabled=True,
+                    remind_hours=remind_hours,
+                )
+            self._auto_update_manager.force_check_now()
+        except Exception as e:
+            messagebox.showwarning("Atualização", f"Falha ao iniciar verificação manual: {e}")
 
     def verificar_ia_loop(self):
         """Verifica alertas e atualiza faturamento a cada 60 segundos."""
@@ -649,10 +718,21 @@ class AppPrincipal(ctk.CTk):
         """Atualiza os valores financeiros exibidos nos cards."""
         try:
             modulo_financeiro = self._get_modulo_financeiro()
-            total = modulo_financeiro.obter_total_vendas_dia()
-            self.label_valor_vendas.configure(text=f"R$ {total:.2f}")
+            resumo = modulo_financeiro.obter_resumo_fluxo_caixa_dia()
+            origem = modulo_financeiro.obter_resumo_origem_dia()
+            self.label_valor_bruto_dashboard.configure(text=f"R$ {resumo['valor_bruto']:.2f}")
+            self.label_valor_impostos_dashboard.configure(text=f"R$ {resumo['valor_impostos']:.2f}")
+            self.label_valor_liquido_dashboard.configure(text=f"R$ {resumo['valor_liquido']:.2f}")
+            self.lbl_origem_ifood.configure(text=f"iFood: R$ {origem.get('IFOOD', 0.0):.2f}")
+            self.lbl_origem_app.configure(text=f"App Próprio: R$ {origem.get('APP_PROPRIO', 0.0):.2f}")
+            self.lbl_origem_loja.configure(text=f"Loja Física: R$ {origem.get('LOJA_FISICA', 0.0):.2f}")
         except Exception as e:
-            self.label_valor_vendas.configure(text="R$ 0,00")
+            self.label_valor_bruto_dashboard.configure(text="R$ 0,00")
+            self.label_valor_impostos_dashboard.configure(text="R$ 0,00")
+            self.label_valor_liquido_dashboard.configure(text="R$ 0,00")
+            self.lbl_origem_ifood.configure(text="iFood: R$ 0,00")
+            self.lbl_origem_app.configure(text="App Próprio: R$ 0,00")
+            self.lbl_origem_loja.configure(text="Loja Física: R$ 0,00")
             print(f"[ERRO DASHBOARD] Falha ao obter total de vendas: {e}")
 
         # Atualiza contagem de promoções

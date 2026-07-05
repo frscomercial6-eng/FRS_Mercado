@@ -1,6 +1,6 @@
 FRS SOLUTIONS - TERMO DE LICENCA DE USO (EULA)
-Versao 1.0.3
-Data de vigencia: 23/06/2026
+Versao 1.0.4
+Data de vigencia: 05/07/2026
 
 IMPORTANTE: LEIA ATENTAMENTE ESTE TERMO ANTES DE INSTALAR OU USAR O SOFTWARE.
 Ao prosseguir com a instalacao, voce declara que leu, compreendeu e aceita integralmente os termos abaixo.
