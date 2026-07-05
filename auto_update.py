@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox
 from urllib import error, request
+from urllib.parse import urlparse
 
 import customtkinter as ctk
 
@@ -19,7 +20,6 @@ UPDATE_STATE_FILE = Path(obter_caminho_dados("update_state.json"))
 @dataclass
 class ReleaseInfo:
     version: str
-    notes: str
     asset_name: str
     asset_url: str
 
@@ -64,7 +64,7 @@ class AutoUpdateManager:
     def _force_check_worker(self):
         try:
             local_version = get_local_version()
-            release = fetch_latest_release(self.repo)
+            release = fetch_update_manifest(self.repo)
             if release is None:
                 self.app.after(
                     0,
@@ -103,7 +103,7 @@ class AutoUpdateManager:
     def _check_worker(self):
         try:
             local_version = get_local_version()
-            release = fetch_latest_release(self.repo)
+            release = fetch_update_manifest(self.repo)
             if release is None:
                 return
 
@@ -123,45 +123,15 @@ class AutoUpdateManager:
     def _show_update_dialog(self, local_version: str, release: ReleaseInfo):
         if not self.app.winfo_exists():
             return
-
-        win = ctk.CTkToplevel(self.app)
-        win.title("Update Disponível")
-        win.geometry("520x320")
-        win.transient(self.app)
-
-        ctk.CTkLabel(
-            win,
-            text="Nova versão disponível",
-            font=("Roboto", 20, "bold"),
-            text_color="#2ecc71",
-        ).pack(pady=(20, 10))
-
-        ctk.CTkLabel(
-            win,
-            text=f"Versão atual: {local_version} | Nova versão: {release.version}",
-            font=("Roboto", 13),
-        ).pack(pady=(0, 10))
-
-        txt = ctk.CTkTextbox(win, width=470, height=150)
-        txt.pack(padx=18, pady=8)
-        txt.insert("0.0", release.notes or "Sem notas de atualização.")
-        txt.configure(state="disabled")
-
-        btns = ctk.CTkFrame(win, fg_color="transparent")
-        btns.pack(pady=14)
-
-        def lembrar_depois():
-            self._save_defer_state(release.version)
-            win.destroy()
-
-        def atualizar_agora():
-            win.destroy()
+        mensagem = (
+            "Uma nova versão está disponível. Deseja atualizar agora?\n\n"
+            f"Versão atual: {local_version}\n"
+            f"Nova versão: {release.version}"
+        )
+        if messagebox.askyesno("Update Disponível", mensagem, parent=self.app):
             self._run_update_flow(release)
-
-        ctk.CTkButton(btns, text="Atualizar Agora", fg_color="#27ae60", command=atualizar_agora).pack(side="left", padx=8)
-        ctk.CTkButton(btns, text="Lembrar mais tarde", fg_color="#7f8c8d", command=lembrar_depois).pack(side="left", padx=8)
-
-        win.protocol("WM_DELETE_WINDOW", lembrar_depois)
+        else:
+            self._save_defer_state(release.version)
 
     def _run_update_flow(self, release: ReleaseInfo):
         def worker():
@@ -267,51 +237,66 @@ def get_local_version() -> str:
         return "0.0.0"
 
 
-def fetch_latest_release(repo: str) -> ReleaseInfo | None:
-    url = f"https://api.github.com/repos/{repo}/releases/latest"
-    req = request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "FRS-Mercado-AutoUpdate",
-        },
-        method="GET",
-    )
+def _manifest_urls(repo: str) -> list[str]:
+    repo = str(repo or "").strip().strip("/")
+    if "/" not in repo:
+        return []
 
-    try:
-        with request.urlopen(req, timeout=8) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except error.URLError:
+    owner, name = repo.split("/", 1)
+    return [
+        f"https://raw.githubusercontent.com/{owner}/{name}/main/version.json",
+        f"https://raw.githubusercontent.com/{owner}/{name}/master/version.json",
+    ]
+
+
+def _asset_name_from_url(url: str) -> str:
+    path = urlparse(str(url or "").strip()).path
+    name = Path(path).name
+    return name or "FRS_Mercado_Update.exe"
+
+
+def fetch_manifest_payload(repo: str) -> dict | None:
+    """Retorna o payload bruto do manifesto de atualização no GitHub."""
+    for url in _manifest_urls(repo):
+        req = request.Request(
+            url,
+            headers={"User-Agent": "FRS-Mercado-AutoUpdate", "Accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with request.urlopen(req, timeout=8) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except error.URLError:
+            continue
+        except Exception:
+            continue
+
+        if isinstance(payload, dict):
+            return payload
+
+    return None
+
+
+def fetch_update_manifest(repo: str) -> ReleaseInfo | None:
+    payload = fetch_manifest_payload(repo)
+    if not isinstance(payload, dict):
         return None
-    except Exception:
-        return None
 
-    tag = str(payload.get("tag_name") or "").strip()
-    latest_version = normalize_version(tag)
-    notes = str(payload.get("body") or "").strip()
-
-    assets = payload.get("assets") or []
-    installer = choose_installer_asset(assets)
-    if installer is None:
+    latest_version = normalize_version(payload.get("latest_version"))
+    download_url = str(payload.get("download_url") or "").strip()
+    if not latest_version or not download_url:
         return None
 
     return ReleaseInfo(
         version=latest_version,
-        notes=notes,
-        asset_name=installer["name"],
-        asset_url=installer["url"],
+        asset_name=_asset_name_from_url(download_url),
+        asset_url=download_url,
     )
 
 
-def choose_installer_asset(assets: list[dict]) -> dict | None:
-    for a in assets:
-        name = str(a.get("name") or "")
-        if name.lower().endswith(".exe") and "setup" in name.lower():
-            return {
-                "name": name,
-                "url": str(a.get("browser_download_url") or "").strip(),
-            }
-    return None
+def fetch_latest_release(repo: str) -> ReleaseInfo | None:
+    """Compatibilidade retroativa com chamadas legadas do projeto."""
+    return fetch_update_manifest(repo)
 
 
 def download_file(url: str, destination: Path) -> None:
