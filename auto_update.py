@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import threading
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox
@@ -15,6 +16,21 @@ from app_paths import obter_caminho_dados
 
 
 UPDATE_STATE_FILE = Path(obter_caminho_dados("update_state.json"))
+
+
+def _github_token() -> str:
+    return (os.getenv("GITHUB_TOKEN", "").strip() or os.getenv("GH_TOKEN", "").strip())
+
+
+def _request_headers(accept: str = "application/json") -> dict:
+    headers = {
+        "User-Agent": "FRS-Mercado-AutoUpdate",
+        "Accept": accept,
+    }
+    token = _github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 @dataclass
@@ -244,6 +260,8 @@ def _manifest_urls(repo: str) -> list[str]:
 
     owner, name = repo.split("/", 1)
     return [
+        f"https://api.github.com/repos/{owner}/{name}/contents/version.json?ref=main",
+        f"https://api.github.com/repos/{owner}/{name}/contents/version.json?ref=master",
         f"https://raw.githubusercontent.com/{owner}/{name}/main/version.json",
         f"https://raw.githubusercontent.com/{owner}/{name}/master/version.json",
     ]
@@ -260,7 +278,7 @@ def fetch_manifest_payload(repo: str) -> dict | None:
     for url in _manifest_urls(repo):
         req = request.Request(
             url,
-            headers={"User-Agent": "FRS-Mercado-AutoUpdate", "Accept": "application/json"},
+            headers=_request_headers("application/vnd.github+json, application/json"),
             method="GET",
         )
         try:
@@ -272,6 +290,16 @@ def fetch_manifest_payload(repo: str) -> dict | None:
             continue
 
         if isinstance(payload, dict):
+            if "content" in payload and "encoding" in payload:
+                try:
+                    raw = str(payload.get("content") or "")
+                    if str(payload.get("encoding") or "").lower() == "base64":
+                        decoded = base64.b64decode(raw).decode("utf-8")
+                        nested = json.loads(decoded)
+                        if isinstance(nested, dict):
+                            return nested
+                except Exception:
+                    continue
             return payload
 
     return None
@@ -303,7 +331,7 @@ def download_file(url: str, destination: Path) -> None:
     if not url:
         raise RuntimeError("URL de download inválida")
 
-    req = request.Request(url, headers={"User-Agent": "FRS-Mercado-AutoUpdate"}, method="GET")
+    req = request.Request(url, headers=_request_headers("application/octet-stream, */*"), method="GET")
     with request.urlopen(req, timeout=30) as resp:
         data = resp.read()
     if not data:

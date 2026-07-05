@@ -1,18 +1,24 @@
 import json
+import os
 import sys
-from pathlib import Path
 from urllib import request
 
 from auto_update import compare_versions, fetch_manifest_payload, normalize_version
 
 
 def _simular_download(download_url: str) -> int:
+    token = os.getenv("GITHUB_TOKEN", "").strip() or os.getenv("GH_TOKEN", "").strip()
+    headers = {
+        "User-Agent": "FRS-Mercado-UpdateFlowTest",
+        "Accept": "application/octet-stream",
+        "Range": "bytes=0-4095",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
     req = request.Request(
         download_url,
-        headers={
-            "User-Agent": "FRS-Mercado-UpdateFlowTest",
-            "Range": "bytes=0-4095",
-        },
+        headers=headers,
         method="GET",
     )
     with request.urlopen(req, timeout=20) as resp:
