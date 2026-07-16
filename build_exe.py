@@ -281,6 +281,43 @@ def _prepare_support_payload() -> None:
     _copy_if_exists(ROOT_DIR / "google-services.json", SUPPORT_DIR / "google-services.json")
     _copy_if_exists(ROOT_DIR / "checklist_homologacao.md", SUPPORT_DIR / "checklist_homologacao.md")
 
+    # ACBrMonitor (motor fiscal) para instalador all-in-one.
+    acbr_dir = SUPPORT_DIR / "acbr"
+    acbr_dir.mkdir(parents=True, exist_ok=True)
+    acbr_candidates = [
+        ROOT_DIR / "instala" / "ACBrMonitorPLUS-DEMO-1.4.0.467-x86-I.exe",
+        ROOT_DIR / "instala" / "ACBrMonitor.exe",
+        ROOT_DIR / "instala" / "ACBrMonitorPLUS.exe",
+    ]
+    acbr_found = None
+    for acbr in acbr_candidates:
+        if acbr.exists() and acbr.is_file():
+            acbr_found = acbr
+            break
+    if acbr_found is not None:
+        _copy_if_exists(acbr_found, acbr_dir / "ACBrMonitor_Installer.exe")
+        print(f"- ACBr incluído no payload: {acbr_found} -> {acbr_dir / 'ACBrMonitor_Installer.exe'}")
+    else:
+        print("[AVISO] Instalador do ACBr não encontrado para inclusão no setup all-in-one.")
+
+    # APK do app de celular embutido no instalador principal.
+    mobile_dir = SUPPORT_DIR / "mobile"
+    mobile_dir.mkdir(parents=True, exist_ok=True)
+    apk_candidates = [
+        ROOT_DIR / "mobile_app" / "build" / "apk" / "mercado.apk",
+        ROOT_DIR / "release_final" / "mercado.apk",
+    ]
+    apk_found = None
+    for apk in apk_candidates:
+        if apk.exists() and apk.is_file():
+            apk_found = apk
+            break
+    if apk_found is not None:
+        _copy_if_exists(apk_found, mobile_dir / "mercado.apk")
+        print(f"- APK incluído no payload: {apk_found} -> {mobile_dir / 'mercado.apk'}")
+    else:
+        print("[AVISO] mercado.apk não encontrado para inclusão no setup all-in-one.")
+
     # Banco principal vai para a pasta data (mesmo layout esperado em runtime).
     data_dir = SUPPORT_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -361,7 +398,7 @@ def main() -> None:
     print("- Pasta assets -> assets")
     print("- Runtime hook de log -> FRS_Mercado_runtime_error.log em dist/")
     print("- Coleta completa (quando instalado): customtkinter, PIL, reportlab, googleapiclient, google_auth_oauthlib, google.auth, httplib2, requests, bcrypt")
-    print("- Payload suporte (_build_support): credentials.json, google-services.json, checklist_homologacao.md, data/mercado.db")
+    print("- Payload suporte (_build_support): credentials.json, google-services.json, checklist_homologacao.md, data/mercado.db, acbr/ACBrMonitor_Installer.exe, mobile/mercado.apk")
     if (ROOT_DIR / "config").exists():
         print("- config/ -> config/")
 

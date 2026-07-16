@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime
 import customtkinter as ctk
 from tkinter import messagebox
+from urllib.parse import quote
 from database_manager import get_db_connection, get_db_path, obter_caminho_dados, registrar_log
 from modulo_config import carregar_configuracoes
 from updater import Updater
@@ -719,6 +720,7 @@ class AppPrincipal(ctk.CTk):
             ("👤 USUÁRIOS", "#e67e22", self.abrir_usuarios),
             ("⚙️ CONFIGS", "#7f8c8d", self.abrir_configuracoes),
             ("💰 TAXAS", "#8e44ad", self.abrir_financeiro),
+            ("📱 APP DE CELULAR", "#0b7285", self.abrir_fluxo_app_celular),
             ("⬆️ VERIFICAR ATUALIZAÇÕES", "#2c3e50", self.verificar_atualizacoes_manual),
         ]
 
@@ -818,6 +820,47 @@ class AppPrincipal(ctk.CTk):
     def _abrir_financeiro_impl(self):
         from modulo_financeiro import JanelaConfigTaxas
         return JanelaConfigTaxas(self, self.usuario_atual)
+
+    def _resolver_apk_embutido(self) -> Path | None:
+        candidatos = [
+            Path(sys.executable).resolve().parent / "mobile" / "mercado.apk" if getattr(sys, "frozen", False) else Path(__file__).resolve().parent / "mobile" / "mercado.apk",
+            Path(__file__).resolve().parent / "release_final" / "mercado.apk",
+            Path(__file__).resolve().parent / "mobile_app" / "build" / "apk" / "mercado.apk",
+        ]
+        for apk in candidatos:
+            if apk.exists() and apk.is_file():
+                return apk
+        return None
+
+    def abrir_fluxo_app_celular(self):
+        apk_path = self._resolver_apk_embutido()
+        if apk_path is None:
+            messagebox.showwarning(
+                "APK não encontrado",
+                "Não foi possível localizar o mercado.apk nesta instalação. Reinstale usando o setup completo all-in-one.",
+            )
+            return
+
+        pasta_apk = apk_path.parent
+        try:
+            os.startfile(str(pasta_apk))
+        except Exception as exc:
+            _log_debug("Falha ao abrir pasta do APK", exc)
+
+        msg = (
+            "APK local pronto para envio.\\n\\n"
+            f"Arquivo: {apk_path.name}\\n"
+            f"Pasta: {pasta_apk}\\n\\n"
+            "A pasta será aberta agora para anexar o arquivo no WhatsApp Desktop.\\n"
+            "Deseja também abrir o WhatsApp Web com mensagem pronta?"
+        )
+        abrir_web = messagebox.askyesno("APP de celular", msg)
+        if abrir_web:
+            texto = quote(
+                "Segue o APK oficial do FRS Mercado. "
+                "Anexe o arquivo mercado.apk que está na pasta aberta no seu computador."
+            )
+            webbrowser.open(f"https://wa.me/?text={texto}")
 
     def verificar_atualizacoes_manual(self):
         """Gatilho manual para checagem imediata de atualização no GitHub."""
