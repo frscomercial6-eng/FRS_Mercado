@@ -171,6 +171,11 @@ def init_db():
                 nome TEXT NOT NULL,
                 variacao TEXT,
                 ncm TEXT,
+                aliquota_icms REAL NOT NULL DEFAULT 0.0,
+                aliquota_pis REAL NOT NULL DEFAULT 0.0,
+                aliquota_cofins REAL NOT NULL DEFAULT 0.0,
+                aliquota_ibs REAL NOT NULL DEFAULT 0.0,
+                aliquota_cbs REAL NOT NULL DEFAULT 0.0,
                 preco_custo REAL NOT NULL,
                 margem_lucro REAL NOT NULL DEFAULT 0.0,
                 preco_venda REAL NOT NULL,
@@ -184,6 +189,18 @@ def init_db():
                 imagem_path TEXT
             )
         ''')
+        cursor.execute("PRAGMA table_info(produtos)")
+        produtos_cols = [row[1] for row in cursor.fetchall()]
+        if "aliquota_icms" not in produtos_cols:
+            cursor.execute("ALTER TABLE produtos ADD COLUMN aliquota_icms REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_pis" not in produtos_cols:
+            cursor.execute("ALTER TABLE produtos ADD COLUMN aliquota_pis REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_cofins" not in produtos_cols:
+            cursor.execute("ALTER TABLE produtos ADD COLUMN aliquota_cofins REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_ibs" not in produtos_cols:
+            cursor.execute("ALTER TABLE produtos ADD COLUMN aliquota_ibs REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_cbs" not in produtos_cols:
+            cursor.execute("ALTER TABLE produtos ADD COLUMN aliquota_cbs REAL NOT NULL DEFAULT 0.0")
 
         # Tabela de Usuários
         cursor.execute('''
@@ -282,6 +299,16 @@ def init_db():
             cursor.execute("ALTER TABLE vendas ADD COLUMN status_pedido TEXT NOT NULL DEFAULT 'APROVADO'")
         if "status_pagamento" not in vendas_cols:
             cursor.execute("ALTER TABLE vendas ADD COLUMN status_pagamento TEXT NOT NULL DEFAULT 'PAGO'")
+        if "valor_icms" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_icms NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_pis" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_pis NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_cofins" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_cofins NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_ibs" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_ibs NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_cbs" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_cbs NUMERIC NOT NULL DEFAULT 0.0")
 
         # Tabela de Orçamentos (Propostas Comerciais)
         cursor.execute('''
@@ -383,6 +410,16 @@ def init_db():
             cursor.execute("ALTER TABLE vendas_dia ADD COLUMN status_pedido TEXT NOT NULL DEFAULT 'APROVADO'")
         if "status_pagamento" not in vendas_dia_cols:
             cursor.execute("ALTER TABLE vendas_dia ADD COLUMN status_pagamento TEXT NOT NULL DEFAULT 'PAGO'")
+        if "valor_icms" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_icms NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_pis" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_pis NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_cofins" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_cofins NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_ibs" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_ibs NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_cbs" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_cbs NUMERIC NOT NULL DEFAULT 0.0")
 
         # Tabela de Licenciamento
         cursor.execute('''
@@ -421,12 +458,36 @@ def init_db():
         financeiro_cols = [row[1] for row in cursor.fetchall()]
         if "valor_impostos_retidos" not in financeiro_cols:
             cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_impostos_retidos NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_icms" not in financeiro_cols:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_icms NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_pis" not in financeiro_cols:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_pis NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_cofins" not in financeiro_cols:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_cofins NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_ibs" not in financeiro_cols:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_ibs NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_cbs" not in financeiro_cols:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_cbs NUMERIC NOT NULL DEFAULT 0.0")
 
         # Configuração de alíquotas de retenção por NCM (SPED/tributário)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS config_aliquotas_ncm (
                 ncm_prefixo TEXT PRIMARY KEY,
                 aliquota_percentual REAL NOT NULL,
+                descricao TEXT,
+                ativo INTEGER NOT NULL DEFAULT 1,
+                atualizado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS config_aliquotas_fiscais_ncm (
+                ncm_prefixo TEXT PRIMARY KEY,
+                aliquota_icms REAL NOT NULL DEFAULT 0.0,
+                aliquota_pis REAL NOT NULL DEFAULT 0.0,
+                aliquota_cofins REAL NOT NULL DEFAULT 0.0,
+                aliquota_ibs REAL NOT NULL DEFAULT 0.0,
+                aliquota_cbs REAL NOT NULL DEFAULT 0.0,
                 descricao TEXT,
                 ativo INTEGER NOT NULL DEFAULT 1,
                 atualizado_em DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -463,10 +524,45 @@ def init_db():
                 produto_id INTEGER NOT NULL,
                 quantidade INTEGER NOT NULL,
                 subtotal NUMERIC NOT NULL,
+                regime_tributario TEXT NOT NULL DEFAULT 'ATUAL',
+                aliquota_icms REAL NOT NULL DEFAULT 0.0,
+                aliquota_pis REAL NOT NULL DEFAULT 0.0,
+                aliquota_cofins REAL NOT NULL DEFAULT 0.0,
+                aliquota_ibs REAL NOT NULL DEFAULT 0.0,
+                aliquota_cbs REAL NOT NULL DEFAULT 0.0,
+                valor_icms REAL NOT NULL DEFAULT 0.0,
+                valor_pis REAL NOT NULL DEFAULT 0.0,
+                valor_cofins REAL NOT NULL DEFAULT 0.0,
+                valor_ibs REAL NOT NULL DEFAULT 0.0,
+                valor_cbs REAL NOT NULL DEFAULT 0.0,
                 FOREIGN KEY (venda_id) REFERENCES vendas (id),
                 FOREIGN KEY (produto_id) REFERENCES produtos (id)
             )
         ''')
+        cursor.execute("PRAGMA table_info(itens_venda)")
+        itens_venda_cols = [row[1] for row in cursor.fetchall()]
+        if "regime_tributario" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN regime_tributario TEXT NOT NULL DEFAULT 'ATUAL'")
+        if "aliquota_icms" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN aliquota_icms REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_pis" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN aliquota_pis REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_cofins" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN aliquota_cofins REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_ibs" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN aliquota_ibs REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_cbs" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN aliquota_cbs REAL NOT NULL DEFAULT 0.0")
+        if "valor_icms" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_icms REAL NOT NULL DEFAULT 0.0")
+        if "valor_pis" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_pis REAL NOT NULL DEFAULT 0.0")
+        if "valor_cofins" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_cofins REAL NOT NULL DEFAULT 0.0")
+        if "valor_ibs" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_ibs REAL NOT NULL DEFAULT 0.0")
+        if "valor_cbs" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_cbs REAL NOT NULL DEFAULT 0.0")
 
         # Tabela de Histórico da IA Mentora
         cursor.execute('''
@@ -484,6 +580,14 @@ def init_db():
         cursor.execute("INSERT OR IGNORE INTO config_fiscal (id, api_key, ambiente, webhook_token_hash) VALUES (1, '', 'HOMOLOGACAO', '')")
         cursor.execute(
             "INSERT OR IGNORE INTO config_aliquotas_ncm (ncm_prefixo, aliquota_percentual, descricao, ativo) VALUES ('*', 0.0, 'Aliquota padrao/fallback', 1)"
+        )
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO config_aliquotas_fiscais_ncm (
+                ncm_prefixo, aliquota_icms, aliquota_pis, aliquota_cofins, aliquota_ibs, aliquota_cbs, descricao, ativo
+            )
+            VALUES ('*', 0.0, 0.0, 0.0, 0.0, 0.0, 'Aliquotas fiscais padrao/fallback', 1)
+            """
         )
 
         conn.commit()

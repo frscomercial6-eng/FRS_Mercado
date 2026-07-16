@@ -5,13 +5,15 @@ import time
 import sqlite3
 import threading
 import traceback
+import webbrowser
 from pathlib import Path
 from datetime import datetime
 import customtkinter as ctk
 from tkinter import messagebox
 from database_manager import get_db_connection, get_db_path, obter_caminho_dados, registrar_log
 from modulo_config import carregar_configuracoes
-from auto_update import AutoUpdateManager
+from updater import Updater
+from system_monitor import SystemMonitor
 
 
 def _log_debug(contexto: str, erro: Exception | None = None) -> None:
@@ -48,7 +50,11 @@ class AppPrincipal(ctk.CTk):
         self._backup_em_execucao = False
         self._backup_executado_no_ciclo_ocioso = False
         self._monitor_ociosidade_ativo = False
-        self._auto_update_manager = None
+        self._updater = Updater(parent=self)
+        self._system_monitor = None
+        self._fiscal_alerta_em_exibicao = False
+        self._license_status = {"expired": False, "warning": False, "message": "Licença: Verificando...", "color": "#f1c40f", "renewal_url": ""}
+        self._license_block_alert_open = False
         self._resgatar_janela()
         
         # Define o protocolo para encerramento total do processo ao fechar a janela
@@ -217,8 +223,39 @@ class AppPrincipal(ctk.CTk):
         self.lbl_modulo_ativo.configure(text=f"Módulo selecionado: {modulo_nome}")
         self.lbl_modulo_hora.configure(text=f"Ação registrada às {agora}")
 
+    def _modulo_bloqueado_por_licenca(self, modulo_nome: str) -> bool:
+        if not bool(self._license_status.get("expired", False)):
+            return False
+        nome = str(modulo_nome or "").upper()
+        if nome == "PDV":
+            return True
+        return "FISCAL" in nome
+
+    def _exibir_bloqueio_licenca(self):
+        if self._license_block_alert_open:
+            return
+
+        self._license_block_alert_open = True
+        msg = (
+            "Licença expirada. Os módulos de Venda e Emissão Fiscal estão bloqueados até a renovação.\n\n"
+            "Deseja abrir o link de renovação agora?"
+        )
+        renewal_url = str(self._license_status.get("renewal_url") or "").strip()
+        try:
+            abrir = messagebox.askyesno("Licença Expirada", msg, parent=self)
+            if abrir and renewal_url:
+                webbrowser.open(renewal_url, new=2)
+        except Exception:
+            pass
+        finally:
+            self._license_block_alert_open = False
+
     def _abrir_modulo_seguro(self, modulo_nome, opener):
         """Abre módulo com proteção de foco e tratamento de exceções sem esconder a raiz."""
+        if self._modulo_bloqueado_por_licenca(modulo_nome):
+            self._exibir_bloqueio_licenca()
+            return
+
         self._atualizar_painel_navegacao(modulo_nome)
         self._resgatar_janela()
 
@@ -390,6 +427,11 @@ class AppPrincipal(ctk.CTk):
     def fechar_sistema(self):
         """Realiza um encerramento limpo e forçado do processo Python no Windows."""
         self._watchdog_janela_ativo = False
+        try:
+            if self._system_monitor is not None:
+                self._system_monitor.stop()
+        except Exception:
+            pass
         self.cancelar_loops()
         try:
             if self.winfo_exists():
@@ -440,7 +482,78 @@ class AppPrincipal(ctk.CTk):
         self.admin_cadastrado = self._verificar_admin_cadastrado()
         self._agendar_mentoria_ia()
         self.verificar_ia_loop()
+        self._iniciar_system_monitor()
         self._iniciar_auto_update_silencioso()
+
+    def _iniciar_system_monitor(self):
+        try:
+            if self._system_monitor is None:
+                self._system_monitor = SystemMonitor(
+                    on_status=self._on_system_status,
+                    interval_seconds=6,
+                )
+            self._system_monitor.start()
+        except Exception as e:
+            _log_debug("Falha ao iniciar monitor de sistema", e)
+
+    def _on_system_status(self, status):
+        if not self.winfo_exists():
+            return
+
+        def _apply():
+            if not self.winfo_exists():
+                return
+
+            self._license_status = {
+                "expired": bool(status.get("license_expired", False)),
+                "warning": bool(status.get("license_warning", False)),
+                "message": str(status.get("license_text") or "Licença: Indisponível"),
+                "color": str(status.get("license_color") or "#f1c40f"),
+                "renewal_url": str(status.get("renewal_url") or ""),
+            }
+
+            try:
+                self.lbl_status_licenca_sidebar.configure(
+                    text=self._license_status["message"],
+                    text_color=self._license_status["color"],
+                )
+            except Exception:
+                pass
+
+            try:
+                self.lbl_status_fiscal.configure(
+                    text=status.get("status_text", "Fiscal: Desativado"),
+                    text_color=status.get("status_color", "#2ecc71"),
+                )
+            except Exception:
+                pass
+
+            try:
+                self.lbl_status_header.configure(
+                    text=status.get("header_text", "Licença/Fiscal: Indisponível"),
+                    text_color=status.get("header_color", "#f1c40f"),
+                )
+                self.frame_navegacao.configure(border_color=status.get("header_color", "#f1c40f"))
+            except Exception:
+                pass
+
+            alerta = str(status.get("alerta") or "").strip()
+            if alerta and not self._fiscal_alerta_em_exibicao:
+                self._fiscal_alerta_em_exibicao = True
+                try:
+                    messagebox.showwarning("Status Fiscal", alerta)
+                except Exception:
+                    pass
+                finally:
+                    self._registrar_after(30000, self._liberar_alerta_fiscal)
+
+        try:
+            self.after(0, _apply)
+        except Exception:
+            pass
+
+    def _liberar_alerta_fiscal(self):
+        self._fiscal_alerta_em_exibicao = False
 
     def _iniciar_auto_update_silencioso(self):
         """Verifica atualização em background sem bloquear operação do caixa."""
@@ -449,14 +562,11 @@ class AppPrincipal(ctk.CTk):
             enabled = bool(config.get("auto_update_enabled", True))
             repo = str(config.get("auto_update_repo", "") or "").strip()
             remind_hours = int(config.get("auto_update_remind_hours", 24) or 24)
-
-            self._auto_update_manager = AutoUpdateManager(
-                app=self,
+            self._updater.start_silent_check(
                 repo=repo,
                 enabled=enabled,
                 remind_hours=remind_hours,
             )
-            self._auto_update_manager.start_silent_check()
         except Exception as e:
             _log_debug("Falha na inicialização do auto-update (ignorado)", e)
 
@@ -473,8 +583,26 @@ class AppPrincipal(ctk.CTk):
         
         ctk.CTkLabel(self.sidebar, text="MONITORAMENTO", font=("Roboto", 14, "bold"), text_color="gray").pack(pady=(20, 10))
 
+        self.lbl_status_fiscal = ctk.CTkLabel(
+            self.sidebar,
+            text="Fiscal: Verificando...",
+            font=("Roboto", 11, "bold"),
+            text_color="#f1c40f",
+        )
+        self.lbl_status_fiscal.pack(pady=(0, 6))
+
+        self.lbl_status_licenca_sidebar = ctk.CTkLabel(
+            self.sidebar,
+            text="Licença: Verificando...",
+            font=("Roboto", 10, "bold"),
+            text_color="#f1c40f",
+            wraplength=195,
+            justify="left",
+        )
+        self.lbl_status_licenca_sidebar.pack(pady=(0, 10), padx=8)
+
         # Card Vendas
-        self.card_vendas = ctk.CTkFrame(self.sidebar, width=200, height=190, corner_radius=15, fg_color="#1a1a1a")
+        self.card_vendas = ctk.CTkFrame(self.sidebar, width=200, height=300, corner_radius=15, fg_color="#1a1a1a")
         self.card_vendas.pack(padx=10, pady=10)
         self.card_vendas.pack_propagate(False)
         ctk.CTkLabel(self.card_vendas, text="Fluxo de Caixa (Hoje)", font=("Roboto", 11, "bold")).pack(pady=(8, 2))
@@ -500,6 +628,18 @@ class AppPrincipal(ctk.CTk):
         self.lbl_origem_app.pack(anchor="w", padx=10)
         self.lbl_origem_loja = ctk.CTkLabel(self.card_vendas, text="Loja Física: R$ 0,00", font=("Roboto", 9, "bold"), text_color="#b7d9ff")
         self.lbl_origem_loja.pack(anchor="w", padx=10)
+
+        ctk.CTkLabel(self.card_vendas, text="Tributos (Segregado)", font=("Roboto", 9, "bold"), text_color="#cccccc").pack(anchor="w", padx=10, pady=(8, 2))
+        self.lbl_tributo_icms = ctk.CTkLabel(self.card_vendas, text="ICMS: R$ 0,00", font=("Roboto", 9), text_color="#ffd166")
+        self.lbl_tributo_icms.pack(anchor="w", padx=10)
+        self.lbl_tributo_pis = ctk.CTkLabel(self.card_vendas, text="PIS: R$ 0,00", font=("Roboto", 9), text_color="#ffd166")
+        self.lbl_tributo_pis.pack(anchor="w", padx=10)
+        self.lbl_tributo_cofins = ctk.CTkLabel(self.card_vendas, text="COFINS: R$ 0,00", font=("Roboto", 9), text_color="#ffd166")
+        self.lbl_tributo_cofins.pack(anchor="w", padx=10)
+        self.lbl_tributo_ibs = ctk.CTkLabel(self.card_vendas, text="IBS: R$ 0,00", font=("Roboto", 9), text_color="#a9f0ff")
+        self.lbl_tributo_ibs.pack(anchor="w", padx=10)
+        self.lbl_tributo_cbs = ctk.CTkLabel(self.card_vendas, text="CBS: R$ 0,00", font=("Roboto", 9), text_color="#a9f0ff")
+        self.lbl_tributo_cbs.pack(anchor="w", padx=10)
 
         # Card Promoções
         self.card_promo = ctk.CTkFrame(self.sidebar, width=200, height=70, corner_radius=15, fg_color="#f1c40f")
@@ -534,7 +674,7 @@ class AppPrincipal(ctk.CTk):
 
         ctk.CTkLabel(self.main_container, text="MENU PRINCIPAL", font=("Roboto", 24, "bold")).pack(pady=30)
 
-        self.frame_navegacao = ctk.CTkFrame(self.main_container, fg_color="#111111")
+        self.frame_navegacao = ctk.CTkFrame(self.main_container, fg_color="#111111", border_width=1, border_color="#333333")
         self.frame_navegacao.pack(fill="x", padx=40, pady=(0, 10))
         self.lbl_modulo_ativo = ctk.CTkLabel(
             self.frame_navegacao,
@@ -549,6 +689,16 @@ class AppPrincipal(ctk.CTk):
             text_color="gray",
         )
         self.lbl_modulo_hora.pack(anchor="w", padx=14, pady=(2, 10))
+
+        self.lbl_status_header = ctk.CTkLabel(
+            self.frame_navegacao,
+            text="Licença/Fiscal: Verificando...",
+            font=("Roboto", 11, "bold"),
+            text_color="#f1c40f",
+            wraplength=700,
+            justify="left",
+        )
+        self.lbl_status_header.pack(anchor="w", padx=14, pady=(0, 10))
 
         # Grid Centralizado com Scroll
         self.scroll_menu = ctk.CTkScrollableFrame(self.main_container, fg_color="transparent")
@@ -672,17 +822,23 @@ class AppPrincipal(ctk.CTk):
     def verificar_atualizacoes_manual(self):
         """Gatilho manual para checagem imediata de atualização no GitHub."""
         try:
-            if self._auto_update_manager is None:
-                config = carregar_configuracoes()
-                repo = str(config.get("auto_update_repo", "") or "").strip()
-                remind_hours = int(config.get("auto_update_remind_hours", 24) or 24)
-                self._auto_update_manager = AutoUpdateManager(
-                    app=self,
-                    repo=repo,
-                    enabled=True,
-                    remind_hours=remind_hours,
-                )
-            self._auto_update_manager.force_check_now()
+            config = carregar_configuracoes()
+            repo = str(config.get("auto_update_repo", "") or "").strip()
+            if not repo:
+                messagebox.showwarning("Atualização", "Repositório de atualização não configurado.")
+                return
+
+            release = self._updater.checar_atualizacao(repo)
+            if release is None:
+                messagebox.showinfo("Atualização", "Você já está na versão mais recente.")
+                return
+
+            confirmar = messagebox.askyesno(
+                "Atualização disponível",
+                f"Nova versão encontrada: {release.version}. Deseja atualizar agora?",
+            )
+            if confirmar:
+                self._updater.aplicar_atualizacao(repo)
         except Exception as e:
             messagebox.showwarning("Atualização", f"Falha ao iniciar verificação manual: {e}")
 
@@ -726,6 +882,11 @@ class AppPrincipal(ctk.CTk):
             self.lbl_origem_ifood.configure(text=f"iFood: R$ {origem.get('IFOOD', 0.0):.2f}")
             self.lbl_origem_app.configure(text=f"App Próprio: R$ {origem.get('APP_PROPRIO', 0.0):.2f}")
             self.lbl_origem_loja.configure(text=f"Loja Física: R$ {origem.get('LOJA_FISICA', 0.0):.2f}")
+            self.lbl_tributo_icms.configure(text=f"ICMS: R$ {resumo.get('valor_icms', 0.0):.2f}")
+            self.lbl_tributo_pis.configure(text=f"PIS: R$ {resumo.get('valor_pis', 0.0):.2f}")
+            self.lbl_tributo_cofins.configure(text=f"COFINS: R$ {resumo.get('valor_cofins', 0.0):.2f}")
+            self.lbl_tributo_ibs.configure(text=f"IBS: R$ {resumo.get('valor_ibs', 0.0):.2f}")
+            self.lbl_tributo_cbs.configure(text=f"CBS: R$ {resumo.get('valor_cbs', 0.0):.2f}")
         except Exception as e:
             self.label_valor_bruto_dashboard.configure(text="R$ 0,00")
             self.label_valor_impostos_dashboard.configure(text="R$ 0,00")
@@ -733,6 +894,11 @@ class AppPrincipal(ctk.CTk):
             self.lbl_origem_ifood.configure(text="iFood: R$ 0,00")
             self.lbl_origem_app.configure(text="App Próprio: R$ 0,00")
             self.lbl_origem_loja.configure(text="Loja Física: R$ 0,00")
+            self.lbl_tributo_icms.configure(text="ICMS: R$ 0,00")
+            self.lbl_tributo_pis.configure(text="PIS: R$ 0,00")
+            self.lbl_tributo_cofins.configure(text="COFINS: R$ 0,00")
+            self.lbl_tributo_ibs.configure(text="IBS: R$ 0,00")
+            self.lbl_tributo_cbs.configure(text="CBS: R$ 0,00")
             print(f"[ERRO DASHBOARD] Falha ao obter total de vendas: {e}")
 
         # Atualiza contagem de promoções

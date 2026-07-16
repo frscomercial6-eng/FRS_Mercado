@@ -1,0 +1,84 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+def rootVersionFile = file('../../version.txt')
+def appVersion = System.getenv('OFP_APK_VERSION') ?: (rootVersionFile.exists() ? rootVersionFile.text.trim() : '1.0.28')
+def versionParts = appVersion.tokenize('.').collect { token -> token.isInteger() ? token.toInteger() : 0 }
+while (versionParts.size() < 3) {
+    versionParts << 0
+}
+def appVersionCode = (versionParts[0] * 10000) + (versionParts[1] * 100) + versionParts[2]
+def rootCfgText = file('../../config.cfg').exists() ? file('../../config.cfg').getText('UTF-8') : ''
+def cfgValue = { key, fallback ->
+    def pattern = java.util.regex.Pattern.compile('(?m)^\\s*' + java.util.regex.Pattern.quote(key) + '\\s*=\\s*(.+?)\\s*$')
+    def matcher = pattern.matcher(rootCfgText)
+    matcher.find() ? matcher.group(1).trim() : fallback
+}
+
+android {
+    namespace 'com.frs.mercado'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.frs.mercado"
+        minSdk 24
+        targetSdk 34
+        versionCode appVersionCode
+        versionName appVersion
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField "String", "WEB_APP_URL", "\"${System.getenv('OFP_WEB_APP_URL') ?: 'https://oficinapesca.app/app'}\""
+        buildConfigField "String", "DRIVE_TOKEN_FOLDER_ID", "\"${System.getenv('OFP_DRIVE_TOKEN_FOLDER_ID') ?: ''}\""
+        buildConfigField "String", "TOKEN_SECRET", "\"${System.getenv('OFP_TOKEN_SECRET') ?: (System.getenv('OFP_LICENCA_SECRET') ?: 'ALTERAR-EM-PRODUCAO')}\""
+        buildConfigField "String", "TOKEN_FILE_NAME", "\"${System.getenv('OFP_TOKEN_FILE_NAME') ?: 'acesso.token'}\""
+        buildConfigField "String", "FIREBASE_API_KEY", "\"${System.getenv('OFP_FIREBASE_API_KEY') ?: ''}\""
+        buildConfigField "String", "FIREBASE_AUTH_DOMAIN", "\"${System.getenv('OFP_FIREBASE_AUTH_DOMAIN') ?: ''}\""
+        buildConfigField "String", "FIREBASE_DATABASE_URL", "\"${System.getenv('OFP_FIREBASE_DATABASE_URL') ?: 'https://oficinapescasystem-default-rtdb.firebaseio.com/'}\""
+        buildConfigField "String", "FIREBASE_PROJECT_ID", "\"${System.getenv('OFP_FIREBASE_PROJECT_ID') ?: ''}\""
+        buildConfigField "String", "FIREBASE_STORAGE_BUCKET", "\"${System.getenv('OFP_FIREBASE_STORAGE_BUCKET') ?: ''}\""
+        buildConfigField "String", "FIREBASE_MESSAGING_SENDER_ID", "\"${System.getenv('OFP_FIREBASE_MESSAGING_SENDER_ID') ?: ''}\""
+        buildConfigField "String", "FIREBASE_APP_ID", "\"${System.getenv('OFP_FIREBASE_APP_ID') ?: ''}\""
+        buildConfigField "String", "FIREBASE_SYNC_CHANNEL", "\"${System.getenv('OFP_FIREBASE_SYNC_CHANNEL') ?: 'global'}\""
+        buildConfigField "String", "PLANO_LINK_PROMO", "\"${cfgValue('infinitepay_link_promo_lancamento', 'https://checkout.infinitepay.io/frsoficinadepesca/7O04uAqkj')}\""
+        buildConfigField "String", "PLANO_LINK_MENSAL", "\"${cfgValue('infinitepay_link_mensal', 'https://invoice.infinitepay.io/plans/frsoficinadepesca/7n8vLUjOnD')}\""
+        buildConfigField "String", "PLANO_LINK_TRIMESTRAL", "\"${cfgValue('infinitepay_link_trimestral', 'https://invoice.infinitepay.io/plans/frsoficinadepesca/2arDagkoGn')}\""
+        buildConfigField "String", "PLANO_LINK_SEMESTRAL", "\"${cfgValue('infinitepay_link_semestral', 'https://invoice.infinitepay.io/plans/frsoficinadepesca/1CYUQRLzf')}\""
+        buildConfigField "String", "PLANO_LINK_ANUAL", "\"${cfgValue('infinitepay_link_anual', 'https://invoice.infinitepay.io/plans/frsoficinadepesca/7l0Qu7fjmN')}\""
+        buildConfigField "boolean", "PROMO_ATIVA", "${cfgValue('promo_lancamento_ativo', '1') in ['1','true','True','TRUE','sim','SIM']}"
+        buildConfigField "String", "PROMO_NOME", "\"${cfgValue('promo_lancamento_nome', 'Oferta Lançamento - 2 meses')}\""
+        buildConfigField "String", "PROMO_VALOR", "\"${cfgValue('promo_lancamento_valor', '99.90')}\""
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'com.google.android.gms:play-services-auth:21.2.0'
+}

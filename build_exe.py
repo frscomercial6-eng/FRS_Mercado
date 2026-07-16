@@ -1,5 +1,6 @@
 import os
 import importlib.util
+import stat
 import shutil
 import subprocess
 import sys
@@ -217,10 +218,15 @@ def _build_pyinstaller_args(app_version: str) -> list[str]:
 
 def _clean_previous_builds() -> None:
     """Remove artefatos antigos para evitar empacotamento sujo."""
+    def _on_rm_error(func, path, _exc_info):
+        # Alguns artefatos do Flutter/Flet ficam read-only no Windows.
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
     for folder_name in ["build", "dist"]:
         target = ROOT_DIR / folder_name
         if target.exists() and target.is_dir():
-            shutil.rmtree(target)
+            shutil.rmtree(target, onerror=_on_rm_error)
             print(f"Pasta removida: {target}")
 
 

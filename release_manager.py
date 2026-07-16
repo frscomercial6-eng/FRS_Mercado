@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 from datetime import datetime
@@ -6,12 +7,14 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
 VERSION_FILE = ROOT_DIR / "version.txt"
+VERSION_JSON_FILE = ROOT_DIR / "version.json"
 CHANGELOG_FILE = ROOT_DIR / "CHANGELOG.md"
 EULA_TEMPLATE = ROOT_DIR / "EULA.template.txt"
 EULA_OUTPUT = ROOT_DIR / "EULA.txt"
 CONTRATO_TEMPLATE = ROOT_DIR / "contrato_template.md"
 CONTRATO_OUTPUT = ROOT_DIR / "Contrato_FRS_Atual.md"
 RELEASE_INFO_FILE = ROOT_DIR / "release_info.py"
+MOBILE_PYPROJECT_FILE = ROOT_DIR / "mobile_app" / "pyproject.toml"
 
 
 def read_version() -> str:
@@ -126,6 +129,32 @@ def _append_changelog(version: str, date_str: str) -> None:
         f.write("- Release automatizada gerada pelo Mestre de Release.\n\n")
 
 
+def _sync_version_manifest(version: str) -> None:
+    repo = _infer_github_repo() or "frscomercial6-eng/FRS_Mercado"
+    payload = {
+        "latest_version": version,
+        "download_url": f"https://github.com/{repo}/releases/latest/download/FRS_Mercado_Setup_{version}.exe",
+        "auto_update": True,
+    }
+    VERSION_JSON_FILE.write_text(f"{json.dumps(payload, indent=2, ensure_ascii=False)}\n", encoding="utf-8")
+
+
+def _sync_mobile_pyproject(version: str) -> None:
+    if not MOBILE_PYPROJECT_FILE.exists():
+        return
+
+    content = MOBILE_PYPROJECT_FILE.read_text(encoding="utf-8")
+    updated, count = re.subn(
+        r'(?m)^version\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+"\s*$',
+        f'version = "{version}"',
+        content,
+        count=1,
+    )
+    if count == 0:
+        raise RuntimeError("Não foi possível sincronizar versão no mobile_app/pyproject.toml")
+    MOBILE_PYPROJECT_FILE.write_text(updated, encoding="utf-8")
+
+
 def prepare_release_artifacts() -> str:
     version = read_version()
     date_str = _today_br()
@@ -140,6 +169,8 @@ def prepare_release_artifacts() -> str:
     _render_template(EULA_TEMPLATE, EULA_OUTPUT, replacements)
     _render_template(CONTRATO_TEMPLATE, CONTRATO_OUTPUT, replacements)
     _write_release_info(version, date_str)
+    _sync_version_manifest(version)
+    _sync_mobile_pyproject(version)
     _append_changelog(version, date_str)
 
     return version

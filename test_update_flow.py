@@ -3,7 +3,7 @@ import os
 import sys
 from urllib import request
 
-from auto_update import compare_versions, fetch_manifest_payload, normalize_version
+from updater import compare_versions, fetch_manifest_payload, normalize_version
 
 
 def _simular_download(download_url: str) -> int:

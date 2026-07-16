@@ -40,6 +40,9 @@ _build_support/credentials.json
 _build_support/google-services.json
 portable_build/credentials.json
 portable_build/google-services.json
+firebase-admin-key.json
+*firebase-adminsdk*.json
+*firebase-admin-key*.json
 
 # Local config state (machine/user specific)
 update_state.json

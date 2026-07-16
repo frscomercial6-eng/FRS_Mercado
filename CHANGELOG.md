@@ -26,3 +26,6 @@
 - Dashboard atualizado com visão de origem de lucro por canal no dia.
 - Menu principal com ação `Verificar Atualizações` para consulta manual imediata ao GitHub e feedback quando já está na versão mais recente.
 
+## 1.0.4 - 16/07/2026
+- Release automatizada gerada pelo Mestre de Release.
+

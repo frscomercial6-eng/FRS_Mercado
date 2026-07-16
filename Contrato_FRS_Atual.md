@@ -2,7 +2,7 @@
 
 Sistema: FRS Mercado
 Versao Atual: 1.0.4
-Data de Vigencia: 05/07/2026
+Data de Vigencia: 16/07/2026
 
 ## 1. Objeto
 Este contrato regula o uso do software FRS Mercado pelo cliente licenciado.

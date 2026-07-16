@@ -3,50 +3,34 @@ import os
 import queue
 import sqlite3
 import ctypes
+import shutil
 from ctypes import wintypes
 from datetime import datetime
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 import customtkinter as ctk
 from PIL import Image
 
 import modulo_financeiro
+from calculadora_tributaria import CalculadoraTributaria
 from database_manager import get_db_connection, obter_caminho_dados, registrar_log
 from modulo_config import carregar_configuracoes, obter_limite_sangria_preventiva
-from modulo_fiscal import ModuloExportacaoFiscal
+from modulo_fiscal import ModuloExportacaoFiscal, FiscalManager
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
 from webhook_delivery import iniciar_servidor_webhook
 
 
 def calcular_impostos_liquidos(valor_venda, ncm):
-    """Calcula imposto retido e valor líquido da venda com base no NCM."""
-    try:
-        valor = float(valor_venda or 0.0)
-    except Exception:
-        valor = 0.0
-
-    if valor <= 0:
-        return {"aliquota": 0.0, "valor_imposto": 0.0, "valor_liquido": 0.0}
-
-    try:
-        from modulo_financeiro import obter_aliquota_por_ncm
-
-        aliquota = float(obter_aliquota_por_ncm(ncm) or 0.0)
-    except Exception:
-        aliquota = 0.0
-
-    if aliquota < 0:
-        aliquota = 0.0
-
-    valor_imposto = round(valor * (aliquota / 100.0), 2)
-    valor_liquido = round(valor - valor_imposto, 2)
-    if valor_liquido < 0:
-        valor_liquido = 0.0
-
+    """Calcula imposto por NCM respeitando transição para IVA Dual a partir de 2027."""
+    calc = CalculadoraTributaria()
+    resultado = calc.calcular_impostos(valor_venda, datetime.now().date(), ncm=ncm)
     return {
-        "aliquota": aliquota,
-        "valor_imposto": valor_imposto,
-        "valor_liquido": valor_liquido,
+        "aliquota": float(resultado.get("aliquota", 0.0)),
+        "valor_imposto": float(resultado.get("valor_imposto", 0.0)),
+        "valor_liquido": float(resultado.get("valor_liquido", 0.0)),
+        "regime": resultado.get("regime", "ATUAL"),
+        "aliquotas": resultado.get("aliquotas", {}),
+        "valores": resultado.get("valores", {}),
     }
 
 
@@ -58,6 +42,7 @@ class ModuloPDV(ctk.CTkToplevel):
 
         self.caixa_id = None
         self.fiscal = ModuloExportacaoFiscal()
+        self.fiscal_manager = FiscalManager()
         self.config = carregar_configuracoes()
         self.itens_carrinho = []
         self.item_selecionado_idx = None
@@ -65,10 +50,12 @@ class ModuloPDV(ctk.CTkToplevel):
         self.limite_caixa_atual = obter_limite_sangria_preventiva()
         self.excesso_caixa_atual = 0.0
         self.fila_pedidos_delivery = queue.Queue()
+        self.calculadora_tributaria = CalculadoraTributaria()
         self.modal_abertura = None
         self._id_after_verificacao_caixa = None
         self.forma_pagamento_selecionada = "DINHEIRO"
         self.clientes_orcamento_map = {}
+        self._cache_xml_por_ean = {}
 
         if master is not None and not getattr(master, "usuario_atual", None):
             self.destroy()
@@ -803,11 +790,11 @@ class ModuloPDV(ctk.CTkToplevel):
         qtd_item = qtd_digitada if qtd_texto else self.multiplicador_atual
 
         if entrada.isdigit():
-            produto = self.buscar_produto_venda(entrada)
+            produto = self.buscar_produto_por_ean(entrada)
             if not produto:
                 produtos = self.buscar_produtos_para_selecao(entrada)
                 if not produtos:
-                    self._set_status(f"Produto {entrada} não encontrado.", "#ff6666")
+                    self._tratar_produto_nao_cadastrado(entrada)
                     self.multiplicador_atual = 1
                     self.ent_cod_barras.configure(placeholder_text="Código ou Nome do Produto (Enter para adicionar)")
                     return
@@ -983,16 +970,7 @@ class ModuloPDV(ctk.CTkToplevel):
             self._set_status(f"Item selecionado: {item['nome']}", "#f1c40f")
 
         barcode = item.get("barcode", "default")
-        img_folders = [os.path.join(os.getcwd(), "assets", "produtos"), obter_caminho_dados("assets", "produtos")]
-        caminho_img = None
-        for pasta in img_folders:
-            for ext in [".jpg", ".png", ".jpeg"]:
-                p = os.path.join(pasta, f"{barcode}{ext}")
-                if os.path.exists(p):
-                    caminho_img = p
-                    break
-            if caminho_img:
-                break
+        caminho_img = self.buscar_imagem_produto(barcode)
 
         widgets = [
             ctk.CTkLabel(row, text=str(item["id"]), width=130),
@@ -1072,6 +1050,332 @@ class ModuloPDV(ctk.CTkToplevel):
         if p and p[5] and p[6] and p[5] <= hoje <= p[6]:
             registrar_log(None, "PDV", "Info", f"Preço promocional aplicado: {p[2]}")
         return p
+
+    def buscar_produto_por_ean(self, codigo_ean):
+        """Busca rápida por EAN (somente dígitos)."""
+        ean = "".join(ch for ch in str(codigo_ean or "").strip() if ch.isdigit())
+        if not ean:
+            return None
+        return self.buscar_produto_venda(ean)
+
+    def buscar_imagem_produto(self, ean):
+        ean_txt = str(ean or "").strip()
+        if not ean_txt:
+            return None
+
+        pastas = [
+            os.path.join(os.getcwd(), "assets", "produtos"),
+            obter_caminho_dados("assets", "produtos"),
+        ]
+        for pasta in pastas:
+            for ext in [".jpg", ".jpeg", ".png"]:
+                caminho = os.path.join(pasta, f"{ean_txt}{ext}")
+                if os.path.exists(caminho):
+                    return caminho
+        return None
+
+    def _salvar_imagem_produto_por_ean(self, origem_imagem, ean):
+        if not origem_imagem or not os.path.exists(origem_imagem):
+            return ""
+
+        pasta_destino = os.path.join(os.getcwd(), "assets", "produtos")
+        os.makedirs(pasta_destino, exist_ok=True)
+        destino = os.path.join(pasta_destino, f"{ean}.jpg")
+
+        try:
+            img = Image.open(origem_imagem)
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            img.save(destino, format="JPEG", quality=92)
+            return destino
+        except Exception:
+            try:
+                shutil.copy2(origem_imagem, destino)
+                return destino
+            except Exception:
+                return ""
+
+    def _normalizar_path_drop(self, valor):
+        txt = str(valor or "").strip()
+        if not txt:
+            return ""
+        if txt.startswith("{") and txt.endswith("}"):
+            txt = txt[1:-1]
+        return txt.strip().strip('"')
+
+    def _habilitar_tkdnd_widget(self, widget, callback_drop):
+        """
+        Habilita DnD explícito no Windows via tkinterdnd2 (preferencial)
+        ou via package tkdnd quando disponível no runtime.
+        """
+        if os.name != "nt":
+            return False
+
+        dnd_files_token = "DND_Files"
+        try:
+            import importlib
+
+            tkdnd_mod = importlib.import_module("tkinterdnd2")
+            dnd_files_token = getattr(tkdnd_mod, "DND_FILES", "DND_Files")
+        except Exception:
+            dnd_files_token = "DND_Files"
+
+        # Caminho preferencial: métodos injetados por tkinterdnd2.
+        try:
+            if hasattr(widget, "drop_target_register") and hasattr(widget, "dnd_bind"):
+                widget.drop_target_register(dnd_files_token)
+                widget.dnd_bind("<<Drop>>", callback_drop)
+                return True
+        except Exception:
+            pass
+
+        # Fallback: bind direto no Tk com package tkdnd.
+        try:
+            widget.tk.call("package", "require", "tkdnd")
+            widget.tk.call("tkdnd::drop_target", "register", widget._w, dnd_files_token)
+
+            def _bridge_drop(data):
+                evt = type("DropEvt", (), {"data": data})()
+                callback_drop(evt)
+                return "break"
+
+            cmd = widget.register(_bridge_drop)
+            widget.tk.call("bind", widget._w, "<<Drop:DND_Files>>", f"{cmd} %D")
+            widget.tk.call("bind", widget._w, "<<Drop>>", f"{cmd} %D")
+            return True
+        except Exception:
+            return False
+
+    def _listar_xml_candidatos(self):
+        pastas = [
+            os.path.join(os.getcwd(), "fiscal_in"),
+            os.path.join(os.getcwd(), "exportacao_fiscal"),
+            obter_caminho_dados("fiscal_in"),
+            obter_caminho_dados("exportacao_fiscal"),
+        ]
+        candidatos = []
+        vistos = set()
+
+        for pasta in pastas:
+            try:
+                if not os.path.isdir(pasta):
+                    continue
+                for nome in os.listdir(pasta):
+                    if not nome.lower().endswith(".xml"):
+                        continue
+                    caminho = os.path.abspath(os.path.join(pasta, nome))
+                    if caminho in vistos:
+                        continue
+                    vistos.add(caminho)
+                    candidatos.append(caminho)
+            except Exception:
+                continue
+
+        candidatos.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return candidatos[:25]
+
+    def _buscar_dados_cache_xml_por_ean(self, ean):
+        ean_txt = str(ean or "").strip()
+        if not ean_txt:
+            return None
+
+        if ean_txt in self._cache_xml_por_ean:
+            return self._cache_xml_por_ean.get(ean_txt)
+
+        for xml_path in self._listar_xml_candidatos():
+            try:
+                dados_xml = self.fiscal_manager.processar_xml_entrada(xml_path)
+                for item in dados_xml.get("itens", []):
+                    item_ean = str(item.get("ean") or "").strip()
+                    if not item_ean:
+                        continue
+                    self._cache_xml_por_ean[item_ean] = item
+            except Exception:
+                continue
+
+            if ean_txt in self._cache_xml_por_ean:
+                return self._cache_xml_por_ean.get(ean_txt)
+
+        return None
+
+    def _abrir_modal_cadastro_rapido_produto(self, ean):
+        dados_xml = self._buscar_dados_cache_xml_por_ean(ean) or {}
+        imagem_existente = self.buscar_imagem_produto(ean)
+
+        modal = ctk.CTkToplevel(self)
+        modal.title("Cadastro Rápido de Produto")
+        modal.geometry("560x620")
+        modal.transient(self)
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text="Produto não cadastrado", font=("Arial", 18, "bold"), text_color="#ff6666").pack(pady=(12, 6))
+        ctk.CTkLabel(modal, text="Finalize o cadastro para continuar a venda.", font=("Arial", 11)).pack(pady=(0, 10))
+
+        form = ctk.CTkFrame(modal)
+        form.pack(fill="both", expand=True, padx=14, pady=10)
+
+        ctk.CTkLabel(form, text="Código de Barras (EAN):").pack(anchor="w", padx=12, pady=(12, 2))
+        entry_ean = ctk.CTkEntry(form)
+        entry_ean.pack(fill="x", padx=12)
+        entry_ean.insert(0, str(ean))
+
+        ctk.CTkLabel(form, text="Nome do Produto:").pack(anchor="w", padx=12, pady=(10, 2))
+        entry_nome = ctk.CTkEntry(form)
+        entry_nome.pack(fill="x", padx=12)
+        entry_nome.insert(0, str(dados_xml.get("descricao") or f"Produto {ean}"))
+
+        ctk.CTkLabel(form, text="NCM:").pack(anchor="w", padx=12, pady=(10, 2))
+        entry_ncm = ctk.CTkEntry(form)
+        entry_ncm.pack(fill="x", padx=12)
+        entry_ncm.insert(0, str(dados_xml.get("ncm") or ""))
+
+        preco_sugerido = float(dados_xml.get("preco") or 0.0)
+        ctk.CTkLabel(form, text="Preço de Custo:").pack(anchor="w", padx=12, pady=(10, 2))
+        entry_custo = ctk.CTkEntry(form)
+        entry_custo.pack(fill="x", padx=12)
+        entry_custo.insert(0, f"{preco_sugerido:.2f}" if preco_sugerido > 0 else "0,00")
+        aplicar_padrao_entrada_numerica(entry_custo, inteiro=False, casas_decimais=2)
+
+        ctk.CTkLabel(form, text="Margem (%):").pack(anchor="w", padx=12, pady=(10, 2))
+        entry_margem = ctk.CTkEntry(form)
+        entry_margem.pack(fill="x", padx=12)
+        entry_margem.insert(0, "30")
+        aplicar_padrao_entrada_numerica(entry_margem, inteiro=False, casas_decimais=2)
+
+        ctk.CTkLabel(form, text="Preço de Venda:").pack(anchor="w", padx=12, pady=(10, 2))
+        entry_preco = ctk.CTkEntry(form)
+        entry_preco.pack(fill="x", padx=12)
+        entry_preco.insert(0, f"{preco_sugerido:.2f}" if preco_sugerido > 0 else "0,00")
+        aplicar_padrao_entrada_numerica(entry_preco, inteiro=False, casas_decimais=2)
+
+        ctk.CTkLabel(form, text="Estoque Inicial:").pack(anchor="w", padx=12, pady=(10, 2))
+        entry_qtd = ctk.CTkEntry(form)
+        entry_qtd.pack(fill="x", padx=12)
+        entry_qtd.insert(0, "0")
+        aplicar_padrao_entrada_numerica(entry_qtd, inteiro=True)
+
+        img_state = {"path": imagem_existente or ""}
+        drop_frame = ctk.CTkFrame(form, fg_color="#1e1e1e")
+        drop_frame.pack(fill="x", padx=12, pady=(14, 8))
+        lbl_img = ctk.CTkLabel(
+            drop_frame,
+            text=(
+                f"Imagem encontrada: {os.path.basename(imagem_existente)}"
+                if imagem_existente
+                else "Arraste uma imagem aqui ou clique para selecionar"
+            ),
+            text_color="#d9d9d9",
+        )
+        lbl_img.pack(pady=12)
+
+        def selecionar_imagem_manual(_event=None):
+            caminho = filedialog.askopenfilename(filetypes=[("Imagens", "*.jpg *.jpeg *.png")])
+            if not caminho:
+                return
+            img_state["path"] = caminho
+            lbl_img.configure(text=f"Imagem selecionada: {os.path.basename(caminho)}", text_color="#2ecc71")
+
+        def processar_drop(event):
+            caminho = self._normalizar_path_drop(getattr(event, "data", ""))
+            if caminho and os.path.exists(caminho):
+                img_state["path"] = caminho
+                lbl_img.configure(text=f"Imagem arrastada: {os.path.basename(caminho)}", text_color="#2ecc71")
+
+        drop_frame.bind("<Button-1>", selecionar_imagem_manual)
+        lbl_img.bind("<Button-1>", selecionar_imagem_manual)
+        dnd_ok = False
+        dnd_ok = self._habilitar_tkdnd_widget(drop_frame, processar_drop) or dnd_ok
+        dnd_ok = self._habilitar_tkdnd_widget(lbl_img, processar_drop) or dnd_ok
+        if not dnd_ok:
+            try:
+                drop_frame.bind("<<Drop>>", processar_drop)
+                lbl_img.bind("<<Drop>>", processar_drop)
+                dnd_ok = True
+            except Exception:
+                dnd_ok = False
+        if not dnd_ok:
+            lbl_img.configure(text="Clique para selecionar imagem (drag-and-drop indisponível neste ambiente)")
+
+        def salvar_cadastro():
+            try:
+                ean_salvar = "".join(ch for ch in entry_ean.get().strip() if ch.isdigit())
+                if not ean_salvar:
+                    raise ValueError("Código de barras inválido.")
+
+                nome = entry_nome.get().strip()
+                if not nome:
+                    raise ValueError("Informe o nome do produto.")
+
+                preco_custo = parse_numero(entry_custo.get(), "Preço de custo", permitir_vazio=True, default=0.0, minimo=0)
+                margem = parse_numero(entry_margem.get(), "Margem", permitir_vazio=True, default=0.0, minimo=0)
+                preco_venda = parse_numero(entry_preco.get(), "Preço de venda", permitir_vazio=True, default=0.0, minimo=0)
+                qtd = parse_numero(entry_qtd.get(), "Quantidade", permitir_vazio=True, default=0, inteiro=True, minimo=0)
+
+                ncm = entry_ncm.get().strip()
+                imagem_final = self._salvar_imagem_produto_por_ean(img_state.get("path", ""), ean_salvar)
+
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        INSERT INTO produtos (
+                            codigo_barras, nome, variacao, ncm, preco_custo, margem_lucro, preco_venda,
+                            quantidade_atual, quantidade_minima, validade, imagem_path
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ean_salvar,
+                            nome,
+                            "UN",
+                            ncm,
+                            float(preco_custo),
+                            float(margem),
+                            float(preco_venda),
+                            int(qtd),
+                            0,
+                            "",
+                            imagem_final,
+                        ),
+                    )
+
+                try:
+                    modal.grab_release()
+                except Exception:
+                    pass
+                modal.destroy()
+
+                produto = self.buscar_produto_por_ean(ean_salvar)
+                if produto:
+                    self._adicionar_item_produto(produto, 1)
+                    self._set_status(f"Produto {nome} cadastrado e adicionado à venda.", "#2ecc71")
+                    registrar_log(None, "PDV Cadastro Rápido", "Sucesso", f"Produto EAN {ean_salvar} cadastrado no PDV.")
+            except sqlite3.IntegrityError:
+                messagebox.showwarning("Cadastro", "Este EAN já está cadastrado no sistema.")
+            except Exception as e:
+                messagebox.showerror("Cadastro", f"Falha ao cadastrar produto: {e}")
+
+        footer = ctk.CTkFrame(form, fg_color="transparent")
+        footer.pack(fill="x", padx=12, pady=(8, 12))
+        ctk.CTkButton(footer, text="Salvar e Adicionar", fg_color="#27ae60", command=salvar_cadastro).pack(side="left", padx=(0, 8))
+
+        def fechar_modal():
+            try:
+                modal.grab_release()
+            except Exception:
+                pass
+            modal.destroy()
+
+        ctk.CTkButton(footer, text="Cancelar", fg_color="#555555", command=fechar_modal).pack(side="left")
+        modal.protocol("WM_DELETE_WINDOW", fechar_modal)
+
+    def _tratar_produto_nao_cadastrado(self, ean):
+        self._set_status("Produto não cadastrado.", "#ff6666")
+        try:
+            messagebox.showwarning("Produto não cadastrado", f"EAN {ean} não cadastrado. Abra o cadastro rápido.")
+        except Exception:
+            pass
+        self._abrir_modal_cadastro_rapido_produto(ean)
 
     def buscar_produtos_por_nome(self, termo):
         try:
@@ -1414,6 +1718,51 @@ class ModuloPDV(ctk.CTkToplevel):
             self._set_status(f"Erro ao exportar JSON fiscal: {e}", "#ff6666")
             return False
 
+    def _gerar_comando_nfce_acbr(self, venda_id, forma_pgto, itens):
+        """
+        Monta comando completo de NFC-e para o ACBrMonitor com layout por item.
+        """
+        return self.fiscal_manager.gerar_comando_nfce(venda_id, forma_pgto, itens)
+
+    def _enviar_comando_nfce(self, venda_id, forma_pgto, itens):
+        if not hasattr(self, "fiscal_manager") or self.fiscal_manager is None:
+            return False
+
+        comando = self._gerar_comando_nfce_acbr(venda_id, forma_pgto, itens)
+
+        try:
+            acbr_ativo = self.fiscal_manager.iniciar_acbr()
+            if not acbr_ativo:
+                registrar_log(
+                    None,
+                    "PDV Fiscal",
+                    "Aviso",
+                    "ACBrMonitor nao identificado em execucao. Comando NFC-e sera mantido para tentativa posterior.",
+                )
+
+            resposta = self.fiscal_manager.enviar_comando(comando)
+            analise = self.fiscal_manager.interpretar_retorno(resposta)
+            if not analise.get("sucesso"):
+                mensagem_erro = analise.get("mensagem") or "Falha desconhecida no ACBrMonitor."
+                self._set_status(f"Erro na emissão: {mensagem_erro}", "#ff6666")
+                try:
+                    messagebox.showerror("Erro Fiscal", f"Erro na emissão: {mensagem_erro}")
+                except Exception:
+                    pass
+                registrar_log(None, "PDV Fiscal", "Falha", f"Erro na emissão: {mensagem_erro}")
+                return False
+
+            registrar_log(None, "PDV Fiscal", "Sucesso", f"Comando NFC-e enviado. Retorno: {resposta[:200]}")
+            return True
+        except Exception as e:
+            self._set_status(f"Erro na emissão: {e}", "#ff6666")
+            try:
+                messagebox.showerror("Erro Fiscal", f"Erro na emissão: {e}")
+            except Exception:
+                pass
+            registrar_log(None, "PDV Fiscal", "Falha", f"Erro ao enviar comando NFC-e: {e}")
+            return False
+
     def _atualizar_status_fiscal_ui(self, status, mensagem):
         def update():
             if not self.winfo_exists():
@@ -1444,14 +1793,49 @@ class ModuloPDV(ctk.CTkToplevel):
 
         valor_bruto = sum(i["quantidade"] * i["preco"] for i in self.itens_carrinho)
         valor_impostos = 0.0
+        total_icms = 0.0
+        total_pis = 0.0
+        total_cofins = 0.0
+        total_ibs = 0.0
+        total_cbs = 0.0
+        regime_venda = "ATUAL"
         for item in self.itens_carrinho:
-            resultado_impostos = calcular_impostos_liquidos(item.get("total", 0.0), item.get("ncm", ""))
+            aliquotas_item = {
+                "aliquota_icms": item.get("aliquota_icms", 0.0),
+                "aliquota_pis": item.get("aliquota_pis", 0.0),
+                "aliquota_cofins": item.get("aliquota_cofins", 0.0),
+                "aliquota_ibs": item.get("aliquota_ibs", 0.0),
+                "aliquota_cbs": item.get("aliquota_cbs", 0.0),
+            }
+            resultado_impostos = self.calculadora_tributaria.calcular_impostos(
+                item.get("total", 0.0),
+                datetime.now().date(),
+                ncm=item.get("ncm", ""),
+                aliquotas_produto=aliquotas_item,
+            )
             item["aliquota_imposto"] = resultado_impostos["aliquota"]
             item["valor_imposto"] = resultado_impostos["valor_imposto"]
             item["valor_liquido"] = resultado_impostos["valor_liquido"]
+            item["regime_tributario"] = resultado_impostos.get("regime", "ATUAL")
+            item["aliquotas"] = resultado_impostos.get("aliquotas", {})
+            item["valores_impostos"] = resultado_impostos.get("valores", {})
+
+            valores_item = item["valores_impostos"]
+            total_icms += float(valores_item.get("icms", 0.0) or 0.0)
+            total_pis += float(valores_item.get("pis", 0.0) or 0.0)
+            total_cofins += float(valores_item.get("cofins", 0.0) or 0.0)
+            total_ibs += float(valores_item.get("ibs", 0.0) or 0.0)
+            total_cbs += float(valores_item.get("cbs", 0.0) or 0.0)
+            if item["regime_tributario"] == "IVA_DUAL":
+                regime_venda = "IVA_DUAL"
             valor_impostos += resultado_impostos["valor_imposto"]
 
         valor_impostos = round(valor_impostos, 2)
+        total_icms = round(total_icms, 2)
+        total_pis = round(total_pis, 2)
+        total_cofins = round(total_cofins, 2)
+        total_ibs = round(total_ibs, 2)
+        total_cbs = round(total_cbs, 2)
         taxas = modulo_financeiro.obter_taxas()
         valor_liquido = round(valor_bruto - valor_impostos, 2)
         taxa_aplicada = 0.0
@@ -1469,9 +1853,10 @@ class ModuloPDV(ctk.CTkToplevel):
                     """
                     INSERT INTO vendas (
                         valor_total, valor_impostos_retidos, valor_liquido,
-                        origem, status_pedido, status_pagamento, forma_pagamento
+                        origem, status_pedido, status_pagamento, forma_pagamento,
+                        valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         valor_bruto,
@@ -1481,6 +1866,11 @@ class ModuloPDV(ctk.CTkToplevel):
                         str(status_pedido or "APROVADO").upper(),
                         str(status_pagamento or "PAGO").upper(),
                         forma_pgto,
+                        total_icms,
+                        total_pis,
+                        total_cofins,
+                        total_ibs,
+                        total_cbs,
                     ),
                 )
                 venda_id = cursor.lastrowid
@@ -1488,9 +1878,10 @@ class ModuloPDV(ctk.CTkToplevel):
                     """
                     INSERT INTO vendas_dia (
                         valor_total, valor_impostos_retidos, valor_liquido,
-                        origem, status_pedido, status_pagamento, forma_pagamento
+                        origem, status_pedido, status_pagamento, forma_pagamento,
+                        valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         valor_bruto,
@@ -1500,6 +1891,11 @@ class ModuloPDV(ctk.CTkToplevel):
                         str(status_pedido or "APROVADO").upper(),
                         str(status_pagamento or "PAGO").upper(),
                         forma_pgto,
+                        total_icms,
+                        total_pis,
+                        total_cofins,
+                        total_ibs,
+                        total_cbs,
                     ),
                 )
 
@@ -1510,6 +1906,14 @@ class ModuloPDV(ctk.CTkToplevel):
                     VALUES (?, 'Entrada', ?, ?, ?, ?)
                     """,
                     (valor_liquido, valor_bruto, valor_impostos, taxa_aplicada, desc),
+                )
+                cursor.execute(
+                    """
+                    UPDATE financeiro
+                    SET valor_icms = ?, valor_pis = ?, valor_cofins = ?, valor_ibs = ?, valor_cbs = ?
+                    WHERE id = last_insert_rowid()
+                    """,
+                    (total_icms, total_pis, total_cofins, total_ibs, total_cbs),
                 )
 
                 for item in self.itens_carrinho:
@@ -1524,10 +1928,31 @@ class ModuloPDV(ctk.CTkToplevel):
 
                     cursor.execute(
                         """
-                        INSERT INTO itens_venda (venda_id, produto_id, quantidade, subtotal)
-                        VALUES (?, ?, ?, ?)
+                        INSERT INTO itens_venda (
+                            venda_id, produto_id, quantidade, subtotal,
+                            regime_tributario,
+                            aliquota_icms, aliquota_pis, aliquota_cofins, aliquota_ibs, aliquota_cbs,
+                            valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (venda_id, produto_id, quantidade_vendida, float(item.get("total", 0.0))),
+                        (
+                            venda_id,
+                            produto_id,
+                            quantidade_vendida,
+                            float(item.get("total", 0.0)),
+                            str(item.get("regime_tributario", regime_venda)),
+                            float(item.get("aliquotas", {}).get("icms", 0.0) or 0.0),
+                            float(item.get("aliquotas", {}).get("pis", 0.0) or 0.0),
+                            float(item.get("aliquotas", {}).get("cofins", 0.0) or 0.0),
+                            float(item.get("aliquotas", {}).get("ibs", 0.0) or 0.0),
+                            float(item.get("aliquotas", {}).get("cbs", 0.0) or 0.0),
+                            float(item.get("valores_impostos", {}).get("icms", 0.0) or 0.0),
+                            float(item.get("valores_impostos", {}).get("pis", 0.0) or 0.0),
+                            float(item.get("valores_impostos", {}).get("cofins", 0.0) or 0.0),
+                            float(item.get("valores_impostos", {}).get("ibs", 0.0) or 0.0),
+                            float(item.get("valores_impostos", {}).get("cbs", 0.0) or 0.0),
+                        ),
                     )
 
                     cursor.execute(
@@ -1557,6 +1982,7 @@ class ModuloPDV(ctk.CTkToplevel):
             "itens": self.itens_carrinho,
         }
         self.exportar_venda_fiscal(dados_json)
+        self._enviar_comando_nfce(venda_id, forma_pgto, self.itens_carrinho)
         if imprimir_cupom:
             self._executar_automacao_pos_venda(
                 {

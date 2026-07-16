@@ -95,9 +95,92 @@ def atualizar_aliquota_ncm(ncm_prefixo, aliquota_percentual, descricao="", ativo
         )
 
 
+def listar_aliquotas_fiscais_ncm():
+    """Lista regras fiscais com ICMS/PIS/COFINS/IBS/CBS por prefixo de NCM."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    ncm_prefixo,
+                    aliquota_icms,
+                    aliquota_pis,
+                    aliquota_cofins,
+                    aliquota_ibs,
+                    aliquota_cbs,
+                    descricao,
+                    ativo
+                FROM config_aliquotas_fiscais_ncm
+                ORDER BY CASE WHEN ncm_prefixo='*' THEN 999 ELSE LENGTH(ncm_prefixo) END DESC, ncm_prefixo
+                """
+            )
+            return cursor.fetchall()
+    except Exception as e:
+        registrar_log(None, "Aliquotas Fiscais NCM", "Falha", f"Erro ao listar alíquotas fiscais: {e}")
+        return []
+
+
+def atualizar_aliquotas_fiscais_ncm(
+    ncm_prefixo,
+    aliquota_icms=0.0,
+    aliquota_pis=0.0,
+    aliquota_cofins=0.0,
+    aliquota_ibs=0.0,
+    aliquota_cbs=0.0,
+    descricao="",
+    ativo=1,
+):
+    """Cria/atualiza regras fiscais por NCM para facilitar ajustes na transição 2027+."""
+    prefixo = str(ncm_prefixo or "").strip()
+    if not prefixo:
+        raise ValueError("Prefixo NCM é obrigatório (use '*' para padrão).")
+    if prefixo != "*":
+        prefixo = "".join(ch for ch in prefixo if ch.isdigit())
+        if not prefixo:
+            raise ValueError("Prefixo NCM inválido.")
+
+    icms = parse_numero(aliquota_icms, "Aliquota ICMS", permitir_vazio=True, default=0.0, minimo=0)
+    pis = parse_numero(aliquota_pis, "Aliquota PIS", permitir_vazio=True, default=0.0, minimo=0)
+    cofins = parse_numero(aliquota_cofins, "Aliquota COFINS", permitir_vazio=True, default=0.0, minimo=0)
+    ibs = parse_numero(aliquota_ibs, "Aliquota IBS", permitir_vazio=True, default=0.0, minimo=0)
+    cbs = parse_numero(aliquota_cbs, "Aliquota CBS", permitir_vazio=True, default=0.0, minimo=0)
+    ativo_flag = 1 if int(ativo) else 0
+
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO config_aliquotas_fiscais_ncm (
+                ncm_prefixo, aliquota_icms, aliquota_pis, aliquota_cofins, aliquota_ibs, aliquota_cbs, descricao, ativo, atualizado_em
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(ncm_prefixo)
+            DO UPDATE SET
+                aliquota_icms = excluded.aliquota_icms,
+                aliquota_pis = excluded.aliquota_pis,
+                aliquota_cofins = excluded.aliquota_cofins,
+                aliquota_ibs = excluded.aliquota_ibs,
+                aliquota_cbs = excluded.aliquota_cbs,
+                descricao = excluded.descricao,
+                ativo = excluded.ativo,
+                atualizado_em = CURRENT_TIMESTAMP
+            """,
+            (prefixo, icms, pis, cofins, ibs, cbs, str(descricao or "").strip(), ativo_flag),
+        )
+
+
 def obter_resumo_fluxo_caixa_dia():
     """Retorna resumo diário com valores bruto, impostos retidos e líquido."""
-    resumo = {"valor_bruto": 0.0, "valor_impostos": 0.0, "valor_liquido": 0.0}
+    resumo = {
+        "valor_bruto": 0.0,
+        "valor_impostos": 0.0,
+        "valor_liquido": 0.0,
+        "valor_icms": 0.0,
+        "valor_pis": 0.0,
+        "valor_cofins": 0.0,
+        "valor_ibs": 0.0,
+        "valor_cbs": 0.0,
+    }
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -106,6 +189,11 @@ def obter_resumo_fluxo_caixa_dia():
                 SELECT
                     COALESCE(SUM(valor_total), 0.0),
                     COALESCE(SUM(valor_impostos_retidos), 0.0),
+                    COALESCE(SUM(valor_icms), 0.0),
+                    COALESCE(SUM(valor_pis), 0.0),
+                    COALESCE(SUM(valor_cofins), 0.0),
+                    COALESCE(SUM(valor_ibs), 0.0),
+                    COALESCE(SUM(valor_cbs), 0.0),
                     COALESCE(SUM(
                         CASE
                             WHEN COALESCE(valor_liquido, 0) = 0 AND COALESCE(valor_impostos_retidos, 0) = 0
@@ -117,7 +205,7 @@ def obter_resumo_fluxo_caixa_dia():
                 WHERE date(data_venda) = date('now', 'localtime')
                 """
             )
-            bruto, impostos, liquido = cursor.fetchone()
+            bruto, impostos, icms, pis, cofins, ibs, cbs, liquido = cursor.fetchone()
 
             if float(bruto or 0.0) <= 0:
                 cursor.execute(
@@ -125,6 +213,11 @@ def obter_resumo_fluxo_caixa_dia():
                     SELECT
                         COALESCE(SUM(valor_total), 0.0),
                         COALESCE(SUM(valor_impostos_retidos), 0.0),
+                        COALESCE(SUM(valor_icms), 0.0),
+                        COALESCE(SUM(valor_pis), 0.0),
+                        COALESCE(SUM(valor_cofins), 0.0),
+                        COALESCE(SUM(valor_ibs), 0.0),
+                        COALESCE(SUM(valor_cbs), 0.0),
                         COALESCE(SUM(
                             CASE
                                 WHEN COALESCE(valor_liquido, 0) = 0 AND COALESCE(valor_impostos_retidos, 0) = 0
@@ -136,11 +229,16 @@ def obter_resumo_fluxo_caixa_dia():
                     WHERE date(data_venda) = date('now', 'localtime')
                     """
                 )
-                bruto, impostos, liquido = cursor.fetchone()
+                bruto, impostos, icms, pis, cofins, ibs, cbs, liquido = cursor.fetchone()
 
         resumo["valor_bruto"] = float(bruto or 0.0)
         resumo["valor_impostos"] = float(impostos or 0.0)
         resumo["valor_liquido"] = float(liquido or 0.0)
+        resumo["valor_icms"] = float(icms or 0.0)
+        resumo["valor_pis"] = float(pis or 0.0)
+        resumo["valor_cofins"] = float(cofins or 0.0)
+        resumo["valor_ibs"] = float(ibs or 0.0)
+        resumo["valor_cbs"] = float(cbs or 0.0)
         return resumo
     except Exception as e:
         registrar_log(None, "Resumo Fluxo Caixa", "Falha", f"Erro: {e}")
@@ -149,7 +247,16 @@ def obter_resumo_fluxo_caixa_dia():
 
 def obter_resumo_fluxo_caixa_periodo(data_ini, data_fim):
     """Retorna resumo por período para relatório fiscal/BI."""
-    resumo = {"valor_bruto": 0.0, "valor_impostos": 0.0, "valor_liquido": 0.0}
+    resumo = {
+        "valor_bruto": 0.0,
+        "valor_impostos": 0.0,
+        "valor_liquido": 0.0,
+        "valor_icms": 0.0,
+        "valor_pis": 0.0,
+        "valor_cofins": 0.0,
+        "valor_ibs": 0.0,
+        "valor_cbs": 0.0,
+    }
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -158,6 +265,11 @@ def obter_resumo_fluxo_caixa_periodo(data_ini, data_fim):
                 SELECT
                     COALESCE(SUM(valor_total), 0.0),
                     COALESCE(SUM(valor_impostos_retidos), 0.0),
+                    COALESCE(SUM(valor_icms), 0.0),
+                    COALESCE(SUM(valor_pis), 0.0),
+                    COALESCE(SUM(valor_cofins), 0.0),
+                    COALESCE(SUM(valor_ibs), 0.0),
+                    COALESCE(SUM(valor_cbs), 0.0),
                     COALESCE(SUM(
                         CASE
                             WHEN COALESCE(valor_liquido, 0) = 0 AND COALESCE(valor_impostos_retidos, 0) = 0
@@ -170,7 +282,7 @@ def obter_resumo_fluxo_caixa_periodo(data_ini, data_fim):
                 """,
                 (data_ini, data_fim),
             )
-            bruto, impostos, liquido = cursor.fetchone()
+            bruto, impostos, icms, pis, cofins, ibs, cbs, liquido = cursor.fetchone()
 
             if float(bruto or 0.0) <= 0:
                 cursor.execute(
@@ -178,6 +290,11 @@ def obter_resumo_fluxo_caixa_periodo(data_ini, data_fim):
                     SELECT
                         COALESCE(SUM(valor_total), 0.0),
                         COALESCE(SUM(valor_impostos_retidos), 0.0),
+                        COALESCE(SUM(valor_icms), 0.0),
+                        COALESCE(SUM(valor_pis), 0.0),
+                        COALESCE(SUM(valor_cofins), 0.0),
+                        COALESCE(SUM(valor_ibs), 0.0),
+                        COALESCE(SUM(valor_cbs), 0.0),
                         COALESCE(SUM(
                             CASE
                                 WHEN COALESCE(valor_liquido, 0) = 0 AND COALESCE(valor_impostos_retidos, 0) = 0
@@ -190,11 +307,16 @@ def obter_resumo_fluxo_caixa_periodo(data_ini, data_fim):
                     """,
                     (data_ini, data_fim),
                 )
-                bruto, impostos, liquido = cursor.fetchone()
+                bruto, impostos, icms, pis, cofins, ibs, cbs, liquido = cursor.fetchone()
 
         resumo["valor_bruto"] = float(bruto or 0.0)
         resumo["valor_impostos"] = float(impostos or 0.0)
         resumo["valor_liquido"] = float(liquido or 0.0)
+        resumo["valor_icms"] = float(icms or 0.0)
+        resumo["valor_pis"] = float(pis or 0.0)
+        resumo["valor_cofins"] = float(cofins or 0.0)
+        resumo["valor_ibs"] = float(ibs or 0.0)
+        resumo["valor_cbs"] = float(cbs or 0.0)
         return resumo
     except Exception as e:
         registrar_log(None, "Resumo Fluxo Caixa Periodo", "Falha", f"Erro: {e}")

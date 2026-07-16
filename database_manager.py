@@ -46,6 +46,11 @@ def _ensure_produtos_schema(conn):
         "quantidade_minima": "ALTER TABLE produtos ADD COLUMN quantidade_minima INTEGER NOT NULL DEFAULT 0",
         "variacao": "ALTER TABLE produtos ADD COLUMN variacao TEXT",
         "ncm": "ALTER TABLE produtos ADD COLUMN ncm TEXT",
+        "aliquota_icms": "ALTER TABLE produtos ADD COLUMN aliquota_icms REAL NOT NULL DEFAULT 0.0",
+        "aliquota_pis": "ALTER TABLE produtos ADD COLUMN aliquota_pis REAL NOT NULL DEFAULT 0.0",
+        "aliquota_cofins": "ALTER TABLE produtos ADD COLUMN aliquota_cofins REAL NOT NULL DEFAULT 0.0",
+        "aliquota_ibs": "ALTER TABLE produtos ADD COLUMN aliquota_ibs REAL NOT NULL DEFAULT 0.0",
+        "aliquota_cbs": "ALTER TABLE produtos ADD COLUMN aliquota_cbs REAL NOT NULL DEFAULT 0.0",
     }
 
     for coluna, ddl in alteracoes.items():
@@ -71,6 +76,11 @@ def _ensure_produtos_schema(conn):
                     nome TEXT NOT NULL,
                     variacao TEXT,
                     ncm TEXT,
+                    aliquota_icms REAL NOT NULL DEFAULT 0.0,
+                    aliquota_pis REAL NOT NULL DEFAULT 0.0,
+                    aliquota_cofins REAL NOT NULL DEFAULT 0.0,
+                    aliquota_ibs REAL NOT NULL DEFAULT 0.0,
+                    aliquota_cbs REAL NOT NULL DEFAULT 0.0,
                     preco_custo REAL NOT NULL,
                     margem_lucro REAL NOT NULL DEFAULT 0.0,
                     preco_venda REAL NOT NULL,
@@ -88,7 +98,9 @@ def _ensure_produtos_schema(conn):
             cursor.execute(
                 """
                 INSERT INTO produtos_schema_tmp (
-                    id, codigo_barras, nome, variacao, ncm, preco_custo, margem_lucro, preco_venda,
+                    id, codigo_barras, nome, variacao, ncm,
+                    aliquota_icms, aliquota_pis, aliquota_cofins, aliquota_ibs, aliquota_cbs,
+                    preco_custo, margem_lucro, preco_venda,
                     quantidade_atual, quantidade_minima, validade, categoria,
                     preco_base, inicio_promocao, fim_promocao, imagem_path
                 )
@@ -98,6 +110,11 @@ def _ensure_produtos_schema(conn):
                     nome,
                     variacao,
                     COALESCE(ncm, ''),
+                    CAST(COALESCE(aliquota_icms, 0.0) AS REAL),
+                    CAST(COALESCE(aliquota_pis, 0.0) AS REAL),
+                    CAST(COALESCE(aliquota_cofins, 0.0) AS REAL),
+                    CAST(COALESCE(aliquota_ibs, 0.0) AS REAL),
+                    CAST(COALESCE(aliquota_cbs, 0.0) AS REAL),
                     CAST(COALESCE(preco_custo, 0.0) AS REAL),
                     CAST(COALESCE(margem_lucro, 0.0) AS REAL),
                     CAST(COALESCE(preco_venda, 0.0) AS REAL),
@@ -190,6 +207,16 @@ def _ensure_aux_schema(conn):
             cursor.execute("ALTER TABLE vendas ADD COLUMN status_pedido TEXT NOT NULL DEFAULT 'APROVADO'")
         if "status_pagamento" not in colunas_vendas:
             cursor.execute("ALTER TABLE vendas ADD COLUMN status_pagamento TEXT NOT NULL DEFAULT 'PAGO'")
+        if "valor_icms" not in colunas_vendas:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_icms REAL NOT NULL DEFAULT 0.0")
+        if "valor_pis" not in colunas_vendas:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_pis REAL NOT NULL DEFAULT 0.0")
+        if "valor_cofins" not in colunas_vendas:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_cofins REAL NOT NULL DEFAULT 0.0")
+        if "valor_ibs" not in colunas_vendas:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_ibs REAL NOT NULL DEFAULT 0.0")
+        if "valor_cbs" not in colunas_vendas:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_cbs REAL NOT NULL DEFAULT 0.0")
 
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendas_dia'")
     if cursor.fetchone():
@@ -205,6 +232,16 @@ def _ensure_aux_schema(conn):
             cursor.execute("ALTER TABLE vendas_dia ADD COLUMN status_pedido TEXT NOT NULL DEFAULT 'APROVADO'")
         if "status_pagamento" not in colunas_vendas_dia:
             cursor.execute("ALTER TABLE vendas_dia ADD COLUMN status_pagamento TEXT NOT NULL DEFAULT 'PAGO'")
+        if "valor_icms" not in colunas_vendas_dia:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_icms REAL NOT NULL DEFAULT 0.0")
+        if "valor_pis" not in colunas_vendas_dia:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_pis REAL NOT NULL DEFAULT 0.0")
+        if "valor_cofins" not in colunas_vendas_dia:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_cofins REAL NOT NULL DEFAULT 0.0")
+        if "valor_ibs" not in colunas_vendas_dia:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_ibs REAL NOT NULL DEFAULT 0.0")
+        if "valor_cbs" not in colunas_vendas_dia:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_cbs REAL NOT NULL DEFAULT 0.0")
 
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='financeiro'")
     if cursor.fetchone():
@@ -212,12 +249,65 @@ def _ensure_aux_schema(conn):
         colunas_financeiro = {row[1] for row in cursor.fetchall()}
         if "valor_impostos_retidos" not in colunas_financeiro:
             cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_impostos_retidos REAL NOT NULL DEFAULT 0.0")
+        if "valor_icms" not in colunas_financeiro:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_icms REAL NOT NULL DEFAULT 0.0")
+        if "valor_pis" not in colunas_financeiro:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_pis REAL NOT NULL DEFAULT 0.0")
+        if "valor_cofins" not in colunas_financeiro:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_cofins REAL NOT NULL DEFAULT 0.0")
+        if "valor_ibs" not in colunas_financeiro:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_ibs REAL NOT NULL DEFAULT 0.0")
+        if "valor_cbs" not in colunas_financeiro:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_cbs REAL NOT NULL DEFAULT 0.0")
+
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='itens_venda'")
+    if cursor.fetchone():
+        cursor.execute("PRAGMA table_info(itens_venda)")
+        colunas_itens = {row[1] for row in cursor.fetchall()}
+        if "regime_tributario" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN regime_tributario TEXT NOT NULL DEFAULT 'ATUAL'")
+        if "aliquota_icms" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN aliquota_icms REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_pis" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN aliquota_pis REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_cofins" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN aliquota_cofins REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_ibs" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN aliquota_ibs REAL NOT NULL DEFAULT 0.0")
+        if "aliquota_cbs" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN aliquota_cbs REAL NOT NULL DEFAULT 0.0")
+        if "valor_icms" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_icms REAL NOT NULL DEFAULT 0.0")
+        if "valor_pis" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_pis REAL NOT NULL DEFAULT 0.0")
+        if "valor_cofins" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_cofins REAL NOT NULL DEFAULT 0.0")
+        if "valor_ibs" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_ibs REAL NOT NULL DEFAULT 0.0")
+        if "valor_cbs" not in colunas_itens:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_cbs REAL NOT NULL DEFAULT 0.0")
 
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS config_aliquotas_ncm (
             ncm_prefixo TEXT PRIMARY KEY,
             aliquota_percentual REAL NOT NULL,
+            descricao TEXT,
+            ativo INTEGER NOT NULL DEFAULT 1,
+            atualizado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS config_aliquotas_fiscais_ncm (
+            ncm_prefixo TEXT PRIMARY KEY,
+            aliquota_icms REAL NOT NULL DEFAULT 0.0,
+            aliquota_pis REAL NOT NULL DEFAULT 0.0,
+            aliquota_cofins REAL NOT NULL DEFAULT 0.0,
+            aliquota_ibs REAL NOT NULL DEFAULT 0.0,
+            aliquota_cbs REAL NOT NULL DEFAULT 0.0,
             descricao TEXT,
             ativo INTEGER NOT NULL DEFAULT 1,
             atualizado_em DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -281,6 +371,14 @@ def _ensure_aux_schema(conn):
         """
         INSERT OR IGNORE INTO config_aliquotas_ncm (ncm_prefixo, aliquota_percentual, descricao, ativo)
         VALUES ('*', 0.0, 'Aliquota padrao/fallback', 1)
+        """
+    )
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO config_aliquotas_fiscais_ncm (
+            ncm_prefixo, aliquota_icms, aliquota_pis, aliquota_cofins, aliquota_ibs, aliquota_cbs, descricao, ativo
+        )
+        VALUES ('*', 0.0, 0.0, 0.0, 0.0, 0.0, 'Aliquotas fiscais padrao/fallback', 1)
         """
     )
 

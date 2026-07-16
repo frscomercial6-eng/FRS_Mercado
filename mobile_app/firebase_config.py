@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 from pathlib import Path
 
 import firebase_admin
@@ -85,7 +86,50 @@ def inicializar_firebase():
 
 def obter_firestore_client():
     inicializar_firebase()
+    _ensure_market_namespace_mobile()
     return firestore.client()
+
+
+def _market_id_from_local_config() -> str:
+    cfg_path = Path(os.getenv("APPDATA") or Path.home()) / "FRS_Mercado" / "data" / "config.json"
+    if not cfg_path.exists():
+        return ""
+    try:
+        payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return str(payload.get("market_id") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def get_market_id() -> str:
+    env_market_id = str(os.getenv("FRS_MARKET_ID", "") or "").strip()
+    if env_market_id:
+        return env_market_id
+
+    credenciais_seguras = load_client_credentials()
+    secure_market_id = str(credenciais_seguras.get("market_id") or "").strip()
+    if secure_market_id:
+        return secure_market_id
+
+    cfg_market_id = _market_id_from_local_config()
+    if cfg_market_id:
+        return cfg_market_id
+
+    raise ValueError("market_id ausente. Configure a Identificação de Mercado antes do uso do Firebase.")
+
+
+def _ensure_market_namespace_mobile() -> None:
+    db = firestore.client()
+    market_id = get_market_id()
+    db.collection("mercados").document(market_id).set(
+        {
+            "market_id": market_id,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
 
 
 def buscar_produto_por_codigo(codigo: str):
@@ -94,12 +138,25 @@ def buscar_produto_por_codigo(codigo: str):
         return None
 
     db = obter_firestore_client()
+    market_id = get_market_id()
 
-    # Busca por codigo_barras; fallback para campo codigo.
-    consulta = db.collection("produtos").where("codigo_barras", "==", codigo).limit(1).stream()
+    # Toda consulta no Firestore agora é segregada por market_id.
+    consulta = (
+        db.collection("produtos")
+        .where("market_id", "==", market_id)
+        .where("codigo_barras", "==", codigo)
+        .limit(1)
+        .stream()
+    )
     docs = list(consulta)
     if not docs:
-        consulta = db.collection("produtos").where("codigo", "==", codigo).limit(1).stream()
+        consulta = (
+            db.collection("produtos")
+            .where("market_id", "==", market_id)
+            .where("codigo", "==", codigo)
+            .limit(1)
+            .stream()
+        )
         docs = list(consulta)
 
     if not docs:
@@ -108,6 +165,7 @@ def buscar_produto_por_codigo(codigo: str):
     data = docs[0].to_dict() or {}
     return {
         "id": docs[0].id,
+        "market_id": market_id,
         "nome": str(data.get("nome") or data.get("descricao") or "Produto sem nome"),
         "preco": float(data.get("preco") or data.get("preco_venda") or 0.0),
         "foto_url": str(data.get("foto_url") or data.get("imagem_url") or "").strip(),

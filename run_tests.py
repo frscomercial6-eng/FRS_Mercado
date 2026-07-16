@@ -2,6 +2,7 @@ import sys
 import traceback
 from datetime import datetime
 
+from calculadora_tributaria import CalculadoraTributaria
 import modulo_financeiro
 import modulo_pdv
 from database_manager import get_db_connection
@@ -26,6 +27,7 @@ class _PDVStub:
     def __init__(self, itens):
         self.itens_carrinho = itens
         self.fiscal = _DummyFiscal()
+        self.calculadora_tributaria = CalculadoraTributaria()
         self.ent_valor_pago = _DummyEntry()
         self.lbl_troco_venda = _DummyLabel()
         self.ent_quantidade = object()
@@ -42,6 +44,9 @@ class _PDVStub:
 
     def _executar_automacao_pos_venda(self, _dados):
         return None
+
+    def _enviar_comando_nfce(self, _venda_id, _forma_pgto, _itens):
+        return True
 
     def _renderizar_carrinho(self):
         return None

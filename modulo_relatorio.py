@@ -359,6 +359,52 @@ class ModuloRelatorio(ctk.CTkToplevel):
             "status": "ok",
         }
 
+    @staticmethod
+    def ensure_market_drive_root(market_id: str) -> dict:
+        """Garante pasta raiz por mercado no Google Drive autenticado."""
+        market_id = str(market_id or "").strip()
+        if not market_id:
+            raise ValueError("market_id ausente para provisionamento do Drive.")
+
+        service = ModuloRelatorio._obter_drive_service()
+
+        query_root = (
+            "name = 'FRS_Solution' and "
+            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        )
+        root_files = service.files().list(q=query_root, spaces='drive', fields='files(id,name)').execute().get("files", [])
+        if root_files:
+            root_id = root_files[0]["id"]
+        else:
+            root_id = service.files().create(
+                body={"name": "FRS_Solution", "mimeType": "application/vnd.google-apps.folder"},
+                fields='id',
+            ).execute()["id"]
+
+        market_query = (
+            f"name = '{market_id}' and "
+            "mimeType = 'application/vnd.google-apps.folder' and "
+            f"'{root_id}' in parents and trashed = false"
+        )
+        market_files = service.files().list(q=market_query, spaces='drive', fields='files(id,name)').execute().get("files", [])
+        if market_files:
+            market_folder_id = market_files[0]["id"]
+        else:
+            market_folder_id = service.files().create(
+                body={
+                    "name": market_id,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [root_id],
+                },
+                fields='id',
+            ).execute()["id"]
+
+        return {
+            "root_folder_id": root_id,
+            "market_folder_id": market_folder_id,
+            "market_id": market_id,
+        }
+
 if __name__ == "__main__":
     app = ctk.CTk()
     def abrir(): ModuloRelatorio()

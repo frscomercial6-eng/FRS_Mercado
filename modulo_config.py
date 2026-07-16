@@ -10,6 +10,7 @@ import customtkinter as ctk
 
 from app_paths import obter_caminho_dados
 from app_config import AUTO_UPDATE_REPO
+from client_credentials_store import load_client_credentials
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
 from webhook_security import salvar_token_webhook, webhook_token_configurado
 
@@ -46,9 +47,13 @@ def _config_padrao():
     return {
         "razao_social": "",
         "nome_estabelecimento": "",
+        "market_id": "",
+        "fiscal_ativo": False,
         "auto_update_enabled": True,
         "auto_update_repo": (AUTO_UPDATE_REPO or "").strip(),
         "auto_update_remind_hours": 24,
+        "app_executable_path": "",
+        "update_executable_path": "",
         "cnpj": "",
         "email_cliente": "",
         "drive_credentials_path": "",
@@ -152,8 +157,24 @@ def carregar_credenciais_google():
     diretorio_base = Path(__file__).parent.resolve()
     diretorio_exe = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else diretorio_base
 
+    credenciais_seguras = load_client_credentials()
+
+    valor_creds_seguro = str(
+        credenciais_seguras.get("google_oauth_credentials_path")
+        or credenciais_seguras.get("drive_credentials_path")
+        or ""
+    ).strip()
+    valor_services_seguro = str(credenciais_seguras.get("google_services_path") or "").strip()
+    caminho_creds_seguro = Path(valor_creds_seguro) if valor_creds_seguro else None
+    caminho_services_seguro = Path(valor_services_seguro) if valor_services_seguro else None
+
     caminho_creds = diretorio_exe / "credentials.json"
     caminho_services = diretorio_exe / "google-services.json"
+
+    if caminho_creds_seguro and caminho_creds_seguro.exists():
+        caminho_creds = caminho_creds_seguro
+    if caminho_services_seguro and caminho_services_seguro.exists():
+        caminho_services = caminho_services_seguro
 
     if not caminho_creds.exists():
         caminho_creds = diretorio_base / "credentials.json"

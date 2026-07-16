@@ -1,14 +1,18 @@
 import traceback
 from pathlib import Path
 from datetime import datetime
+import os
 
 import customtkinter as ctk
 from tkinter import messagebox
 
+from app_config import AUTO_UPDATE_REPO
+from client_credentials_store import load_client_credentials
 from modulo_login import ModuloLogin
 from database_manager import get_db_connection, obter_caminho_dados
 from error_notifier import notify_error
 from app_paths import obter_caminho_log
+from updater import check_and_apply_startup_update
 
 
 def _log_debug(contexto: str, erro: Exception | None = None) -> None:
@@ -32,11 +36,53 @@ def _garantir_banco_inicial() -> None:
         conn.execute("SELECT 1")
 
 
+def _carregar_credenciais_cliente() -> None:
+    """Carrega credenciais protegidas para uso unificado no desktop/mobile."""
+    try:
+        dados = load_client_credentials()
+    except Exception as e:
+        _log_debug("Falha ao carregar arquivo protegido de credenciais do cliente", e)
+        return
+
+    if not dados:
+        return
+
+    mapa = {
+        "license_key": "FRS_CLIENT_LICENSE_KEY",
+        "client_key": "FRS_CLIENT_KEY",
+        "firebase_admin_key_path": "FIREBASE_ADMIN_KEY_PATH",
+        "google_oauth_credentials_path": "FRS_GOOGLE_CREDENTIALS_PATH",
+        "google_services_path": "FRS_GOOGLE_SERVICES_PATH",
+    }
+
+    for source_key, env_key in mapa.items():
+        value = str(dados.get(source_key, "") or "").strip()
+        if not value:
+            continue
+        os.environ[env_key] = value
+
+
+def _aplicar_auto_update_bootstrap() -> bool:
+    repo = str(AUTO_UPDATE_REPO or "").strip()
+    if not repo:
+        return False
+
+    try:
+        return check_and_apply_startup_update(repo)
+    except Exception as e:
+        _log_debug("Falha na verificação automática de atualização", e)
+        return False
+
+
 def main() -> None:
     """Fluxo único de inicialização: Login/Licença -> Interface principal."""
     usuario_logado = None
 
     try:
+        if _aplicar_auto_update_bootstrap():
+            return
+
+        _carregar_credenciais_cliente()
         _garantir_banco_inicial()
 
         app = ctk.CTk()

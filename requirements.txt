@@ -4,3 +4,5 @@ reportlab
 google-api-python-client
 google-auth-httplib2
 bcrypt
+firebase-admin
+flet

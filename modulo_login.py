@@ -9,6 +9,8 @@ from app_paths import obter_caminho_dados
 from database_manager import get_db_connection, registrar_log
 from datetime import datetime, timedelta
 from modulo_config import carregar_configuracoes # Para obter a Razão Social
+from market_identity import ensure_market_identity_provisioning, ensure_local_market_id
+from system_monitor import SystemMonitor
 
 
 _USUARIO_LOGADO = None
@@ -31,6 +33,7 @@ class ModuloLogin(ctk.CTkToplevel):
         # Lista para rastrear tarefas agendadas e evitar erros de "invalid command name"
         self._after_ids = []
         self.backup_google_autenticado = self._verificar_token_backup_local()
+        self._system_monitor = None
 
         # Centralizar janela
         self._registrar_after(10, self._centralizar)
@@ -43,12 +46,24 @@ class ModuloLogin(ctk.CTkToplevel):
         # Título do Sistema
         self.lbl_titulo = ctk.CTkLabel(self, text="SISTEMA DE GESTÃO", font=("Roboto", 20, "bold"))
         self.lbl_titulo.pack(pady=(20, 10))
+        self.frame_status = ctk.CTkFrame(self, fg_color="#1b1b1b", corner_radius=10, border_width=1, border_color="#333333")
+        self.frame_status.pack(fill="x", padx=20, pady=(0, 8))
+        self.lbl_status_badge = ctk.CTkLabel(
+            self.frame_status,
+            text="Licença/Fiscal: Verificando...",
+            font=("Roboto", 11, "bold"),
+            text_color="#f1c40f",
+            wraplength=340,
+            justify="left",
+        )
+        self.lbl_status_badge.pack(anchor="w", padx=10, pady=8)
 
         self.frame_login = ctk.CTkFrame(self)
         self.frame_setup = ctk.CTkFrame(self)
         self.frame_ativacao = ctk.CTkFrame(self)
 
         self._verificar_estado_sistema()
+        self._iniciar_system_monitor()
 
     def _verificar_token_backup_local(self):
         """No login, valida apenas existência local do token, sem qualquer chamada de rede."""
@@ -69,6 +84,12 @@ class ModuloLogin(ctk.CTkToplevel):
 
     def destroy(self):
         """Limpa callbacks pendentes antes de destruir a janela."""
+        try:
+            if self._system_monitor is not None:
+                self._system_monitor.stop()
+        except Exception:
+            pass
+
         # Cancela todas as tarefas agendadas
         for after_id in self._after_ids:
             try:
@@ -77,6 +98,33 @@ class ModuloLogin(ctk.CTkToplevel):
                 pass
         self._after_ids.clear()
         super().destroy()
+
+    def _iniciar_system_monitor(self):
+        try:
+            if self._system_monitor is None:
+                self._system_monitor = SystemMonitor(on_status=self._on_system_status, interval_seconds=6)
+            self._system_monitor.start()
+        except Exception as e:
+            print(f"[MONITOR LOGIN] Falha ao iniciar monitor: {e}")
+
+    def _on_system_status(self, status):
+        def _apply():
+            if not self.winfo_exists():
+                return
+            try:
+                cor = status.get("header_color", "#f1c40f")
+                self.lbl_status_badge.configure(
+                    text=status.get("header_text", "Licença/Fiscal: Indisponível"),
+                    text_color=cor,
+                )
+                self.frame_status.configure(border_color=cor)
+            except Exception:
+                pass
+
+        try:
+            self.after(0, _apply)
+        except Exception:
+            pass
 
     def _get_hwid(self):
         """Gera um ID único baseado no hardware da máquina."""
@@ -253,6 +301,16 @@ class ModuloLogin(ctk.CTkToplevel):
                 print(f"[ERRO SETUP] Falha ao gravar setup inicial: {e}")
                 return
 
+            try:
+                resultado_market = ensure_market_identity_provisioning()
+                print(
+                    "[MARKET] Setup inicial provisionado | "
+                    f"market_id={resultado_market.market_id} "
+                    f"firebase_ok={resultado_market.firebase_ok} drive_ok={resultado_market.drive_ok}"
+                )
+            except Exception as e:
+                print(f"[MARKET] Falha no provisionamento pós-setup: {e}")
+
             messagebox.showinfo("Sucesso", "Sistema inicializado com 30 dias de licença trial.")
             self.frame_setup.pack_forget()
             self._verificar_estado_sistema()
@@ -382,6 +440,17 @@ class ModuloLogin(ctk.CTkToplevel):
                     print(f"Resultado da busca no banco: [SUCESSO] - Usuário ID {resultado[0]} autenticado.")
                     user_info = {"id": resultado[0], "nome": resultado[1], "permissao": resultado[2]}
                     registrar_log(user_info["id"], "Login", "Sucesso", f"Usuário {user_info['nome']} iniciou sessão.")
+
+                    try:
+                        ensure_local_market_id()
+                        resultado_market = ensure_market_identity_provisioning()
+                        print(
+                            "[MARKET] Login provisionado | "
+                            f"market_id={resultado_market.market_id} "
+                            f"firebase_ok={resultado_market.firebase_ok} drive_ok={resultado_market.drive_ok}"
+                        )
+                    except Exception as e:
+                        print(f"[MARKET] Falha ao garantir identificação de mercado no login: {e}")
 
                     # Desenvolvedor pode consolidar a assinatura atual após bootstrap de sucesso.
                     if self._modo_desenvolvedor_ativo():
