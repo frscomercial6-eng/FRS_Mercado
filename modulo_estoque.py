@@ -2,6 +2,7 @@ import sqlite3
 import customtkinter as ctk
 from tkinter import StringVar, messagebox
 from datetime import datetime, timedelta
+from pathlib import Path
 from database_manager import get_db_connection, registrar_log
 import os
 import threading
@@ -58,6 +59,38 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.entry_barcode = ctk.CTkEntry(self.frame_top, width=250, placeholder_text="Escaneie o produto...")
         self.entry_barcode.pack(side="left", padx=10, pady=10)
         self.entry_barcode.bind("<Return>", self.buscar_por_barcode)
+
+        self.btn_importar_nfe = ctk.CTkButton(
+            self.frame_top,
+            text="IMPORTAR NF-e",
+            width=150,
+            height=34,
+            fg_color="#14532d",
+            hover_color="#166534",
+            command=self.alternar_campo_importar_nfe,
+        )
+        self.btn_importar_nfe.pack(side="left", padx=6)
+
+        self.frame_importar_nfe = ctk.CTkFrame(self.frame_top, fg_color="transparent")
+        ctk.CTkLabel(
+            self.frame_importar_nfe,
+            text="Chave NF-e:",
+            font=("Arial", 11, "bold"),
+        ).pack(side="left", padx=(8, 4))
+        self.entry_chave_nfe = ctk.CTkEntry(
+            self.frame_importar_nfe,
+            width=320,
+            placeholder_text="Cole a chave de 44 dígitos",
+        )
+        self.entry_chave_nfe.pack(side="left", padx=4, pady=10)
+        self.entry_chave_nfe.bind("<Return>", self.importar_nfe_por_chave)
+        self.btn_buscar_nfe = ctk.CTkButton(
+            self.frame_importar_nfe,
+            text="Buscar",
+            width=90,
+            command=self.importar_nfe_por_chave,
+        )
+        self.btn_buscar_nfe.pack(side="left", padx=(4, 0))
         
         self.btn_refresh = ctk.CTkButton(self.frame_top, text="Atualizar Lista", command=self.recarregar_primeira_pagina)
         self.btn_refresh.pack(side="right", padx=10)
@@ -211,7 +244,219 @@ class ModuloEstoque(ctk.CTkToplevel):
         )
         self.btn_next.pack(side="right", padx=8, pady=8)
 
+        self._configurar_navegacao_tab()
         self._safe_focus(self.entry_barcode)
+
+    def _normalizar_chave_nfe(self, chave: str) -> str:
+        return "".join(ch for ch in str(chave or "") if ch.isdigit())
+
+    def alternar_campo_importar_nfe(self):
+        if self.frame_importar_nfe.winfo_ismapped():
+            self.frame_importar_nfe.pack_forget()
+            self._safe_focus(self.entry_barcode)
+            return
+        self.frame_importar_nfe.pack(side="left", padx=6)
+        self._safe_focus(self.entry_chave_nfe)
+
+    def _listar_xml_nfe_candidatos(self):
+        candidatos_dirs = [
+            Path(obter_caminho_dados("fiscal_in")),
+            Path(obter_caminho_dados("exportacao_fiscal")),
+            Path(__file__).resolve().parent / "fiscal_in",
+            Path(__file__).resolve().parent / "exportacao_fiscal",
+        ]
+
+        try:
+            from modulo_config import carregar_configuracoes
+
+            cfg = carregar_configuracoes() or {}
+            pasta_in = str(cfg.get("pasta_entrada_fiscal") or "").strip()
+            pasta_exp = str(cfg.get("pasta_exportacao_fiscal") or "").strip()
+            if pasta_in:
+                candidatos_dirs.append(Path(pasta_in))
+            if pasta_exp:
+                candidatos_dirs.append(Path(pasta_exp))
+        except Exception:
+            pass
+
+        vistos = set()
+        arquivos = []
+        for pasta in candidatos_dirs:
+            try:
+                pasta_norm = str(pasta.resolve())
+            except Exception:
+                pasta_norm = str(pasta)
+            if pasta_norm in vistos or not pasta.exists() or not pasta.is_dir():
+                continue
+            vistos.add(pasta_norm)
+            for arq in pasta.glob("*.xml"):
+                if arq.is_file():
+                    arquivos.append(arq)
+
+        arquivos.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+        return arquivos
+
+    def _buscar_nfe_por_chave(self, chave_nfe: str):
+        from modulo_fiscal import FiscalManager
+
+        fiscal = FiscalManager()
+        for caminho_xml in self._listar_xml_nfe_candidatos():
+            try:
+                dados = fiscal.processar_xml_entrada(caminho_xml)
+            except Exception:
+                continue
+
+            chave_xml = self._normalizar_chave_nfe(dados.get("chave_nfe", ""))
+            if chave_xml == chave_nfe:
+                return dados
+
+        return None
+
+    def importar_nfe_por_chave(self, event=None):
+        chave = self._normalizar_chave_nfe(self.entry_chave_nfe.get())
+        if len(chave) != 44:
+            messagebox.showwarning("Chave NF-e inválida", "Informe uma chave NF-e com 44 dígitos.")
+            self._safe_focus(self.entry_chave_nfe)
+            return "break"
+
+        self.lbl_alerta.configure(text="🔎 Buscando NF-e pelos XMLs locais...", text_color="cyan")
+
+        def _worker():
+            dados = self._buscar_nfe_por_chave(chave)
+            if not self.winfo_exists():
+                return
+            self.after(0, lambda: self._aplicar_importacao_nfe(chave, dados))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return "break"
+
+    def _aplicar_importacao_nfe(self, chave_nfe: str, dados_nfe: dict | None):
+        if not dados_nfe or not dados_nfe.get("itens"):
+            self.lbl_alerta.configure(text="NF-e não encontrada nos XMLs locais.", text_color="orange")
+            return
+
+        itens = list(dados_nfe.get("itens") or [])
+        cadastrados = 0
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            for item in itens:
+                ean = str(item.get("ean") or "").strip()
+                descricao = str(item.get("descricao") or "").strip() or "Produto sem descrição"
+                ncm = str(item.get("ncm") or "").strip()
+                preco = float(item.get("preco") or 0.0)
+
+                codigo = ean if ean else self._gerar_codigo_interno_sequencial()
+
+                cursor.execute("SELECT id FROM produtos WHERE codigo_barras = ? LIMIT 1", (codigo,))
+                existente = cursor.fetchone()
+
+                if existente:
+                    cursor.execute(
+                        """
+                        UPDATE produtos
+                        SET nome = ?,
+                            variacao = COALESCE(NULLIF(variacao, ''), 'NF-e'),
+                            ncm = ?,
+                            preco_custo = ?,
+                            preco_venda = ?,
+                            margem_lucro = COALESCE(margem_lucro, 0.0)
+                        WHERE id = ?
+                        """,
+                        (descricao, ncm, preco, preco, existente[0]),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO produtos (
+                            codigo_barras, nome, variacao, ncm, preco_custo, margem_lucro, preco_venda,
+                            quantidade_atual, quantidade_minima, validade, imagem_path
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (codigo, descricao, "NF-e", ncm, preco, 0.0, preco, 0, 0, "", ""),
+                    )
+                    cadastrados += 1
+
+        if itens:
+            primeiro = itens[0]
+            self.entry_barcode.delete(0, "end")
+            self.entry_barcode.insert(0, str(primeiro.get("ean") or "").strip())
+            self.ent_nome.delete(0, "end")
+            self.ent_nome.insert(0, str(primeiro.get("descricao") or "").strip())
+            self.ent_ncm.delete(0, "end")
+            self.ent_ncm.insert(0, str(primeiro.get("ncm") or "").strip())
+            preco_primeiro = float(primeiro.get("preco") or 0.0)
+            self._preencher_precificacao(
+                custo=f"{preco_primeiro:.2f}".replace(".", ","),
+                margem="0",
+                preco=f"{preco_primeiro:.2f}".replace(".", ","),
+                margem_manual=False,
+            )
+            self.btn_save.configure(state="normal")
+            self.btn_edit_sel.configure(state="disabled")
+
+        self.recarregar_primeira_pagina()
+        self._safe_focus(self.entry_barcode)
+
+        msg = f"Importação concluída com sucesso: {cadastrados} produtos cadastrados"
+        self.lbl_alerta.configure(text=msg, text_color="#66ff99")
+        messagebox.showinfo("Importação NF-e", msg)
+        registrar_log(None, "Importação NF-e", "Sucesso", f"Chave {chave_nfe} | novos={cadastrados} | total_itens={len(itens)}")
+
+    def _widgets_tab_order(self):
+        ordem = [
+            self.entry_barcode,
+            self.entry_chave_nfe if self.frame_importar_nfe.winfo_ismapped() else None,
+            self.ent_nome,
+            self.ent_variacao,
+            self.ent_ncm,
+            self.ent_preco_custo,
+            self.ent_margem_lucro,
+            self.ent_preco_venda,
+            self.ent_qtd,
+            self.ent_val,
+            self.ent_qtd_min,
+            self.btn_save,
+            self.btn_edit_sel,
+            self.btn_limpar,
+        ]
+        return [w for w in ordem if w is not None and w.winfo_exists()]
+
+    def _navegar_tab(self, event, step=1):
+        widgets = self._widgets_tab_order()
+        if not widgets:
+            return "break"
+
+        atual = event.widget
+        if atual not in widgets:
+            self._safe_focus(widgets[0])
+            return "break"
+
+        idx = widgets.index(atual)
+        prox = widgets[(idx + step) % len(widgets)]
+        self._safe_focus(prox)
+        return "break"
+
+    def _configurar_navegacao_tab(self):
+        for widget in [
+            self.entry_barcode,
+            self.entry_chave_nfe,
+            self.ent_nome,
+            self.ent_variacao,
+            self.ent_ncm,
+            self.ent_preco_custo,
+            self.ent_margem_lucro,
+            self.ent_preco_venda,
+            self.ent_qtd,
+            self.ent_val,
+            self.ent_qtd_min,
+            self.btn_save,
+            self.btn_edit_sel,
+            self.btn_limpar,
+        ]:
+            widget.bind("<Tab>", lambda e: self._navegar_tab(e, 1), add="+")
+            widget.bind("<Shift-Tab>", lambda e: self._navegar_tab(e, -1), add="+")
 
     def carregar_produtos_ao_abrir_aba(self):
         """Dispara a consulta de produtos somente quando a aba de estoque for aberta."""
@@ -570,7 +815,8 @@ class ModuloEstoque(ctk.CTkToplevel):
     def buscar_por_barcode(self, event=None):
         """Filtra ou destaca o produto pelo código de barras."""
         code = self.entry_barcode.get().strip()
-        if not code: return
+        if not code:
+            return "break"
         self.lbl_alerta.configure(text="")
 
         produto = None
@@ -596,9 +842,23 @@ class ModuloEstoque(ctk.CTkToplevel):
             registrar_log(None, "Busca de Produto por Código de Barras", "Sucesso", f"Produto {code} encontrado.")
             self.preencher_campos_cadastro(produto)
         else:
-            # Produto novo: Iniciar consulta inteligente em background
-            self.lbl_alerta.configure(text=f"🔍 Consultando API para o código {code}...", text_color="cyan")
+            # Produto novo: abre cadastro imediatamente e segue com consulta inteligente em background.
+            self.current_editing_id = None
+            self.ent_nome.delete(0, "end")
+            self.ent_variacao.delete(0, "end")
+            self.ent_ncm.delete(0, "end")
+            self._preencher_precificacao(custo="", margem="", preco="", margem_manual=False)
+            self.ent_qtd.delete(0, "end")
+            self.ent_qtd_min.delete(0, "end")
+            self.ent_val.delete(0, "end")
+            self.btn_save.configure(state="normal")
+            self.btn_edit_sel.configure(state="disabled")
+            self._safe_focus(self.ent_nome)
+
+            self.lbl_alerta.configure(text=f"Produto não encontrado no banco. Cadastro aberto para o código {code}.", text_color="orange")
             threading.Thread(target=self.consultar_api_inteligente, args=(code,), daemon=True).start()
+
+        return "break"
 
     def consultar_api_inteligente(self, barcode):
         """Consulta a API Open Food Facts e abre o cadastro pré-preenchido."""

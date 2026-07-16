@@ -47,13 +47,13 @@ class SystemMonitor:
         iniciou_servico = False
 
         alerta = ""
-        cor = "#2ecc71"
+        cor = "#ff5555"
         status_txt = "Fiscal: Desativado"
 
         if fiscal_ativo:
             if acbr_running and fiscal_ok:
-                status_txt = "Fiscal: Online"
-                cor = "#2ecc71"
+                status_txt = "Fiscal: Ativo"
+                cor = "#3b82f6"
             else:
                 status_txt = "Fiscal: Offline"
                 cor = "#ff6666"

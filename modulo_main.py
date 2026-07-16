@@ -1,6 +1,8 @@
 import sys
 import os
 import json
+import re
+import hashlib
 import time
 import sqlite3
 import threading
@@ -12,7 +14,7 @@ import customtkinter as ctk
 from tkinter import messagebox
 from urllib.parse import quote
 from database_manager import get_db_connection, get_db_path, obter_caminho_dados, registrar_log
-from modulo_config import carregar_configuracoes
+from modulo_config import carregar_configuracoes, salvar_configuracoes
 from updater import Updater
 from system_monitor import SystemMonitor
 
@@ -56,6 +58,8 @@ class AppPrincipal(ctk.CTk):
         self._fiscal_alerta_em_exibicao = False
         self._license_status = {"expired": False, "warning": False, "message": "Licença: Verificando...", "color": "#f1c40f", "renewal_url": ""}
         self._license_block_alert_open = False
+        self._pdv_expired_notified = False
+        self.btn_abrir_pdv = None
         self._resgatar_janela()
         
         # Define o protocolo para encerramento total do processo ao fechar a janela
@@ -250,6 +254,120 @@ class AppPrincipal(ctk.CTk):
             pass
         finally:
             self._license_block_alert_open = False
+
+    def _atualizar_estado_botao_pdv(self):
+        if self.btn_abrir_pdv is None:
+            return
+
+        expirou = bool(self._license_status.get("expired", False))
+        if expirou:
+            self.btn_abrir_pdv.configure(state="disabled", fg_color="#6b7280", hover_color="#6b7280")
+            if not self._pdv_expired_notified:
+                self._pdv_expired_notified = True
+                try:
+                    messagebox.showwarning("Licença", "Licença expirada. Entre em contato para renovação", parent=self)
+                except Exception:
+                    pass
+        else:
+            self._pdv_expired_notified = False
+            self.btn_abrir_pdv.configure(state="normal", fg_color="#27ae60", hover_color="#27ae60")
+
+    def _obter_identificador_ativacao(self) -> str:
+        cfg = carregar_configuracoes()
+        return (
+            str(cfg.get("market_id") or "").strip()
+            or str(cfg.get("cnpj") or "").strip()
+            or str(cfg.get("razao_social") or "").strip()
+            or "FRS_MERCADO"
+        ).upper()
+
+    def _validar_chave_ativacao(self, chave: str):
+        chave_txt = str(chave or "").strip().upper().replace(" ", "")
+        if chave_txt.startswith("LICENCA_FRS:"):
+            chave_txt = chave_txt.split(":", 1)[1].strip()
+
+        padrao = r"^FRS-(\d{8})-([A-F0-9]{12})$"
+        match = re.match(padrao, chave_txt)
+        if not match:
+            return False, "Formato inválido. Use FRS-AAAAMMDD-XXXXXXXXXXXX.", None
+
+        data_raw, assinatura = match.groups()
+        try:
+            exp_date = datetime.strptime(data_raw, "%Y%m%d").date()
+        except ValueError:
+            return False, "Data da chave inválida.", None
+
+        identificador = self._obter_identificador_ativacao()
+        base = f"{identificador}|{data_raw}|FRS_ATIVACAO_2026"
+        esperado = hashlib.sha256(base.encode("utf-8")).hexdigest()[:12].upper()
+        if assinatura != esperado:
+            return False, "Chave de ativação inválida para este cliente.", None
+
+        return True, "Licença validada com sucesso.", exp_date
+
+    def _persistir_licenca_ativada(self, chave: str, data_exp):
+        cfg = carregar_configuracoes()
+        cfg["license_mode"] = "full"
+        cfg["license_key"] = str(chave or "").strip()
+        cfg["license_expiration"] = data_exp.isoformat()
+        salvar_configuracoes(cfg, exibir_alerta=False)
+
+        with get_db_connection() as conn:
+            row = conn.execute("SELECT id FROM licenca ORDER BY id DESC LIMIT 1").fetchone()
+            if row:
+                conn.execute("UPDATE licenca SET data_expiracao = ? WHERE id = ?", (data_exp.isoformat(), row[0]))
+            else:
+                conn.execute("INSERT INTO licenca (data_expiracao) VALUES (?)", (data_exp.isoformat(),))
+
+    def abrir_tela_ativacao_sistema(self):
+        janela = ctk.CTkToplevel(self)
+        janela.title("Ativação de Sistema")
+        janela.geometry("520x230")
+        janela.transient(self)
+        janela.grab_set()
+
+        ctk.CTkLabel(
+            janela,
+            text="Ativação de Sistema",
+            font=("Roboto", 20, "bold"),
+        ).pack(pady=(18, 8))
+
+        ctk.CTkLabel(
+            janela,
+            text="Insira a Chave de Ativação:",
+            font=("Roboto", 12, "bold"),
+        ).pack(anchor="w", padx=24)
+
+        entry_chave = ctk.CTkEntry(
+            janela,
+            width=460,
+            placeholder_text="FRS-AAAAMMDD-XXXXXXXXXXXX",
+        )
+        entry_chave.pack(padx=24, pady=(6, 12))
+
+        lbl_feedback = ctk.CTkLabel(janela, text="", text_color="#f1c40f", font=("Roboto", 11, "bold"))
+        lbl_feedback.pack(anchor="w", padx=24)
+
+        def _validar_licenca():
+            ok, msg, exp = self._validar_chave_ativacao(entry_chave.get())
+            if not ok or exp is None:
+                lbl_feedback.configure(text=msg, text_color="#ff6666")
+                return
+            try:
+                self._persistir_licenca_ativada(entry_chave.get(), exp)
+                self._license_status["expired"] = False
+                lbl_feedback.configure(text=f"Licença validada. Expira em {exp.isoformat()}.", text_color="#66ff99")
+                self._atualizar_estado_botao_pdv()
+            except Exception as exc:
+                lbl_feedback.configure(text=f"Falha ao salvar licença: {exc}", text_color="#ff6666")
+
+        ctk.CTkButton(
+            janela,
+            text="Validar Licença",
+            fg_color="#1d4ed8",
+            hover_color="#2563eb",
+            command=_validar_licenca,
+        ).pack(pady=(10, 8))
 
     def _abrir_modulo_seguro(self, modulo_nome, opener):
         """Abre módulo com proteção de foco e tratamento de exceções sem esconder a raiz."""
@@ -538,6 +656,8 @@ class AppPrincipal(ctk.CTk):
             except Exception:
                 pass
 
+            self._atualizar_estado_botao_pdv()
+
             alerta = str(status.get("alerta") or "").strip()
             if alerta and not self._fiscal_alerta_em_exibicao:
                 self._fiscal_alerta_em_exibicao = True
@@ -720,6 +840,7 @@ class AppPrincipal(ctk.CTk):
             ("👤 USUÁRIOS", "#e67e22", self.abrir_usuarios),
             ("⚙️ CONFIGS", "#7f8c8d", self.abrir_configuracoes),
             ("💰 TAXAS", "#8e44ad", self.abrir_financeiro),
+            ("🔐 ATIVAÇÃO DE SISTEMA", "#1d4ed8", self.abrir_tela_ativacao_sistema),
             ("📱 APP DE CELULAR", "#0b7285", self.abrir_fluxo_app_celular),
             ("⬆️ VERIFICAR ATUALIZAÇÕES", "#2c3e50", self.verificar_atualizacoes_manual),
         ]
@@ -733,6 +854,10 @@ class AppPrincipal(ctk.CTk):
                 command=cmd
             )
             btn.grid(row=row, column=col, padx=15, pady=15, sticky="nsew")
+            if texto == "🚀 ABRIR PDV":
+                self.btn_abrir_pdv = btn
+
+        self._atualizar_estado_botao_pdv()
 
     def abrir_pdv(self):
         self._abrir_modulo_seguro("PDV", self._abrir_pdv_impl)
