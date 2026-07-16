@@ -1,0 +1,114 @@
+import os
+import sys
+from pathlib import Path
+
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+from client_credentials_store import load_client_credentials
+
+
+_FIREBASE_APP = None
+
+
+def _base_exec_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _resolver_arquivo_credenciais() -> Path:
+    candidatos = []
+    credenciais_seguras = load_client_credentials()
+
+    caminho_seguro = str(
+        credenciais_seguras.get("firebase_admin_key_path")
+        or credenciais_seguras.get("google_oauth_credentials_path")
+        or ""
+    ).strip()
+    if caminho_seguro:
+        candidatos.append(Path(caminho_seguro).expanduser())
+
+    env_path = str(os.getenv("FIREBASE_ADMIN_KEY_PATH", "") or "").strip()
+    if env_path:
+        candidatos.append(Path(env_path).expanduser())
+
+    base = _base_exec_dir()
+    modulo_dir = Path(__file__).resolve().parent
+    cwd = Path.cwd()
+
+    candidatos.append(base / "firebase-admin-key.json")
+    candidatos.append(base / "assets" / "firebase-admin-key.json")
+    candidatos.append(modulo_dir / "firebase-admin-key.json")
+    candidatos.append(modulo_dir / "assets" / "firebase-admin-key.json")
+    candidatos.append(cwd / "firebase-admin-key.json")
+    candidatos.append(cwd / "assets" / "firebase-admin-key.json")
+
+    candidatos.extend(sorted(base.glob("*firebase-adminsdk*.json")))
+    candidatos.extend(sorted(modulo_dir.glob("*firebase-adminsdk*.json")))
+    candidatos.extend(sorted(cwd.glob("*firebase-adminsdk*.json")))
+
+    vistos = set()
+    for caminho in candidatos:
+        try:
+            key = str(caminho.resolve()).lower()
+        except Exception:
+            key = str(caminho).lower()
+        if key in vistos:
+            continue
+        vistos.add(key)
+
+        if caminho.exists() and caminho.is_file():
+            return caminho.resolve()
+
+    raise FileNotFoundError(
+        "Credencial Firebase nao encontrada. Defina FIREBASE_ADMIN_KEY_PATH ou adicione firebase-admin-key.json na raiz."
+    )
+
+
+def inicializar_firebase():
+    global _FIREBASE_APP
+
+    if _FIREBASE_APP is not None:
+        return _FIREBASE_APP
+
+    cred_path = _resolver_arquivo_credenciais()
+
+    if firebase_admin._apps:
+        _FIREBASE_APP = firebase_admin.get_app()
+        return _FIREBASE_APP
+
+    cred = credentials.Certificate(str(cred_path))
+    _FIREBASE_APP = firebase_admin.initialize_app(cred)
+    return _FIREBASE_APP
+
+
+def obter_firestore_client():
+    inicializar_firebase()
+    return firestore.client()
+
+
+def buscar_produto_por_codigo(codigo: str):
+    codigo = str(codigo or "").strip()
+    if not codigo:
+        return None
+
+    db = obter_firestore_client()
+
+    # Busca por codigo_barras; fallback para campo codigo.
+    consulta = db.collection("produtos").where("codigo_barras", "==", codigo).limit(1).stream()
+    docs = list(consulta)
+    if not docs:
+        consulta = db.collection("produtos").where("codigo", "==", codigo).limit(1).stream()
+        docs = list(consulta)
+
+    if not docs:
+        return None
+
+    data = docs[0].to_dict() or {}
+    return {
+        "id": docs[0].id,
+        "nome": str(data.get("nome") or data.get("descricao") or "Produto sem nome"),
+        "preco": float(data.get("preco") or data.get("preco_venda") or 0.0),
+        "foto_url": str(data.get("foto_url") or data.get("imagem_url") or "").strip(),
+    }

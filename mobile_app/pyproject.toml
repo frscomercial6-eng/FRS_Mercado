@@ -1,0 +1,31 @@
+[project]
+name = "mercado"
+version = "0.1.0"
+description = "FRS Mercado Mobile App"
+requires-python = ">=3.11"
+dependencies = [
+  "flet",
+  "firebase-admin"
+]
+
+[tool.flet]
+org = "com.frs"
+product = "FRS Mercado"
+company = "FRS"
+
+[tool.flet.app]
+path = "."
+module = "main"
+exclude = [
+  "build",
+  ".venv",
+  "__pycache__",
+  ".pytest_cache"
+]
+
+[tool.flet.android.permission]
+"android.permission.CAMERA" = true
+
+[tool.flet.deep_linking]
+scheme = "frsmercado"
+host = "scan"
