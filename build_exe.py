@@ -157,6 +157,23 @@ VSVersionInfo(
     return WINDOWS_VERSION_INFO_PATH
 
 
+def _resolve_customtkinter_assets_dir() -> Path | None:
+    """Resolve a pasta de assets do CustomTkinter para inclusão explícita no build."""
+    spec = importlib.util.find_spec("customtkinter")
+    if spec is None:
+        return None
+
+    origin = getattr(spec, "origin", None)
+    if not origin:
+        return None
+
+    package_dir = Path(origin).resolve().parent
+    assets_dir = package_dir / "assets"
+    if assets_dir.exists() and assets_dir.is_dir():
+        return assets_dir
+    return None
+
+
 def _build_pyinstaller_args(app_version: str) -> list[str]:
     entrypoint = _resolve_entrypoint()
     hook_path = _ensure_runtime_hook()
@@ -172,6 +189,7 @@ def _build_pyinstaller_args(app_version: str) -> list[str]:
         "--noconfirm",
         "--onefile",
         "--windowed",
+        "--disable-windowed-traceback",
         "--name=FRS_Mercado",
         "--icon=assets/logo.ico",
         f"--version-file={version_file}",
@@ -189,6 +207,14 @@ def _build_pyinstaller_args(app_version: str) -> list[str]:
         "--collect-submodules=encodings",
         f"--runtime-hook={hook_path}",
     ]
+
+    # Inclui explicitamente temas do CustomTkinter para evitar falhas em _MEI temporário.
+    customtk_assets_dir = _resolve_customtkinter_assets_dir()
+    if customtk_assets_dir is not None:
+        args.append(f"--add-data={customtk_assets_dir};customtkinter/assets")
+        print(f"- CustomTkinter themes incluídos: {customtk_assets_dir} -> customtkinter/assets")
+    else:
+        print("[AVISO] Pasta de assets do CustomTkinter não encontrada para inclusão explícita.")
 
     # Reforça resolução de stdlib/site-packages em ambientes sem Python instalado.
     std_paths = {

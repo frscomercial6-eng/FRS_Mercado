@@ -1,9 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('assets', 'assets')]
+datas = [('assets', 'assets'), ('C:\\Users\\User\\AppData\\Roaming\\Python\\Python314\\site-packages\\customtkinter\\assets', 'customtkinter/assets')]
 binaries = []
-hiddenimports = ['hashlib', 'uuid', 'altgraph']
+hiddenimports = ['hashlib', 'uuid', 'encodings', 'codecs', 'importlib', 'importlib.util', 'pkgutil', 'zipimport', 'site', 'sysconfig', 'altgraph']
+hiddenimports += collect_submodules('encodings')
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('PIL')
@@ -22,11 +24,13 @@ tmp_ret = collect_all('requests')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('bcrypt')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('setuptools')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=['C:\\Python314\\DLLs', 'C:\\Python314\\Lib', 'C:\\Python314\\Lib\\site-packages'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -53,7 +57,7 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
-    disable_windowed_traceback=False,
+    disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,

@@ -15,6 +15,7 @@ import customtkinter as ctk
 
 from modulo_config import carregar_configuracoes
 from app_paths import obter_caminho_dados
+from error_notifier import notify_error
 
 
 UPDATE_STATE_FILE = Path(obter_caminho_dados("update_state.json"))
@@ -221,10 +222,14 @@ def check_and_apply_startup_update(repo: str) -> bool:
         return False
 
     updater = Updater(parent=None)
-    destino = updater._baixar_release_com_progresso(release.asset_url, release.asset_name)
-    updater._executar_instalador(destino)
-    updater._reiniciar_aplicacao()
-    return True
+    try:
+        destino = updater._baixar_release_com_progresso(release.asset_url, release.asset_name)
+        updater._executar_instalador(destino)
+        updater._reiniciar_aplicacao()
+        return True
+    except Exception as e:
+        notify_error("updater_bootstrap", e)
+        return False
 
 
 class Updater:
@@ -311,7 +316,7 @@ class Updater:
                 self._reiniciar_aplicacao()
             except Exception as e:
                 self._fechar_janela_progresso()
-                self._alerta("Atualização", f"Falha na atualização: {e}")
+                notify_error("updater_worker", e)
 
         threading.Thread(target=worker, daemon=True).start()
         return True

@@ -18,6 +18,7 @@ from modulo_config import carregar_configuracoes, obter_limite_sangria_preventiv
 from modulo_fiscal import ModuloExportacaoFiscal, FiscalManager
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
 from webhook_delivery import iniciar_servidor_webhook
+from error_notifier import ensure_error_telemetry_started
 
 
 def calcular_impostos_liquidos(valor_venda, ncm):
@@ -37,6 +38,7 @@ def calcular_impostos_liquidos(valor_venda, ncm):
 class ModuloPDV(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
+        ensure_error_telemetry_started()
         self.title("Caixa PDV - Mercado FRS")
         self.geometry("1100x750")
 
