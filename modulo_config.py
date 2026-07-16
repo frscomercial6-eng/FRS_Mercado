@@ -444,6 +444,16 @@ def exibir_configuracoes(master=None):
     entry_emissor.insert(0, config_atual.get("emissor_fiscal_path", ""))
     entry_emissor.grid(row=3, column=1, padx=(10, 0), pady=6, sticky="w")
 
+    fiscal_ativo_var = ctk.BooleanVar(value=bool(config_atual.get("fiscal_ativo", False)))
+    check_fiscal_ativo = ctk.CTkCheckBox(
+        frame_geral,
+        text="ACBrMonitor (Emissão Fiscal) Ativo",
+        variable=fiscal_ativo_var,
+        onvalue=True,
+        offvalue=False,
+    )
+    check_fiscal_ativo.grid(row=11, column=0, columnspan=2, padx=10, pady=(2, 8), sticky="w")
+
     ctk.CTkLabel(frame_geral, text="Google Drive (Credenciais):").grid(row=4, column=0, padx=10, pady=6, sticky="e")
     entry_drive_creds = ctk.CTkEntry(frame_geral, width=360)
     entry_drive_creds.insert(0, config_atual.get("drive_credentials_path", ""))
@@ -583,6 +593,24 @@ def exibir_configuracoes(master=None):
     # --- Ações ---
     def acao_salvar():
         try:
+            if not bool(fiscal_ativo_var.get()):
+                confirmar_desativacao = messagebox.askyesno(
+                    "ATENÇÃO",
+                    (
+                        "ATENÇÃO: Você está desativando o componente de emissão fiscal. "
+                        "Caso esta opção seja desmarcada, não será possível emitir Nota Fiscal "
+                        "nem realizar a busca de XML no banco de dados. Deseja realmente prosseguir?"
+                    ),
+                    parent=janela_config,
+                )
+                if not confirmar_desativacao:
+                    fiscal_ativo_var.set(True)
+                    status_label.configure(
+                        text="Desativação do ACBrMonitor cancelada pelo usuário.",
+                        text_color="#ff5555",
+                    )
+                    return
+
             novos_dados = {
                 "razao_social": entry_razao.get(),
                 "nome_estabelecimento": entry_razao.get(),
@@ -591,6 +619,7 @@ def exibir_configuracoes(master=None):
                 "drive_credentials_path": entry_drive_creds.get(),
                 "drive_backup_folder_id": entry_drive_id.get(),
                 "emissor_fiscal_path": entry_emissor.get(),
+                "fiscal_ativo": bool(fiscal_ativo_var.get()),
                 "pasta_entrada_fiscal": entry_in.get(),
                 "pasta_retorno_fiscal": entry_out.get(),
                 "limite_sangria_preventiva": entry_limite.get(),

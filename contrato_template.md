@@ -16,6 +16,12 @@ A FRS Solutions podera disponibilizar atualizacoes de seguranca, desempenho e fu
 ## 4. Suporte
 O suporte tecnico seguira os canais e prazos comerciais acordados.
 
+## 4.1 Integracao Fiscal com ACBrMonitor
+O software ACBrMonitor e uma ferramenta de terceiros indispensavel para a comunicacao fiscal. A FRS Solutions nao possui acesso aos dados ou ao funcionamento interno do ACBrMonitor, utilizando-o apenas como ponte de integracao. Fica ciente o contratante que, sem o ACBrMonitor instalado e ativo, a emissao de documentos fiscais e tecnicamente impossivel.
+
+## 4.2 Aplicativo Mobile (APK)
+O APK fornecido pela FRS Solutions e uma extensao exclusiva do software FRS Mercado, sendo de uso restrito ao ecossistema da FRS.
+
 ## 5. Privacidade e Dados
 Os dados operacionais sao de responsabilidade do cliente, incluindo backup e seguranca do ambiente local.
 

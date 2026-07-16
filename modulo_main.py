@@ -191,20 +191,21 @@ class AppPrincipal(ctk.CTk):
         threading.Thread(target=_executar_backup_drive, daemon=True).start()
 
     def _watchdog_visibilidade_janela(self):
-        """Reexibe a janela principal caso seja minimizada/ocultada por engano."""
+        """Reexibe a janela principal apenas quando estiver oculta (withdrawn)."""
         if not self._watchdog_janela_ativo or not self.winfo_exists():
             return
 
         try:
             estado = self.state()
-            if estado in ("iconic", "withdrawn"):
+            # Não força foco quando o usuário minimiza (iconic).
+            if estado == "withdrawn":
                 self.deiconify()
                 self.lift()
                 self.focus_force()
         except Exception:
             pass
 
-        self._registrar_after(2000, self._watchdog_visibilidade_janela)
+        self._registrar_after(10000, self._watchdog_visibilidade_janela)
 
     def _mostrar_erro_modulo(self, titulo, mensagem):
         """Mostra erro garantindo prioridade visual para a janela principal."""

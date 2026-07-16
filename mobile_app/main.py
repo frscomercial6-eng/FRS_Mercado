@@ -98,7 +98,7 @@ def main(page: ft.Page):
 
         # Fluxo Android via app Barcode Scanner (ZXing) com retorno por deep link.
         # Se o app scanner nao estiver instalado, o Android exibira app nao encontrado.
-        page.launch_url("zxing://scan/?ret=frsmercado://scan/%s", web_window_name="_self")
+        page.launch_url("zxing://scan/?ret=frsmercado://scan/%s", web_popup_window_name="_self")
 
     def _on_route_change(e: ft.RouteChangeEvent):
         _tratar_retorno_scan(e.route)

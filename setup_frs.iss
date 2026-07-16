@@ -1,5 +1,5 @@
 #define MyAppName "FRS Mercado"
-#define MyAppVersion "1.0.4"
+#define MyAppVersion "1.0.5"
 #define MyAppPublisher "FRS Solutions"
 #define MyAppExeName "FRS_Mercado.exe"
 #define PaymentURL "https://invoice.infinitepay.io/plans/frsoficinadepesca/avka57U38g"
@@ -14,7 +14,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=EULA.txt
 OutputDir=installer
-OutputBaseFilename=FRS_Mercado_Setup_1.0.4
+OutputBaseFilename=FRS_Mercado_Setup_1.0.5
 SetupIconFile=assets\logo.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2
@@ -50,3 +50,21 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilen
 [Run]
 Filename: "{app}\instala\ACBrMonitor_Installer.exe"; Parameters: "/VERYSILENT /NORESTART"; Description: "Instalar ACBrMonitor"; Flags: waituntilterminated runhidden skipifsilent skipifdoesntexist; Tasks: instalaracbr
 Filename: "{app}\{#MyAppExeName}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+	Resp: Integer;
+begin
+	Result := True;
+	if (CurPageID = wpSelectTasks) and (not WizardIsTaskSelected('instalaracbr')) then
+	begin
+		Resp := MsgBox(
+			'ATENCAO: Voce esta desativando o componente de emissao fiscal. Caso esta opcao seja desmarcada, nao sera possivel emitir Nota Fiscal nem realizar a busca de XML no banco de dados. Deseja realmente prosseguir?',
+			mbConfirmation,
+			MB_YESNO
+		);
+		if Resp = IDNO then
+			Result := False;
+	end;
+end;

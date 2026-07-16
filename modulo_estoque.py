@@ -8,6 +8,7 @@ import os
 import threading
 from database_manager import obter_caminho_dados
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
+from modulo_config import carregar_configuracoes
 
 
 def calcular_preco_venda(preco_custo, margem_lucro):
@@ -245,12 +246,36 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.btn_next.pack(side="right", padx=8, pady=8)
 
         self._configurar_navegacao_tab()
+        self._atualizar_disponibilidade_importacao_nfe()
         self._safe_focus(self.entry_barcode)
+
+    def _atualizar_disponibilidade_importacao_nfe(self):
+        cfg = carregar_configuracoes() or {}
+        fiscal_ativo = bool(cfg.get("fiscal_ativo", False))
+        if fiscal_ativo:
+            self.btn_importar_nfe.configure(state="normal", fg_color="#14532d", hover_color="#166534")
+            return
+
+        self.btn_importar_nfe.configure(state="disabled", fg_color="#6b7280", hover_color="#6b7280")
+        self.frame_importar_nfe.pack_forget()
+        self.lbl_alerta.configure(
+            text="Busca de XML bloqueada: ative o ACBrMonitor nas Configurações para usar a importação NF-e.",
+            text_color="#ff6666",
+        )
 
     def _normalizar_chave_nfe(self, chave: str) -> str:
         return "".join(ch for ch in str(chave or "") if ch.isdigit())
 
     def alternar_campo_importar_nfe(self):
+        cfg = carregar_configuracoes() or {}
+        if not bool(cfg.get("fiscal_ativo", False)):
+            messagebox.showwarning(
+                "Integração Fiscal desativada",
+                "A busca de XML está bloqueada. Ative o ACBrMonitor nas Configurações para continuar.",
+            )
+            self._safe_focus(self.entry_barcode)
+            return
+
         if self.frame_importar_nfe.winfo_ismapped():
             self.frame_importar_nfe.pack_forget()
             self._safe_focus(self.entry_barcode)
