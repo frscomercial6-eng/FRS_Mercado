@@ -280,6 +280,26 @@ class Updater:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def start_login_notice_check(self, repo: str, enabled=True, on_available=None):
+        if not enabled or not repo or self._check_running:
+            return
+
+        self._check_running = True
+
+        def worker():
+            try:
+                release = self.checar_atualizacao(repo, considerar_adiamento=True)
+                if release is None or on_available is None:
+                    return
+
+                self._run_on_ui(lambda: on_available(release))
+            except Exception as e:
+                notify_error("updater_login_notice", e)
+            finally:
+                self._check_running = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _show_update_dialog(self, release, remind_hours):
         if self.parent is not None and hasattr(self.parent, "winfo_exists") and not self.parent.winfo_exists():
             return

@@ -6,13 +6,11 @@ import sys
 
 import customtkinter as ctk
 
-from app_config import AUTO_UPDATE_REPO
 from client_credentials_store import load_client_credentials
 from modulo_login import ModuloLogin
 from database_manager import get_db_connection, obter_caminho_dados
 from error_notifier import notify_error, ensure_error_telemetry_started
 from app_paths import obter_caminho_log
-from updater import check_and_apply_startup_update
 
 
 def _log_debug(contexto: str, erro: Exception | None = None) -> None:
@@ -84,18 +82,6 @@ def _carregar_credenciais_cliente() -> None:
         os.environ[env_key] = value
 
 
-def _aplicar_auto_update_bootstrap() -> bool:
-    repo = str(AUTO_UPDATE_REPO or "").strip()
-    if not repo:
-        return False
-
-    try:
-        return check_and_apply_startup_update(repo)
-    except Exception as e:
-        _log_debug("Falha na verificação automática de atualização", e)
-        return False
-
-
 def main() -> None:
     """Fluxo único de inicialização: Login/Licença -> Interface principal."""
     ensure_error_telemetry_started()
@@ -105,9 +91,6 @@ def main() -> None:
         usuario_logado = None
         app = None
         try:
-            if _aplicar_auto_update_bootstrap():
-                return
-
             _carregar_credenciais_cliente()
             _garantir_banco_inicial()
 

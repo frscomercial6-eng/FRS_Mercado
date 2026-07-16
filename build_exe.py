@@ -16,6 +16,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 RUNTIME_HOOK_PATH = ROOT_DIR / "_runtime_hook_error_logger.py"
 SUPPORT_DIR = ROOT_DIR / "_build_support"
 APP_EXE_NAME = "FRS_Mercado.exe"
+APP_DIST_DIR = ROOT_DIR / "dist" / "FRS_Mercado"
 WINDOWS_VERSION_INFO_PATH = ROOT_DIR / "_build_support" / "version_info.txt"
 
 
@@ -187,7 +188,7 @@ def _build_pyinstaller_args(app_version: str) -> list[str]:
     args = [
         entrypoint,
         "--noconfirm",
-        "--onefile",
+        "--onedir",
         "--windowed",
         "--disable-windowed-traceback",
         "--name=FRS_Mercado",
@@ -290,16 +291,21 @@ def _copy_if_exists(src: Path, dst: Path) -> None:
 
 def _create_portable_package(app_version: str) -> Path:
     """Monta uma versão portátil e gera ZIP em installer/."""
-    dist_exe = ROOT_DIR / "dist" / APP_EXE_NAME
-    if not dist_exe.exists():
-        raise FileNotFoundError(f"Executável não encontrado para pacote portátil: {dist_exe}")
+    if not APP_DIST_DIR.exists() or not APP_DIST_DIR.is_dir():
+        raise FileNotFoundError(f"Saída onedir não encontrada para pacote portátil: {APP_DIST_DIR}")
 
     portable_dir = ROOT_DIR / "portable_build"
     if portable_dir.exists():
         shutil.rmtree(portable_dir)
     portable_dir.mkdir(parents=True, exist_ok=True)
 
-    _copy_if_exists(dist_exe, portable_dir / APP_EXE_NAME)
+    for path in APP_DIST_DIR.rglob("*"):
+        if path.is_file():
+            rel_path = path.relative_to(APP_DIST_DIR)
+            destino = portable_dir / rel_path
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destino)
+
     _copy_if_exists(ROOT_DIR / "assets", portable_dir / "assets")
     _copy_if_exists(ROOT_DIR / "version.txt", portable_dir / "version.txt")
     _copy_if_exists(ROOT_DIR / "EULA.txt", portable_dir / "EULA.txt")
@@ -427,11 +433,13 @@ def main() -> None:
 
     print("Arquivos/recursos que serão empacotados:")
     print("- Entrypoint: main.py")
+    print("- Saída PyInstaller: dist/FRS_Mercado/")
+    print("- Executável principal: dist/FRS_Mercado/FRS_Mercado.exe")
     print("- Ícone: assets/logo.ico")
     print("- Pasta assets -> assets")
     print("- Runtime hook de log -> FRS_Mercado_runtime_error.log em dist/")
     print("- Coleta completa (quando instalado): customtkinter, PIL, reportlab, googleapiclient, google_auth_oauthlib, google.auth, httplib2, requests, bcrypt")
-    print("- Payload suporte (_build_support): credentials.json, google-services.json, checklist_homologacao.md, data/mercado.db, acbr/ACBrMonitor_Installer.exe, mobile/mercado.apk")
+    print("- Payload suporte (_build_support): credentials.json, google-services.json, checklist_homologacao.md, data/mercado.db, acbr/ACBrMonitor_Installer.exe")
     if (ROOT_DIR / "config").exists():
         print("- config/ -> config/")
 

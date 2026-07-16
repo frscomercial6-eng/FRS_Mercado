@@ -18,6 +18,22 @@ def _base_exec_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _is_service_account_json(caminho: Path) -> bool:
+    try:
+        if not caminho.exists() or not caminho.is_file() or caminho.suffix.lower() != ".json":
+            return False
+        payload = json.loads(caminho.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return False
+        return (
+            str(payload.get("type") or "").strip().lower() == "service_account"
+            and bool(str(payload.get("client_email") or "").strip())
+            and bool(str(payload.get("private_key") or "").strip())
+        )
+    except Exception:
+        return False
+
+
 def _resolver_arquivo_credenciais() -> Path:
     candidatos = []
     credenciais_seguras = load_client_credentials()
@@ -48,6 +64,16 @@ def _resolver_arquivo_credenciais() -> Path:
     candidatos.extend(sorted(base.glob("*firebase-adminsdk*.json")))
     candidatos.extend(sorted(modulo_dir.glob("*firebase-adminsdk*.json")))
     candidatos.extend(sorted(cwd.glob("*firebase-adminsdk*.json")))
+
+    for json_file in sorted(base.glob("*.json")):
+        if _is_service_account_json(json_file):
+            candidatos.append(json_file)
+    for json_file in sorted(modulo_dir.glob("*.json")):
+        if _is_service_account_json(json_file):
+            candidatos.append(json_file)
+    for json_file in sorted(cwd.glob("*.json")):
+        if _is_service_account_json(json_file):
+            candidatos.append(json_file)
 
     vistos = set()
     for caminho in candidatos:

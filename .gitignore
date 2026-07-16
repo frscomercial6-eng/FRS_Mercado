@@ -1,6 +1,8 @@
 # Python cache
 __pycache__/
+**/__pycache__/
 *.py[cod]
+*.pyo
 *$py.class
 
 # Virtual environments
@@ -11,9 +13,13 @@ env/
 # Build artifacts
 build/
 dist/
-installer/*.exe
-installer/*.zip
+installer/
 portable_build/
+release_final/
+_flet_windows_stage/
+_build_support/*.json
+_build_support/data/
+_build_support/version_info.txt
 *.spec.bak
 
 # Local runtime data
@@ -33,16 +39,20 @@ data/
 .DS_Store
 Thumbs.db
 
-# Secrets and credentials
+# Environment and secret material
+.env
+.env.*
+*.env
+*.json
+*.jsonl
+*.secret
+*.key
 credentials.json
 google-services.json
-_build_support/credentials.json
-_build_support/google-services.json
-portable_build/credentials.json
-portable_build/google-services.json
 firebase-admin-key.json
 *firebase-adminsdk*.json
 *firebase-admin-key*.json
+client_credentials.sec.json
 
 # Local config state (machine/user specific)
 update_state.json

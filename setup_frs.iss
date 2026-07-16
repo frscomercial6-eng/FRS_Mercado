@@ -31,7 +31,7 @@ Name: "desktopicon"; Description: "Criar atalhos na area de trabalho"; GroupDesc
 Name: "instalaracbr"; Description: "Instalar ACBrMonitor (motor fiscal)"; GroupDescription: "Componentes adicionais:"; Flags: checkedonce
 
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "version.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist

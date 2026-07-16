@@ -6,21 +6,24 @@ import webbrowser
 import os
 import sys
 from PIL import Image
+from app_config import AUTO_UPDATE_REPO
 from app_paths import obter_caminho_dados
 from database_manager import get_db_connection, registrar_log
 from datetime import datetime, timedelta
 from modulo_config import carregar_configuracoes # Para obter a Razão Social
 from market_identity import ensure_market_identity_provisioning, ensure_local_market_id
+from updater import Updater
 
 
 _USUARIO_LOGADO = None
 RENOVACAO_URL = "https://invoice.infinitepay.io/plans/frsoficinadepesca/avka57U38g"
 
 class ModuloLogin(ctk.CTkToplevel):
-    def __init__(self, parent, callback_sucesso):
+    def __init__(self, parent, callback_sucesso, auto_update_repo: str | None = None):
         super().__init__(parent)
         self.parent = parent
         self.callback_sucesso = callback_sucesso
+        self.auto_update_repo = str(auto_update_repo or AUTO_UPDATE_REPO or "").strip()
         
         self.title("Autenticação - Mercado FRS")
         self.geometry("420x470")
@@ -35,6 +38,9 @@ class ModuloLogin(ctk.CTkToplevel):
         self.backup_google_autenticado = self._verificar_token_backup_local()
         self._system_monitor = None
         self._logo_image = None
+        self._updater = Updater(parent=self)
+        self._update_notice_label = None
+        self._update_notice_scheduled = False
 
         # Centralizar janela
         self._registrar_after(10, self._centralizar)
@@ -373,6 +379,7 @@ class ModuloLogin(ctk.CTkToplevel):
         self.frame_setup.pack_forget()
         self.frame_ativacao.pack_forget()
         self.frame_login.pack(padx=30, pady=10, fill="both", expand=True)
+        self._update_notice_label = None
 
         for widget in self.frame_login.winfo_children():
             widget.destroy()
@@ -429,6 +436,56 @@ class ModuloLogin(ctk.CTkToplevel):
             hover_color="#5d6d74",
             command=abrir_ativacao,
         ).pack(fill="x")
+
+        self._agendar_verificacao_atualizacao()
+
+    def _agendar_verificacao_atualizacao(self):
+        if self._update_notice_scheduled:
+            return
+        self._update_notice_scheduled = True
+
+        def _start_check():
+            self._update_notice_scheduled = False
+            if not self.winfo_exists():
+                return
+            if not self.auto_update_repo:
+                return
+
+            try:
+                config = carregar_configuracoes()
+                enabled = bool(config.get("auto_update_enabled", True))
+            except Exception:
+                enabled = True
+
+            self._updater.start_login_notice_check(
+                repo=self.auto_update_repo,
+                enabled=enabled,
+                on_available=self._mostrar_aviso_atualizacao,
+            )
+
+        self._registrar_after(750, _start_check)
+
+    def _mostrar_aviso_atualizacao(self, release):
+        if not self.winfo_exists() or release is None:
+            return
+
+        try:
+            if self._update_notice_label is None or not self._update_notice_label.winfo_exists():
+                self._update_notice_label = ctk.CTkLabel(
+                    self.frame_login,
+                    text="",
+                    text_color="#f1c40f",
+                    font=("Roboto", 10, "italic"),
+                    wraplength=300,
+                    justify="center",
+                )
+                self._update_notice_label.pack(pady=(8, 0), padx=20)
+
+            self._update_notice_label.configure(
+                text=f"Atualização disponível em segundo plano: versão {release.version}",
+            )
+        except Exception:
+            pass
 
     def tentar_entrar(self):
         usuario = self.ent_usuario.get()

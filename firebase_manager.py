@@ -1,6 +1,9 @@
 import os
 import sys
+import json
 from pathlib import Path
+
+from client_credentials_store import load_client_credentials
 
 
 _FIREBASE_APP = None
@@ -25,8 +28,33 @@ def _base_exec_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _is_service_account_json(caminho: Path) -> bool:
+    try:
+        if not caminho.exists() or not caminho.is_file() or caminho.suffix.lower() != ".json":
+            return False
+        payload = json.loads(caminho.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return False
+        return (
+            str(payload.get("type") or "").strip().lower() == "service_account"
+            and bool(str(payload.get("client_email") or "").strip())
+            and bool(str(payload.get("private_key") or "").strip())
+        )
+    except Exception:
+        return False
+
+
 def _resolver_arquivo_credenciais() -> Path:
     candidatos = []
+
+    credenciais_seguras = load_client_credentials()
+    caminho_seguro = str(
+        credenciais_seguras.get("firebase_admin_key_path")
+        or credenciais_seguras.get("google_oauth_credentials_path")
+        or ""
+    ).strip()
+    if caminho_seguro:
+        candidatos.append(Path(caminho_seguro).expanduser())
 
     env_path = str(os.getenv("FIREBASE_ADMIN_KEY_PATH", "") or "").strip()
     if env_path:
@@ -41,6 +69,14 @@ def _resolver_arquivo_credenciais() -> Path:
     # Compatibilidade: encontra automaticamente chaves oficiais do Firebase Admin SDK.
     candidatos.extend(sorted(base.glob("*firebase-adminsdk*.json")))
     candidatos.extend(sorted(cwd.glob("*firebase-adminsdk*.json")))
+
+    # Fallback seguro: aceita qualquer JSON local que seja credencial service_account válida.
+    for json_file in sorted(base.glob("*.json")):
+        if _is_service_account_json(json_file):
+            candidatos.append(json_file)
+    for json_file in sorted(cwd.glob("*.json")):
+        if _is_service_account_json(json_file):
+            candidatos.append(json_file)
 
     vistos = set()
     for caminho in candidatos:
