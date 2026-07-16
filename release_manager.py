@@ -57,8 +57,8 @@ def _sync_setup_iss(version: str) -> None:
     _replace_first_regex(setup_file, r'^#define MyAppVersion ".*"$', f'#define MyAppVersion "{version}"')
     _replace_first_regex(
         setup_file,
-        r"^OutputBaseFilename=FRS_Mercado_Setup_.*$",
-        f"OutputBaseFilename=FRS_Mercado_Setup_{version}",
+        r"^OutputBaseFilename=FRS_Mercado_Setup.*$",
+        "OutputBaseFilename=FRS_Mercado_Setup",
     )
 
 
@@ -72,7 +72,7 @@ def _sync_checklist(version: str) -> None:
     )
     content = re.sub(
         r"installer/FRS_Mercado_Setup_[0-9]+\.[0-9]+\.[0-9]+\.exe",
-        f"installer/FRS_Mercado_Setup_{version}.exe",
+        "installer/FRS_Mercado_Setup.exe",
         content,
     )
     checklist.write_text(content, encoding="utf-8")
@@ -133,7 +133,7 @@ def _sync_version_manifest(version: str) -> None:
     repo = _infer_github_repo() or "frscomercial6-eng/FRS_Mercado"
     payload = {
         "latest_version": version,
-        "download_url": f"https://github.com/{repo}/releases/latest/download/FRS_Mercado_Setup_{version}.exe",
+        "download_url": f"https://github.com/{repo}/releases/latest/download/FRS_Mercado_Setup.exe",
         "auto_update": True,
     }
     VERSION_JSON_FILE.write_text(f"{json.dumps(payload, indent=2, ensure_ascii=False)}\n", encoding="utf-8")

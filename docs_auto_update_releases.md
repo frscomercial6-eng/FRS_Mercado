@@ -21,7 +21,7 @@ O auto-update consulta `version.json` na raiz do branch principal do repositóri
 
 1. Criar tag da versão (`v1.0.5`).
 2. Publicar Release com os binários:
-   - instalador desktop (`FRS_Mercado_Setup_1.0.5.exe`) ou bundle Flet (`FRS_Mercado_FletBundle_1.0.5.exe`)
+  - instalador desktop (`FRS_Mercado_Setup.exe`) ou bundle Flet (`FRS_Mercado_FletBundle_1.0.5.exe`)
    - opcional zip portátil (`FRS_Mercado_Portable_1.0.5.zip` ou `FRS_Mercado_FletPortable_1.0.5.zip`)
 3. Copiar o ID do asset principal do instalador.
 4. Atualizar `version.json` apontando `latest_version` e `download_url` do asset.
@@ -32,7 +32,7 @@ O auto-update consulta `version.json` na raiz do branch principal do repositóri
 - Nome da Release: `FRS Mercado 1.0.5`
 - Tag: `v1.0.5`
 - Assets:
-  - `FRS_Mercado_Setup_1.0.5.exe` (principal para auto-update)
+  - `FRS_Mercado_Setup.exe` (principal para auto-update)
   - `FRS_Mercado_Portable_1.0.5.zip` (opcional)
   - `FRS_Mercado_FletBundle_1.0.5.exe` (quando build Flet for o canal principal)
 

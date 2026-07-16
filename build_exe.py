@@ -322,24 +322,6 @@ def _prepare_support_payload() -> None:
     else:
         print("[AVISO] Instalador do ACBr não encontrado para inclusão no setup all-in-one.")
 
-    # APK do app de celular embutido no instalador principal.
-    mobile_dir = SUPPORT_DIR / "mobile"
-    mobile_dir.mkdir(parents=True, exist_ok=True)
-    apk_candidates = [
-        ROOT_DIR / "mobile_app" / "build" / "apk" / "mercado.apk",
-        ROOT_DIR / "release_final" / "mercado.apk",
-    ]
-    apk_found = None
-    for apk in apk_candidates:
-        if apk.exists() and apk.is_file():
-            apk_found = apk
-            break
-    if apk_found is not None:
-        _copy_if_exists(apk_found, mobile_dir / "mercado.apk")
-        print(f"- APK incluído no payload: {apk_found} -> {mobile_dir / 'mercado.apk'}")
-    else:
-        print("[AVISO] mercado.apk não encontrado para inclusão no setup all-in-one.")
-
     # Banco principal vai para a pasta data (mesmo layout esperado em runtime).
     data_dir = SUPPORT_DIR / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -399,7 +381,7 @@ def _build_installer(app_version: str) -> Path | None:
     print(f"Executando Inno Setup: {' '.join(cmd)}")
     subprocess.run(cmd, cwd=str(ROOT_DIR), check=True)
 
-    return ROOT_DIR / "installer" / f"FRS_Mercado_Setup_{app_version}.exe"
+    return ROOT_DIR / "installer" / "FRS_Mercado_Setup.exe"
 
 
 def main() -> None:

@@ -5,12 +5,12 @@ import uuid
 import webbrowser
 import os
 import sys
+from PIL import Image
 from app_paths import obter_caminho_dados
 from database_manager import get_db_connection, registrar_log
 from datetime import datetime, timedelta
 from modulo_config import carregar_configuracoes # Para obter a Razão Social
 from market_identity import ensure_market_identity_provisioning, ensure_local_market_id
-from system_monitor import SystemMonitor
 
 
 _USUARIO_LOGADO = None
@@ -23,7 +23,7 @@ class ModuloLogin(ctk.CTkToplevel):
         self.callback_sucesso = callback_sucesso
         
         self.title("Autenticação - Mercado FRS")
-        self.geometry("400x400")
+        self.geometry("420x470")
         
         # Garante que fechar o login use o método de encerramento total do sistema
         self.protocol("WM_DELETE_WINDOW", 
@@ -34,6 +34,7 @@ class ModuloLogin(ctk.CTkToplevel):
         self._after_ids = []
         self.backup_google_autenticado = self._verificar_token_backup_local()
         self._system_monitor = None
+        self._logo_image = None
 
         # Centralizar janela
         self._registrar_after(10, self._centralizar)
@@ -44,26 +45,14 @@ class ModuloLogin(ctk.CTkToplevel):
         ctk.set_appearance_mode("Dark")
 
         # Título do Sistema
-        self.lbl_titulo = ctk.CTkLabel(self, text="SISTEMA DE GESTÃO", font=("Roboto", 20, "bold"))
+        self.lbl_titulo = ctk.CTkLabel(self, text="SISTEMA DE GESTAO", font=("Roboto", 20, "bold"))
         self.lbl_titulo.pack(pady=(20, 10))
-        self.frame_status = ctk.CTkFrame(self, fg_color="#1b1b1b", corner_radius=10, border_width=1, border_color="#333333")
-        self.frame_status.pack(fill="x", padx=20, pady=(0, 8))
-        self.lbl_status_badge = ctk.CTkLabel(
-            self.frame_status,
-            text="Licença/Fiscal: Verificando...",
-            font=("Roboto", 11, "bold"),
-            text_color="#f1c40f",
-            wraplength=340,
-            justify="left",
-        )
-        self.lbl_status_badge.pack(anchor="w", padx=10, pady=8)
 
         self.frame_login = ctk.CTkFrame(self)
         self.frame_setup = ctk.CTkFrame(self)
         self.frame_ativacao = ctk.CTkFrame(self)
 
         self._verificar_estado_sistema()
-        self._iniciar_system_monitor()
 
     def _verificar_token_backup_local(self):
         """No login, valida apenas existência local do token, sem qualquer chamada de rede."""
@@ -385,6 +374,9 @@ class ModuloLogin(ctk.CTkToplevel):
         self.frame_ativacao.pack_forget()
         self.frame_login.pack(padx=30, pady=10, fill="both", expand=True)
 
+        for widget in self.frame_login.winfo_children():
+            widget.destroy()
+
         def abrir_link_renovacao():
             try:
                 webbrowser.open(RENOVACAO_URL, new=2)
@@ -392,18 +384,20 @@ class ModuloLogin(ctk.CTkToplevel):
                 messagebox.showerror("Erro", "Não foi possível abrir o link de renovação no navegador.")
                 print(f"[ERRO RENOVACAO] Falha ao abrir URL: {e}")
 
-        if aviso_vencimento <= 5:
-            lbl_aviso = ctk.CTkLabel(self.frame_login, 
-                                     text=f"Sua licença vence em {aviso_vencimento} dias!", 
-                                     text_color="#FFCC00", font=("Arial", 11, "bold"))
-            lbl_aviso.pack(pady=5)
-            ctk.CTkButton(
-                self.frame_login,
-                text="RENOVAR ASSINATURA",
-                fg_color="#1f6aa5",
-                hover_color="#144870",
-                command=abrir_link_renovacao,
-            ).pack(pady=(0, 10))
+        def abrir_ativacao():
+            self.frame_login.pack_forget()
+            self._configurar_tela_ativacao()
+
+        logo_path = os.path.join(os.getcwd(), "assets", "logo.ico")
+        if os.path.exists(logo_path):
+            try:
+                logo_img = Image.open(logo_path)
+                self._logo_image = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=(72, 72))
+                ctk.CTkLabel(self.frame_login, text="", image=self._logo_image).pack(pady=(4, 6))
+            except Exception:
+                pass
+
+        ctk.CTkLabel(self.frame_login, text="FRS MERCADO", font=("Roboto", 18, "bold")).pack(pady=(0, 10))
 
         ctk.CTkLabel(self.frame_login, text="Usuário:").pack(pady=(10, 0), padx=20, anchor="w")
         self.ent_usuario = ctk.CTkEntry(self.frame_login, width=300)
@@ -415,7 +409,26 @@ class ModuloLogin(ctk.CTkToplevel):
         self.ent_senha.bind("<Return>", lambda e: self.tentar_entrar())
 
         self.btn_entrar = ctk.CTkButton(self.frame_login, text="ENTRAR", fg_color="green", command=self.tentar_entrar)
-        self.btn_entrar.pack(pady=30, padx=20)
+        self.btn_entrar.pack(pady=(22, 12), padx=20)
+
+        acoes_licenca = ctk.CTkFrame(self.frame_login, fg_color="transparent")
+        acoes_licenca.pack(pady=(4, 6), padx=20, fill="x")
+
+        ctk.CTkButton(
+            acoes_licenca,
+            text="COMPRAR LICENCA",
+            fg_color="#1f6aa5",
+            hover_color="#144870",
+            command=abrir_link_renovacao,
+        ).pack(fill="x", pady=(0, 8))
+
+        ctk.CTkButton(
+            acoes_licenca,
+            text="ATIVAR LICENCA",
+            fg_color="#7f8c8d",
+            hover_color="#5d6d74",
+            command=abrir_ativacao,
+        ).pack(fill="x")
 
     def tentar_entrar(self):
         usuario = self.ent_usuario.get()

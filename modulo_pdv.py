@@ -324,58 +324,62 @@ class ModuloPDV(ctk.CTkToplevel):
 
         self.painel_lateral = ctk.CTkFrame(self.centro_container, width=220, fg_color="#1a1a1a")
         self.painel_lateral.pack(side="right", fill="y", padx=(10, 0))
+        self.painel_lateral.pack_propagate(False)
 
-        ctk.CTkLabel(self.painel_lateral, text="OPERAÇÕES", font=("Roboto", 12, "bold"), text_color="gray").pack(pady=10)
+        self.scroll_operacoes = ctk.CTkScrollableFrame(self.painel_lateral, fg_color="#1a1a1a", corner_radius=0)
+        self.scroll_operacoes.pack(fill="both", expand=True)
 
-        ctk.CTkButton(self.painel_lateral, text="SANGRIA", fg_color="#c0392b", command=self.modal_sangria).pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(self.scroll_operacoes, text="OPERACOES", font=("Roboto", 12, "bold"), text_color="gray").pack(pady=10)
+
+        ctk.CTkButton(self.scroll_operacoes, text="SANGRIA", fg_color="#c0392b", command=self.modal_sangria).pack(fill="x", padx=10, pady=5)
         ctk.CTkButton(
-            self.painel_lateral,
+            self.scroll_operacoes,
             text="SUPRIMENTO",
             fg_color="#2980b9",
             command=self.modal_suprimento,
         ).pack(fill="x", padx=10, pady=5)
-        ctk.CTkButton(self.painel_lateral, text="CANCELAR ITEM", fg_color="#d35400", command=self.cancelar_item).pack(fill="x", padx=10, pady=5)
+        ctk.CTkButton(self.scroll_operacoes, text="CANCELAR ITEM", fg_color="#d35400", command=self.cancelar_item).pack(fill="x", padx=10, pady=5)
 
-        ctk.CTkLabel(self.painel_lateral, text="CLIENTE (ORÇAMENTO)", font=("Roboto", 11, "bold"), text_color="gray").pack(pady=(10, 2))
-        self.combo_cliente_orcamento = ctk.CTkOptionMenu(self.painel_lateral, values=["Sem clientes cadastrados"], width=180)
+        ctk.CTkLabel(self.scroll_operacoes, text="CLIENTE (ORCAMENTO)", font=("Roboto", 11, "bold"), text_color="gray").pack(pady=(10, 2))
+        self.combo_cliente_orcamento = ctk.CTkOptionMenu(self.scroll_operacoes, values=["Sem clientes cadastrados"], width=180)
         self.combo_cliente_orcamento.pack(padx=10, pady=(0, 8))
         self._carregar_clientes_orcamento()
 
         ctk.CTkButton(
-            self.painel_lateral,
+            self.scroll_operacoes,
             text="SALVAR ORÇAMENTO",
             fg_color="#1565c0",
             command=self.salvar_orcamento_atual,
         ).pack(fill="x", padx=10, pady=4)
         ctk.CTkButton(
-            self.painel_lateral,
+            self.scroll_operacoes,
             text="ABRIR ORÇAMENTOS",
             fg_color="#5d4037",
             command=self.abrir_tela_orcamentos,
         ).pack(fill="x", padx=10, pady=4)
 
-        ctk.CTkLabel(self.painel_lateral, text="VALOR PAGO", font=("Roboto", 11, "bold"), text_color="gray").pack(pady=(8, 2))
-        self.ent_valor_pago = ctk.CTkEntry(self.painel_lateral, width=180, placeholder_text="0,00")
+        ctk.CTkLabel(self.scroll_operacoes, text="VALOR PAGO", font=("Roboto", 11, "bold"), text_color="gray").pack(pady=(8, 2))
+        self.ent_valor_pago = ctk.CTkEntry(self.scroll_operacoes, width=180, placeholder_text="0,00")
         self.ent_valor_pago.pack(padx=10, pady=(0, 8))
         self.ent_valor_pago.bind("<KeyRelease>", lambda _e: self.atualizar_troco_display())
         aplicar_padrao_entrada_numerica(self.ent_valor_pago, inteiro=False, casas_decimais=2)
 
-        ctk.CTkLabel(self.painel_lateral, text="PAGAMENTO RÁPIDO", font=("Roboto", 12, "bold"), text_color="gray").pack(pady=(12, 10))
-        ctk.CTkButton(self.painel_lateral, text="DINHEIRO (F1)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("DINHEIRO")).pack(fill="x", padx=10, pady=2)
-        ctk.CTkButton(self.painel_lateral, text="PIX (F2)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("PIX")).pack(fill="x", padx=10, pady=2)
-        ctk.CTkButton(self.painel_lateral, text="CARTÃO DÉBITO (F3)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("DEBITO")).pack(fill="x", padx=10, pady=2)
-        ctk.CTkButton(self.painel_lateral, text="CARTÃO CRÉDITO (F4)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("CREDITO")).pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(self.scroll_operacoes, text="PAGAMENTO RAPIDO", font=("Roboto", 12, "bold"), text_color="gray").pack(pady=(12, 10))
+        ctk.CTkButton(self.scroll_operacoes, text="DINHEIRO (F1)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("DINHEIRO")).pack(fill="x", padx=10, pady=2)
+        ctk.CTkButton(self.scroll_operacoes, text="PIX (F2)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("PIX")).pack(fill="x", padx=10, pady=2)
+        ctk.CTkButton(self.scroll_operacoes, text="CARTAO DEBITO (F3)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("DEBITO")).pack(fill="x", padx=10, pady=2)
+        ctk.CTkButton(self.scroll_operacoes, text="CARTAO CREDITO (F4)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("CREDITO")).pack(fill="x", padx=10, pady=2)
 
         ctk.CTkButton(
-            self.painel_lateral,
+            self.scroll_operacoes,
             text="FINALIZAR VENDA",
             fg_color="#27ae60",
             height=60,
             font=("Roboto", 14, "bold"),
             command=self.finalizar_venda_com_confirmacoes,
-        ).pack(side="bottom", fill="x", padx=10, pady=20)
+        ).pack(fill="x", padx=10, pady=(16, 8))
 
-        ctk.CTkButton(self.painel_lateral, text="VOLTAR AO MENU", fg_color="#4a4a4a", command=self.voltar_ao_menu).pack(side="bottom", fill="x", padx=10, pady=(0, 8))
+        ctk.CTkButton(self.scroll_operacoes, text="VOLTAR AO MENU", fg_color="#4a4a4a", command=self.voltar_ao_menu).pack(fill="x", padx=10, pady=(0, 12))
 
         self.footer = ctk.CTkFrame(self.main_pdv, height=110, fg_color="#1a1a1a", corner_radius=0)
         self.footer.pack(side="bottom", fill="x")
@@ -1763,6 +1767,14 @@ class ModuloPDV(ctk.CTkToplevel):
             registrar_log(None, "PDV Fiscal", "Falha", f"Erro ao enviar comando NFC-e: {e}")
             return False
 
+    def _fiscal_habilitado(self):
+        try:
+            cfg = carregar_configuracoes() or {}
+            self.config = cfg
+            return bool(cfg.get("fiscal_ativo", False))
+        except Exception:
+            return False
+
     def _atualizar_status_fiscal_ui(self, status, mensagem):
         def update():
             if not self.winfo_exists():
@@ -1971,18 +1983,22 @@ class ModuloPDV(ctk.CTkToplevel):
             registrar_log(None, "PDV", "Falha", f"Erro ao registrar venda: {e}")
             return
 
-        sucesso, _caminho = self.fiscal.exportar_venda(venda_id, self.itens_carrinho, forma_pgto, valor_bruto)
+        sucesso = True
+        if self._fiscal_habilitado():
+            sucesso, _caminho = self.fiscal.exportar_venda(venda_id, self.itens_carrinho, forma_pgto, valor_bruto)
 
-        dados_json = {
-            "id": venda_id,
-            "total": valor_bruto,
-            "impostos_retidos": valor_impostos,
-            "liquido": valor_liquido,
-            "pagamento": forma_pgto,
-            "itens": self.itens_carrinho,
-        }
-        self.exportar_venda_fiscal(dados_json)
-        self._enviar_comando_nfce(venda_id, forma_pgto, self.itens_carrinho)
+            dados_json = {
+                "id": venda_id,
+                "total": valor_bruto,
+                "impostos_retidos": valor_impostos,
+                "liquido": valor_liquido,
+                "pagamento": forma_pgto,
+                "itens": self.itens_carrinho,
+            }
+            self.exportar_venda_fiscal(dados_json)
+            self._enviar_comando_nfce(venda_id, forma_pgto, self.itens_carrinho)
+        else:
+            registrar_log(None, "PDV Fiscal", "Info", f"Venda {venda_id} finalizada sem integração fiscal (modo opcional).")
         if imprimir_cupom:
             self._executar_automacao_pos_venda(
                 {

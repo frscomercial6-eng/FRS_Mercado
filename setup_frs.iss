@@ -1,5 +1,5 @@
 #define MyAppName "FRS Mercado"
-#define MyAppVersion "1.0.6"
+#define MyAppVersion "1.0.7"
 #define MyAppPublisher "FRS Solutions"
 #define MyAppExeName "FRS_Mercado.exe"
 #define PaymentURL "https://invoice.infinitepay.io/plans/frsoficinadepesca/avka57U38g"
@@ -14,7 +14,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=EULA.txt
 OutputDir=installer
-OutputBaseFilename=FRS_Mercado_Setup_1.0.6
+OutputBaseFilename=FRS_Mercado_Setup
 SetupIconFile=assets\logo.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2
@@ -41,7 +41,6 @@ Source: "_build_support\google-services.json"; DestDir: "{app}"; Flags: ignoreve
 Source: "_build_support\checklist_homologacao.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "_build_support\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "_build_support\acbr\ACBrMonitor_Installer.exe"; DestDir: "{app}\instala"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "_build_support\mobile\mercado.apk"; DestDir: "{app}\mobile"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\logo.ico"

@@ -1,36 +1,54 @@
-FRS SOLUTIONS - TERMO DE LICENCA DE USO (EULA)
+FRS SOLUTIONS - CONTRATO DE LICENCA DE USO DO SOFTWARE FRS MERCADO
 Versao {{VERSION}}
 Data de vigencia: {{DATE}}
 
-IMPORTANTE: LEIA ATENTAMENTE ESTE TERMO ANTES DE INSTALAR OU USAR O SOFTWARE.
-Ao prosseguir com a instalacao, voce declara que leu, compreendeu e aceita integralmente os termos abaixo.
+IMPORTANTE: LEIA ESTE CONTRATO ANTES DE INSTALAR OU UTILIZAR O SOFTWARE.
+Ao prosseguir com a instalacao ou uso do FRS Mercado, o cliente declara que leu e concorda com os termos abaixo.
 
-1. LICENCA DE USO
-A FRS Solutions concede ao cliente uma licenca limitada, nao exclusiva e intransferivel para uso do sistema FRS Mercado.
+1. OBJETO E LICENCA
+A FRS Solutions concede ao cliente uma licenca de uso limitada, nao exclusiva, revogavel e intransferivel para operacao do FRS Mercado, conforme o plano contratado.
 
-2. RESTRICOES
-E proibido:
-- copiar, revender, sublicenciar ou redistribuir o software sem autorizacao expressa da FRS Solutions;
-- tentar descompilar, engenharia reversa ou modificar o software para burlar seguranca e licenciamento;
-- compartilhar chaves de ativacao com terceiros nao autorizados.
+2. USO AUTORIZADO
+O software deve ser utilizado exclusivamente para operacao do estabelecimento licenciado, incluindo rotinas de vendas, estoque, financeiro e emissao de documentos conforme a legislacao aplicavel.
 
-3. LICENCIAMENTO E RENOVACAO
-O uso do software esta sujeito a licenciamento valido e pode exigir renovacao periodica.
-A renovacao sera realizada por meio do canal oficial de pagamento informado pela FRS Solutions.
+3. OBRIGACOES DO CLIENTE
+O cliente se compromete a:
+- manter os dados cadastrais e tributarios corretos e atualizados;
+- utilizar o sistema em conformidade com a legislacao fiscal, tributaria e consumerista vigente;
+- preservar credenciais de acesso, chaves de ativacao e demais mecanismos de seguranca;
+- manter ambiente operacional adequado para execucao do software e guarda de dados.
 
-4. PRIVACIDADE E DADOS
-O cliente e responsavel pela guarda e integridade dos dados gerados em seu ambiente.
-A FRS Solutions nao se responsabiliza por perdas decorrentes de uso indevido, falhas de infraestrutura local ou alteracoes nao autorizadas.
+4. RESTRICOES
+E vedado ao cliente, sem autorizacao formal da FRS Solutions:
+- copiar, revender, sublicenciar, ceder ou redistribuir o software;
+- realizar engenharia reversa, descompilacao ou alteracoes para burlar controles de seguranca e licenciamento;
+- compartilhar credenciais ou codigos de licenca com terceiros nao autorizados.
 
-5. GARANTIAS E LIMITACAO DE RESPONSABILIDADE
-O software e fornecido no estado em que se encontra.
-Na maxima extensao permitida por lei, a FRS Solutions nao sera responsavel por danos indiretos, lucros cessantes ou perdas consequenciais.
+5. LICENCIAMENTO, PRAZO E RENOVACAO
+O uso do FRS Mercado depende de licenca valida durante todo o periodo de contratacao.
+A renovacao ocorre conforme as condicoes comerciais vigentes e canal oficial informado pela FRS Solutions.
 
-6. SUPORTE E ATUALIZACOES
-Atualizacoes e suporte seguem o plano comercial contratado.
+6. DADOS, BACKUP E RESPONSABILIDADE OPERACIONAL
+Os dados inseridos no sistema sao de responsabilidade do cliente.
+O cliente deve manter rotina de backup e controles internos de conferencia.
+A FRS Solutions nao responde por perdas causadas por uso indevido, falhas de infraestrutura local, terceiros ou alteracoes nao autorizadas no ambiente do cliente.
 
-7. ACEITE
-Ao clicar em "Aceito" no instalador, voce concorda com todos os termos deste EULA.
+7. CONFORMIDADE FISCAL
+O FRS Mercado oferece recursos para apoio a operacoes fiscais.
+O correto enquadramento tributario, parametrizacao e conferencia final das informacoes fiscais permanecem sob responsabilidade do cliente e de seu contador responsavel.
+
+O FRS Mercado utiliza o componente ACBr como parte do processo de emissao de documentos fiscais eletronicos. A FRS Solutions nao se responsabiliza por falhas, interrupcoes, incompatibilidades, limitacoes tecnicas ou comportamentos inerentes ao componente ACBr, bem como por indisponibilidade, instabilidade, rejeicoes, lentidao ou qualquer indisponibilidade dos servicos da SEFAZ, inclusive quando tais eventos impactarem a emissao, transmissao, autorizacao ou consulta de documentos fiscais.
+
+O FRS Mercado APK e disponibilizado como componente complementar de mobilidade e apoio operacional, nao substituindo a responsabilidade do cliente pela manutencao de ambiente tecnologico adequado. A FRS Solutions nao se responsabiliza por falhas, indisponibilidades, perda de desempenho ou interrupcoes decorrentes de hardware do cliente, conectividade de rede, operadora de telecomunicacoes, sistemas de terceiros, servicos em nuvem ou qualquer infraestrutura externa ao controle direto da FRS Solutions.
+
+8. SUPORTE E ATUALIZACOES
+Suporte, manutencao e atualizacoes serao prestados de acordo com o plano contratado e politicas comerciais vigentes.
+
+9. LIMITACAO DE RESPONSABILIDADE
+Na maxima extensao permitida por lei, a FRS Solutions nao sera responsavel por danos indiretos, lucros cessantes, perda de receita ou prejuizos decorrentes de interrupcoes externas ao controle razoavel da empresa.
+
+10. ACEITE
+Ao selecionar a opcao de aceite no instalador ou utilizar o software, o cliente concorda integralmente com este contrato.
 
 FRS Solutions
 Todos os direitos reservados.
