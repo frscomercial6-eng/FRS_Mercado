@@ -1,5 +1,6 @@
 import os
 import importlib.util
+import sysconfig
 import stat
 import shutil
 import subprocess
@@ -177,8 +178,28 @@ def _build_pyinstaller_args(app_version: str) -> list[str]:
         "--add-data=assets;assets",
         "--hidden-import=hashlib",
         "--hidden-import=uuid",
+        "--hidden-import=encodings",
+        "--hidden-import=codecs",
+        "--hidden-import=importlib",
+        "--hidden-import=importlib.util",
+        "--hidden-import=pkgutil",
+        "--hidden-import=zipimport",
+        "--hidden-import=site",
+        "--hidden-import=sysconfig",
+        "--collect-submodules=encodings",
         f"--runtime-hook={hook_path}",
     ]
+
+    # Reforça resolução de stdlib/site-packages em ambientes sem Python instalado.
+    std_paths = {
+        str(Path(sysconfig.get_path("stdlib") or "").resolve()),
+        str(Path(sysconfig.get_path("platstdlib") or "").resolve()),
+        str(Path(sysconfig.get_path("purelib") or "").resolve()),
+        str(Path(sysconfig.get_path("platlib") or "").resolve()),
+        str((Path(sys.executable).resolve().parent / "DLLs").resolve()),
+    }
+    for std_path in sorted(p for p in std_paths if p and Path(p).exists()):
+        args.append(f"--paths={std_path}")
 
     collect_modules = [
         "customtkinter",
@@ -190,6 +211,7 @@ def _build_pyinstaller_args(app_version: str) -> list[str]:
         "httplib2",
         "requests",
         "bcrypt",
+        "setuptools",
     ]
     for mod_name in collect_modules:
         if importlib.util.find_spec(mod_name) is not None:
@@ -383,6 +405,9 @@ def _build_installer(app_version: str) -> Path | None:
 def main() -> None:
     app_version = prepare_release_artifacts()
     _validate_security_files()
+
+    print(f"Python em uso no build: {sys.executable}")
+    print(f"Versão Python: {sys.version}")
 
     assets_dir = ROOT_DIR / "assets"
     if not assets_dir.exists() or not assets_dir.is_dir():

@@ -86,6 +86,9 @@ def get_local_version() -> str:
     candidates = []
 
     exe_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    candidates.append(exe_dir / "version.json")
+    candidates.append(Path.cwd() / "version.json")
+    candidates.append(Path(__file__).resolve().parent / "version.json")
     candidates.append(exe_dir / "version.txt")
     candidates.append(Path.cwd() / "version.txt")
     candidates.append(Path(__file__).resolve().parent / "version.txt")
@@ -93,7 +96,11 @@ def get_local_version() -> str:
     for path in candidates:
         try:
             if path.exists():
-                version = path.read_text(encoding="utf-8").strip()
+                if path.suffix.lower() == ".json":
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    version = str(payload.get("latest_version") or "").strip()
+                else:
+                    version = path.read_text(encoding="utf-8").strip()
                 if version:
                     return normalize_version(version)
         except Exception:
@@ -182,7 +189,7 @@ def fetch_latest_release(repo: str) -> ReleaseInfo | None:
 
 
 def check_and_apply_startup_update(repo: str) -> bool:
-    """Aplica atualização de forma síncrona no bootstrap quando há versão remota maior."""
+    """Checa atualização no bootstrap e pergunta ao usuário antes de aplicar."""
     repo = str(repo or "").strip()
     if not repo:
         return False
@@ -195,6 +202,22 @@ def check_and_apply_startup_update(repo: str) -> bool:
 
     local_version = get_local_version()
     if compare_versions(release.version, local_version) <= 0:
+        return False
+
+    try:
+        confirmar = messagebox.askyesno(
+            "Atualização Disponível",
+            (
+                "Uma nova versão está disponível antes da inicialização.\n\n"
+                f"Versão local: {local_version}\n"
+                f"Versão remota: {release.version}\n\n"
+                "Deseja atualizar agora?"
+            ),
+        )
+    except Exception:
+        confirmar = False
+
+    if not confirmar:
         return False
 
     updater = Updater(parent=None)
