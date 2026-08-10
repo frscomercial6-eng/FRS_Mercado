@@ -48,7 +48,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilen
 
 [Run]
 Filename: "{app}\instala\ACBrMonitor_Installer.exe"; Parameters: "/VERYSILENT /NORESTART"; Description: "Instalar ACBrMonitor"; Flags: waituntilterminated runhidden skipifsilent skipifdoesntexist; Tasks: instalaracbr
-Filename: "{app}\{#MyAppExeName}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent skipifdoesntexist
 
 [Code]
 function NextButtonClick(CurPageID: Integer): Boolean;

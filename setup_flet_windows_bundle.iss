@@ -47,4 +47,4 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{tmp}\{#ACBrInstallerName}"; Parameters: "/VERYSILENT /NORESTART"; Description: "Instalar ACBrMonitor"; Flags: waituntilterminated runhidden; Tasks: instalaracbr
-Filename: "{app}\{#MyAppExeName}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent skipifdoesntexist

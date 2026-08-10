@@ -1,4 +1,5 @@
 import base64
+import ctypes
 import json
 import os
 import subprocess
@@ -13,7 +14,6 @@ from urllib.parse import urlparse
 
 import customtkinter as ctk
 
-from modulo_config import carregar_configuracoes
 from app_paths import obter_caminho_dados
 from error_notifier import notify_error
 
@@ -135,6 +135,24 @@ def _asset_name_from_url(url: str) -> str:
     return name or "FRS_Mercado_Update.exe"
 
 
+def _normalizar_path(path: str | Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _esta_em_program_files(path: str | Path) -> bool:
+    alvo = _normalizar_path(path)
+    bases = []
+    for var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        valor = os.environ.get(var)
+        if valor:
+            bases.append(_normalizar_path(valor))
+
+    for base in bases:
+        if alvo == base or alvo.startswith(base + os.sep):
+            return True
+    return False
+
+
 def fetch_manifest_payload(repo: str) -> dict | None:
     for url in _manifest_urls(repo):
         req = request.Request(
@@ -225,7 +243,7 @@ def check_and_apply_startup_update(repo: str) -> bool:
     try:
         destino = updater._baixar_release_com_progresso(release.asset_url, release.asset_name)
         updater._executar_instalador(destino)
-        updater._reiniciar_aplicacao()
+        updater._encerrar_aplicacao_para_instalacao()
         return True
     except Exception as e:
         notify_error("updater_bootstrap", e)
@@ -332,8 +350,8 @@ class Updater:
                 destino = self._baixar_release_com_progresso(release.asset_url, release.asset_name)
                 self._atualizar_status("Instalando atualização...")
                 self._executar_instalador(destino)
-                self._atualizar_status("Reiniciando aplicação...")
-                self._reiniciar_aplicacao()
+                self._atualizar_status("Finalizando aplicação para concluir instalação...")
+                self._encerrar_aplicacao_para_instalacao()
             except Exception as e:
                 self._fechar_janela_progresso()
                 notify_error("updater_worker", e)
@@ -458,29 +476,28 @@ class Updater:
         if not caminho_instalador.exists():
             raise FileNotFoundError(f"Instalador não encontrado: {caminho_instalador}")
 
+        precisa_elevacao = False
+        if getattr(sys, "frozen", False):
+            try:
+                precisa_elevacao = _esta_em_program_files(Path(sys.executable).resolve().parent)
+            except Exception:
+                precisa_elevacao = False
+
+        if precisa_elevacao and os.name == "nt":
+            ret = ctypes.windll.shell32.ShellExecuteW(
+                None,
+                "runas",
+                str(caminho_instalador),
+                None,
+                str(caminho_instalador.parent),
+                1,
+            )
+            if ret <= 32:
+                raise PermissionError(f"Falha ao solicitar elevação UAC para o instalador (código={ret}).")
+            return
+
         subprocess.Popen([str(caminho_instalador)], cwd=str(caminho_instalador.parent))
 
-    def _resolver_executavel_reinicio(self):
-        cfg = carregar_configuracoes()
-        candidato = str(cfg.get("update_executable_path") or cfg.get("app_executable_path") or "").strip()
-        if candidato and os.path.exists(candidato):
-            return candidato
-
-        if getattr(sys, "frozen", False):
-            return sys.executable
-
-        return ""
-
-    def _reiniciar_aplicacao(self):
-        exe = self._resolver_executavel_reinicio()
-
-        try:
-            if exe:
-                subprocess.Popen([exe], cwd=str(Path(exe).resolve().parent))
-            else:
-                subprocess.Popen([sys.executable, "main.py"], cwd=str(Path(__file__).resolve().parent))
-        except Exception as e:
-            raise RuntimeError(f"Falha ao reiniciar aplicação: {e}")
-        finally:
-            # Encerramento forçado para finalizar update sem deixar processos pendentes.
-            os._exit(0)
+    def _encerrar_aplicacao_para_instalacao(self):
+        # O próprio Inno Setup relança o app no final ([Run] no .iss).
+        os._exit(0)

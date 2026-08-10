@@ -5,32 +5,24 @@ from database_manager import get_db_path
 
 def _garantir_coluna_assinatura():
     """Adiciona a coluna assinatura em licenca sem remover dados existentes."""
-    base_dir = os.path.dirname(__file__)
-    app_db_path = get_db_path()
-    candidatos = [
-        app_db_path,
-        os.path.join(base_dir, "database.db"),
-        os.path.join(base_dir, "mercado.db"),
-    ]
+    db_path = get_db_path()
+    if not os.path.exists(db_path):
+        return
 
-    for db_path in candidatos:
-        if not os.path.exists(db_path):
-            continue
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='licenca'")
+        if not cur.fetchone():
+            return
 
-        conn = sqlite3.connect(db_path)
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='licenca'")
-            if not cur.fetchone():
-                continue
-
-            cur.execute("PRAGMA table_info(licenca)")
-            colunas = [row[1] for row in cur.fetchall()]
-            if "assinatura" not in colunas:
-                cur.execute("ALTER TABLE licenca ADD COLUMN assinatura TEXT")
-                conn.commit()
-        finally:
-            conn.close()
+        cur.execute("PRAGMA table_info(licenca)")
+        colunas = [row[1] for row in cur.fetchall()]
+        if "assinatura" not in colunas:
+            cur.execute("ALTER TABLE licenca ADD COLUMN assinatura TEXT")
+            conn.commit()
+    finally:
+        conn.close()
 
 
 _garantir_coluna_assinatura()
@@ -38,32 +30,24 @@ _garantir_coluna_assinatura()
 
 def _garantir_coluna_caixa_operacao_id_sangrias():
     """Adiciona a coluna caixa_operacao_id em sangrias para fechamento por caixa."""
-    base_dir = os.path.dirname(__file__)
-    app_db_path = get_db_path()
-    candidatos = [
-        app_db_path,
-        os.path.join(base_dir, "database.db"),
-        os.path.join(base_dir, "mercado.db"),
-    ]
+    db_path = get_db_path()
+    if not os.path.exists(db_path):
+        return
 
-    for db_path in candidatos:
-        if not os.path.exists(db_path):
-            continue
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sangrias'")
+        if not cur.fetchone():
+            return
 
-        conn = sqlite3.connect(db_path)
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sangrias'")
-            if not cur.fetchone():
-                continue
-
-            cur.execute("PRAGMA table_info(sangrias)")
-            colunas = [row[1] for row in cur.fetchall()]
-            if "caixa_operacao_id" not in colunas:
-                cur.execute("ALTER TABLE sangrias ADD COLUMN caixa_operacao_id INTEGER")
-                conn.commit()
-        finally:
-            conn.close()
+        cur.execute("PRAGMA table_info(sangrias)")
+        colunas = [row[1] for row in cur.fetchall()]
+        if "caixa_operacao_id" not in colunas:
+            cur.execute("ALTER TABLE sangrias ADD COLUMN caixa_operacao_id INTEGER")
+            conn.commit()
+    finally:
+        conn.close()
 
 
 _garantir_coluna_caixa_operacao_id_sangrias()
@@ -71,35 +55,27 @@ _garantir_coluna_caixa_operacao_id_sangrias()
 
 def _garantir_tabela_config_sistema():
     """Garante tabela de configuração sistêmica e valor padrão de limite de caixa."""
-    base_dir = os.path.dirname(__file__)
-    app_db_path = get_db_path()
-    candidatos = [
-        app_db_path,
-        os.path.join(base_dir, "database.db"),
-        os.path.join(base_dir, "mercado.db"),
-    ]
+    db_path = get_db_path()
+    if not os.path.exists(db_path):
+        return
 
-    for db_path in candidatos:
-        if not os.path.exists(db_path):
-            continue
-
-        conn = sqlite3.connect(db_path)
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS config_sistema (
-                    chave TEXT PRIMARY KEY,
-                    valor TEXT NOT NULL
-                )
-                """
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS config_sistema (
+                chave TEXT PRIMARY KEY,
+                valor TEXT NOT NULL
             )
-            cur.execute(
-                "INSERT OR IGNORE INTO config_sistema (chave, valor) VALUES ('limite_caixa', '500.00')"
-            )
-            conn.commit()
-        finally:
-            conn.close()
+            """
+        )
+        cur.execute(
+            "INSERT OR IGNORE INTO config_sistema (chave, valor) VALUES ('limite_caixa', '500.00')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 _garantir_tabela_config_sistema()
@@ -107,41 +83,33 @@ _garantir_tabela_config_sistema()
 
 def _garantir_tabela_config_fiscal():
     """Garante tabela de configuração fiscal para integração PlugNotas."""
-    base_dir = os.path.dirname(__file__)
-    app_db_path = get_db_path()
-    candidatos = [
-        app_db_path,
-        os.path.join(base_dir, "database.db"),
-        os.path.join(base_dir, "mercado.db"),
-    ]
+    db_path = get_db_path()
+    if not os.path.exists(db_path):
+        return
 
-    for db_path in candidatos:
-        if not os.path.exists(db_path):
-            continue
-
-        conn = sqlite3.connect(db_path)
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS config_fiscal (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    api_key TEXT NOT NULL DEFAULT '',
-                    ambiente TEXT NOT NULL DEFAULT 'HOMOLOGACAO',
-                    webhook_token_hash TEXT NOT NULL DEFAULT ''
-                )
-                """
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS config_fiscal (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                api_key TEXT NOT NULL DEFAULT '',
+                ambiente TEXT NOT NULL DEFAULT 'HOMOLOGACAO',
+                webhook_token_hash TEXT NOT NULL DEFAULT ''
             )
-            cur.execute("PRAGMA table_info(config_fiscal)")
-            colunas = [row[1] for row in cur.fetchall()]
-            if "webhook_token_hash" not in colunas:
-                cur.execute("ALTER TABLE config_fiscal ADD COLUMN webhook_token_hash TEXT NOT NULL DEFAULT ''")
-            cur.execute(
-                "INSERT OR IGNORE INTO config_fiscal (id, api_key, ambiente, webhook_token_hash) VALUES (1, '', 'HOMOLOGACAO', '')"
-            )
-            conn.commit()
-        finally:
-            conn.close()
+            """
+        )
+        cur.execute("PRAGMA table_info(config_fiscal)")
+        colunas = [row[1] for row in cur.fetchall()]
+        if "webhook_token_hash" not in colunas:
+            cur.execute("ALTER TABLE config_fiscal ADD COLUMN webhook_token_hash TEXT NOT NULL DEFAULT ''")
+        cur.execute(
+            "INSERT OR IGNORE INTO config_fiscal (id, api_key, ambiente, webhook_token_hash) VALUES (1, '', 'HOMOLOGACAO', '')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 _garantir_tabela_config_fiscal()
