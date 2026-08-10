@@ -44,3 +44,6 @@
 ## 1.0.9 - 16/07/2026
 - Release automatizada gerada pelo Mestre de Release.
 
+## 1.0.10 - 10/08/2026
+- Release automatizada gerada pelo Mestre de Release.
+
