@@ -1084,7 +1084,7 @@ class ModuloPDV(ctk.CTkToplevel):
         if not origem_imagem or not os.path.exists(origem_imagem):
             return ""
 
-        pasta_destino = os.path.join(os.getcwd(), "assets", "produtos")
+        pasta_destino = obter_caminho_dados("assets", "produtos")
         os.makedirs(pasta_destino, exist_ok=True)
         destino = os.path.join(pasta_destino, f"{ean}.jpg")
 
