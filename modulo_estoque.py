@@ -1,6 +1,6 @@
 import sqlite3
 import customtkinter as ctk
-from tkinter import StringVar, messagebox
+from tkinter import StringVar, messagebox, filedialog
 from datetime import datetime, timedelta
 from pathlib import Path
 from database_manager import get_db_connection, registrar_log
@@ -9,6 +9,118 @@ import threading
 from database_manager import obter_caminho_dados
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
 from modulo_config import carregar_configuracoes
+
+
+def exportar_produtos_para_xls_arquivo(caminho_arquivo: str):
+    """Exporta os produtos para um arquivo Excel .xls usando a biblioteca xlwt."""
+    try:
+        import xlwt
+    except ImportError as exc:
+        raise RuntimeError(
+            "Biblioteca xlwt não encontrada. Instale com: python -m pip install xlwt"
+        ) from exc
+
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                codigo_barras,
+                nome,
+                variacao,
+                ncm,
+                aliquota_icms,
+                aliquota_pis,
+                aliquota_cofins,
+                aliquota_ibs,
+                aliquota_cbs,
+                preco_custo,
+                margem_lucro,
+                preco_venda,
+                quantidade_atual,
+                quantidade_minima,
+                validade,
+                categoria,
+                preco_base,
+                inicio_promocao,
+                fim_promocao,
+                imagem_path
+            FROM produtos
+            ORDER BY nome COLLATE NOCASE ASC
+            """
+        ).fetchall()
+
+    headers = [
+        "ID",
+        "Código de Barras",
+        "Nome",
+        "Variação",
+        "NCM",
+        "Aliq. ICMS",
+        "Aliq. PIS",
+        "Aliq. COFINS",
+        "Aliq. IBS",
+        "Aliq. CBS",
+        "Preço de Custo",
+        "Margem %",
+        "Preço de Venda",
+        "Quantidade Atual",
+        "Quantidade Mínima",
+        "Validade",
+        "Categoria",
+        "Preço Base",
+        "Início Promoção",
+        "Fim Promoção",
+        "Caminho Imagem",
+    ]
+
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Produtos")
+    header_style = xlwt.easyxf("font: bold on; pattern: pattern solid, fore_colour gray25; align: horiz center")
+    body_style = xlwt.easyxf("align: vert center")
+
+    for col_index, header in enumerate(headers):
+        ws.write(0, col_index, header, header_style)
+
+    for row_index, row in enumerate(rows, start=1):
+        valores = [
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+            row[8],
+            row[9],
+            row[10],
+            row[11],
+            row[12],
+            row[13],
+            row[14],
+            row[15],
+            row[16],
+            row[17],
+            row[18],
+            row[19],
+            row[20],
+        ]
+
+        for col_index, value in enumerate(valores):
+            if value is None:
+                value = ""
+            ws.write(row_index, col_index, value, body_style)
+
+    for col_index in range(len(headers)):
+        ws.col(col_index).width = 2200
+
+    pasta = os.path.dirname(caminho_arquivo)
+    if pasta and not os.path.exists(pasta):
+        os.makedirs(pasta, exist_ok=True)
+
+    wb.save(caminho_arquivo)
+    return caminho_arquivo
 
 
 def calcular_preco_venda(preco_custo, margem_lucro):
@@ -71,6 +183,17 @@ class ModuloEstoque(ctk.CTkToplevel):
             command=self.alternar_campo_importar_nfe,
         )
         self.btn_importar_nfe.pack(side="left", padx=6)
+
+        self.btn_exportar_xls = ctk.CTkButton(
+            self.frame_top,
+            text="EXPORTAR XLS",
+            width=150,
+            height=34,
+            fg_color="#1d4ed8",
+            hover_color="#1e40af",
+            command=self.exportar_produtos_xls,
+        )
+        self.btn_exportar_xls.pack(side="left", padx=6)
 
         self.frame_importar_nfe = ctk.CTkFrame(self.frame_top, fg_color="transparent")
         ctk.CTkLabel(
@@ -262,6 +385,30 @@ class ModuloEstoque(ctk.CTkToplevel):
             text="Busca de XML bloqueada: ative o ACBrMonitor nas Configurações para usar a importação NF-e.",
             text_color="#ff6666",
         )
+
+    def exportar_produtos_xls(self):
+        """Abre o diálogo de salvamento e exporta os produtos para XLS."""
+        pasta_padrao = obter_caminho_dados("exportacao_fiscal")
+        os.makedirs(pasta_padrao, exist_ok=True)
+        nome_padrao = f"produtos_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xls"
+
+        destino = filedialog.asksaveasfilename(
+            initialdir=pasta_padrao,
+            initialfile=nome_padrao,
+            defaultextension=".xls",
+            filetypes=[("Arquivo Excel", "*.xls")],
+            title="Salvar exportação de produtos",
+        )
+        if not destino:
+            return
+
+        try:
+            exportar_produtos_para_xls_arquivo(destino)
+            registrar_log(None, "Exportação de Produtos", "Sucesso", f"Arquivo exportado: {destino}")
+            messagebox.showinfo("Exportação concluída", f"Produtos exportados com sucesso em:\n{destino}")
+        except Exception as exc:
+            registrar_log(None, "Exportação de Produtos", "Falha", f"Erro: {exc}")
+            messagebox.showerror("Erro na exportação", f"Não foi possível exportar os produtos:\n{exc}")
 
     def _normalizar_chave_nfe(self, chave: str) -> str:
         return "".join(ch for ch in str(chave or "") if ch.isdigit())

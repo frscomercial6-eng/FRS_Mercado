@@ -11,7 +11,7 @@ import webbrowser
 from pathlib import Path
 from datetime import datetime
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from urllib.parse import quote
 from database_manager import get_db_connection, get_db_path, obter_caminho_dados, registrar_log
 from modulo_config import carregar_configuracoes, salvar_configuracoes
@@ -834,7 +834,8 @@ class AppPrincipal(ctk.CTk):
         botoes = [
             ("🚀 ABRIR PDV", "#27ae60", self.abrir_pdv),
             ("📦 ESTOQUE", "#2980b9", self.abrir_estoque),
-            ("📊 RELATÓRIOS", "#16a085", self.abrir_relatorios),
+            ("� EXPORTAR PRODUTOS XLS", "#2563eb", self.exportar_produtos_xls),
+            ("�📊 RELATÓRIOS", "#16a085", self.abrir_relatorios),
             ("🧾 ORÇAMENTOS", "#8d6e63", self.abrir_orcamentos),
             ("👥 CLIENTES", "#0f766e", self.abrir_clientes),
             ("🏭 FORNECEDORES", "#6d28d9", self.abrir_fornecedores),
@@ -890,6 +891,36 @@ class AppPrincipal(ctk.CTk):
 
     def abrir_estoque(self):
         self._abrir_modulo_seguro("ESTOQUE", self._abrir_estoque_impl)
+
+    def exportar_produtos_xls(self):
+        """Exporta os produtos para XLS diretamente pelo menu principal."""
+        try:
+            from modulo_estoque import exportar_produtos_para_xls_arquivo
+        except Exception as exc:
+            messagebox.showerror("Erro", f"Não foi possível carregar o exportador de produtos:\n{exc}")
+            return
+
+        pasta_padrao = obter_caminho_dados("exportacao_fiscal")
+        os.makedirs(pasta_padrao, exist_ok=True)
+        nome_padrao = f"produtos_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xls"
+
+        destino = filedialog.asksaveasfilename(
+            initialdir=pasta_padrao,
+            initialfile=nome_padrao,
+            defaultextension=".xls",
+            filetypes=[("Arquivo Excel", "*.xls")],
+            title="Salvar exportação de produtos",
+        )
+        if not destino:
+            return
+
+        try:
+            exportar_produtos_para_xls_arquivo(destino)
+            registrar_log(None, "Exportação de Produtos", "Sucesso", f"Arquivo exportado: {destino}")
+            messagebox.showinfo("Exportação concluída", f"Produtos exportados com sucesso em:\n{destino}")
+        except Exception as exc:
+            registrar_log(None, "Exportação de Produtos", "Falha", f"Erro: {exc}")
+            messagebox.showerror("Erro na exportação", f"Não foi possível exportar os produtos:\n{exc}")
 
     def _abrir_estoque_impl(self):
         from modulo_estoque import ModuloEstoque
