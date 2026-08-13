@@ -834,7 +834,7 @@ class AppPrincipal(ctk.CTk):
         botoes = [
             ("🚀 ABRIR PDV", "#27ae60", self.abrir_pdv),
             ("📦 ESTOQUE", "#2980b9", self.abrir_estoque),
-            ("📤 EXPORTAR PRODUTOS XLS", "#2563eb", self.exportar_produtos_xls),
+            ("📤 EXPORTAR PRODUTOS", "#2563eb", self.exportar_produtos_xls),
             ("📥 IMPORTAR PRODUTOS", "#0f766e", self.importar_produtos_gdoor),
             ("📊 RELATÓRIOS", "#16a085", self.abrir_relatorios),
             ("🧾 ORÇAMENTOS", "#8d6e63", self.abrir_orcamentos),

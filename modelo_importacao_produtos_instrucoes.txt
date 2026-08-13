@@ -1,0 +1,4 @@
+Campos obrigatorios: codigo_barras, nome, preco_venda, ncm, quantidade_atual
+Formato: preco_venda em numero decimal (ex.: 19.90)
+NCM: ate 8 digitos
+Quantidade: numero inteiro

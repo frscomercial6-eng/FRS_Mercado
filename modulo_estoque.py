@@ -184,17 +184,6 @@ class ModuloEstoque(ctk.CTkToplevel):
         )
         self.btn_importar_nfe.pack(side="left", padx=6)
 
-        self.btn_exportar_xls = ctk.CTkButton(
-            self.frame_top,
-            text="EXPORTAR XLS",
-            width=150,
-            height=34,
-            fg_color="#1d4ed8",
-            hover_color="#1e40af",
-            command=self.exportar_produtos_xls,
-        )
-        self.btn_exportar_xls.pack(side="left", padx=6)
-
         self.frame_importar_nfe = ctk.CTkFrame(self.frame_top, fg_color="transparent")
         ctk.CTkLabel(
             self.frame_importar_nfe,
