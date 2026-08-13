@@ -834,8 +834,9 @@ class AppPrincipal(ctk.CTk):
         botoes = [
             ("🚀 ABRIR PDV", "#27ae60", self.abrir_pdv),
             ("📦 ESTOQUE", "#2980b9", self.abrir_estoque),
-            ("� EXPORTAR PRODUTOS XLS", "#2563eb", self.exportar_produtos_xls),
-            ("�📊 RELATÓRIOS", "#16a085", self.abrir_relatorios),
+            ("📤 EXPORTAR PRODUTOS XLS", "#2563eb", self.exportar_produtos_xls),
+            ("📥 IMPORTAR PRODUTOS", "#0f766e", self.importar_produtos_gdoor),
+            ("📊 RELATÓRIOS", "#16a085", self.abrir_relatorios),
             ("🧾 ORÇAMENTOS", "#8d6e63", self.abrir_orcamentos),
             ("👥 CLIENTES", "#0f766e", self.abrir_clientes),
             ("🏭 FORNECEDORES", "#6d28d9", self.abrir_fornecedores),
@@ -921,6 +922,48 @@ class AppPrincipal(ctk.CTk):
         except Exception as exc:
             registrar_log(None, "Exportação de Produtos", "Falha", f"Erro: {exc}")
             messagebox.showerror("Erro na exportação", f"Não foi possível exportar os produtos:\n{exc}")
+
+    def importar_produtos_gdoor(self):
+        """Importa produtos de uma pasta de backup para o banco local do FRS."""
+        pasta_inicial = r"F:\\"
+        if not os.path.isdir(pasta_inicial):
+            pasta_inicial = str(Path.home())
+
+        pasta_origem = filedialog.askdirectory(
+            initialdir=pasta_inicial,
+            title="Selecione a pasta com backup do GDOOR",
+        )
+        if not pasta_origem:
+            return
+
+        pasta_relatorios = obter_caminho_dados("exportacao_fiscal")
+        os.makedirs(pasta_relatorios, exist_ok=True)
+        nome_planilha = f"produtos_importados_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xlsx"
+        caminho_planilha = os.path.join(pasta_relatorios, nome_planilha)
+
+        try:
+            from migrar_produtos_gdoor import executar_migracao
+
+            resultado = executar_migracao(root=pasta_origem, output_excel=caminho_planilha)
+            registrar_log(
+                None,
+                "Importação de Produtos",
+                "Sucesso",
+                f"Origem: {pasta_origem} | Lidos: {resultado.get('quantidade_produtos', 0)} | Inseridos: {resultado.get('produtos_inseridos', 0)}",
+            )
+            messagebox.showinfo(
+                "Importação concluída",
+                (
+                    "Importação de produtos concluída com sucesso.\n\n"
+                    f"Origem: {resultado.get('origem', 'desconhecida')}\n"
+                    f"Produtos lidos: {resultado.get('quantidade_produtos', 0)}\n"
+                    f"Produtos inseridos: {resultado.get('produtos_inseridos', 0)}\n"
+                    f"Planilha gerada: {resultado.get('arquivo_excel', caminho_planilha)}"
+                ),
+            )
+        except Exception as exc:
+            registrar_log(None, "Importação de Produtos", "Falha", f"Erro: {exc}")
+            messagebox.showerror("Erro na importação", f"Não foi possível importar os produtos:\n{exc}")
 
     def _abrir_estoque_impl(self):
         from modulo_estoque import ModuloEstoque
