@@ -148,6 +148,7 @@ def _upload_asset(upload_url: str, token: str, asset_path: Path) -> None:
 def _release_assets(version: str) -> list[Path]:
     candidates = [
         ROOT_DIR / "dist" / "FRS_Mercado.exe",
+        ROOT_DIR / "dist" / "FRS_Mercado" / "FRS_Mercado.exe",
         ROOT_DIR / "installer" / "FRS_Mercado_Setup.exe",
         ROOT_DIR / "installer" / f"FRS_Mercado_Portable_{version}.zip",
     ]
