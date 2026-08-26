@@ -83,7 +83,14 @@ def _push(branch: str, tag: str) -> None:
     _run(["git", "push", "origin", tag])
 
 
-def _github_api_request(url: str, token: str, method: str = "GET", data: bytes | None = None, headers: dict | None = None):
+def _github_api_request(
+    url: str,
+    token: str,
+    method: str = "GET",
+    data: bytes | None = None,
+    headers: dict | None = None,
+    timeout: int = 60,
+):
     req_headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
@@ -94,7 +101,7 @@ def _github_api_request(url: str, token: str, method: str = "GET", data: bytes |
         req_headers.update(headers)
 
     req = request.Request(url, data=data, method=method, headers=req_headers)
-    with request.urlopen(req, timeout=60) as resp:
+    with request.urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8")
         return json.loads(body) if body else {}
 
@@ -141,8 +148,17 @@ def _upload_asset(upload_url: str, token: str, asset_path: Path) -> None:
         method="POST",
         data=data,
         headers={"Content-Type": content_type},
+        timeout=900,
     )
     print(f"Asset enviado: {asset_path.name}")
+
+
+def _delete_asset(asset: dict, token: str) -> None:
+    asset_url = asset.get("url")
+    if not asset_url:
+        raise RuntimeError(f"URL ausente para remover asset: {asset.get('name', 'desconhecido')}")
+    _github_api_request(asset_url, token, method="DELETE")
+    print(f"Asset desatualizado removido: {asset.get('name', 'desconhecido')}")
 
 
 def _release_assets(version: str) -> list[Path]:
@@ -200,7 +216,14 @@ def main() -> None:
         print("Release criada/encontrada, mas sem upload_url retornado pela API.")
         return
 
+    existing_assets = {asset.get("name"): asset for asset in release.get("assets", [])}
     for asset in _release_assets(version):
+        existing_asset = existing_assets.get(asset.name)
+        if existing_asset:
+            if existing_asset.get("size") == asset.stat().st_size:
+                print(f"Asset já publicado: {asset.name}")
+                continue
+            _delete_asset(existing_asset, token)
         _upload_asset(upload_url, token, asset)
 
     print("Deploy completo finalizado com sucesso.")
