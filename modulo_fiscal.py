@@ -114,21 +114,31 @@ class FiscalManager:
         self.intervalo_poll = intervalo_poll
 
         self.raiz_projeto = Path(__file__).resolve().parent
+        # Pasta "instala" e somente leitura (local de instalacao do ACBrMonitor);
+        # nunca deve receber gravacoes para evitar WinError 5 sob Program Files.
         self.pasta_instala = self.raiz_projeto / "instala"
-        self.pasta_fiscal_in = self.raiz_projeto / "fiscal_in"
-        self.pasta_fiscal_out = self.raiz_projeto / "fiscal_out"
+        # Arquivos gerados em runtime (ini/entrega/retorno) vao para local gravavel.
+        self.pasta_fiscal_in = Path(obter_caminho_dados("fiscal_in"))
+        self.pasta_fiscal_out = Path(obter_caminho_dados("fiscal_out"))
+        self.pasta_config_acbr = Path(obter_caminho_dados("acbrmonitor"))
 
         self.arquivo_entrega = self.pasta_fiscal_in / "ENTREGA.TXT"
         self.arquivo_retorno = self.pasta_fiscal_out / "RETORNO.TXT"
-        self.arquivo_ini = self.pasta_instala / "ACBrMonitor.ini"
+        self.arquivo_ini = self.pasta_config_acbr / "ACBrMonitor.ini"
 
         self._garantir_pastas()
         self._configurar_acbr_ini()
 
     def _garantir_pastas(self):
-        self.pasta_instala.mkdir(parents=True, exist_ok=True)
+        # A pasta de instalacao do ACBr ja existe (criada pelo instalador); apenas
+        # tentamos criá-la quando ainda executando a partir do codigo-fonte.
+        try:
+            self.pasta_instala.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         self.pasta_fiscal_in.mkdir(parents=True, exist_ok=True)
         self.pasta_fiscal_out.mkdir(parents=True, exist_ok=True)
+        self.pasta_config_acbr.mkdir(parents=True, exist_ok=True)
 
     def _configurar_acbr_ini(self):
         cfg = configparser.ConfigParser()
@@ -155,8 +165,12 @@ class FiscalManager:
             if executavel_acbr:
                 cfg[secao]["Executavel"] = executavel_acbr
 
-        with open(self.arquivo_ini, "w", encoding="utf-8") as f:
-            cfg.write(f)
+        try:
+            with open(self.arquivo_ini, "w", encoding="utf-8") as f:
+                cfg.write(f)
+        except OSError:
+            # Sem permissao de escrita: mantem app funcionando, apenas sem atualizar o ini local.
+            pass
 
     def _localizar_executavel_acbr(self):
         candidatos = [

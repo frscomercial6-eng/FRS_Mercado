@@ -41,6 +41,9 @@ Name: "instalaracbr"; Description: "Instalar ACBrMonitor junto com o sistema"; G
 Source: "{#AppSourceDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "_flet_windows_stage\\acbr\\{#ACBrInstallerName}"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
+[Dirs]
+Name: "{app}\data"; Permissions: users-modify
+
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
