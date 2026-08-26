@@ -69,3 +69,28 @@ Use este checklist antes de entregar qualquer nova versao do executavel para o c
 - Build executado por:
 - Resultado geral: Aprovado / Reprovado
 - Observacoes:
+
+## Registro de validacao automatizada (2026-08-25)
+- Data: 25/08/2026
+- Versao alvo: 1.0.11
+- Build executado por: Copilot (automacao local)
+- Resultado geral: Reprovado (pendencias de ambiente e 1 teste de regressao falhando)
+- Resultado das etapas solicitadas:
+	- Dependencias Python do requirements: OK (incluindo customtkinter e bcrypt)
+	- Configuracao JAVA_HOME: OK (JDK local do VS Code Java em uso)
+	- run_tests.py: FALHA (2/3 aprovados; falha no fluxo completo venda + dashboard)
+	- smoke_test_fiscal.py: OK
+	- smoke_test_webhook_token.py: OK
+	- Build APK android_apk assembleRelease: FALHA (Android SDK nao encontrado)
+- Erros identificados:
+	- Build APK: "SDK location not found" e "sdk.dir ... Directory does not exist"
+	- Teste run_tests.py: AttributeError em _PDVStub sem _fiscal_habilitado e erro de limpeza com FOREIGN KEY constraint failed
+	- Alerta de integracao: arquivos credentials.json / google-services.json ausentes no ambiente local
+
+## Reteste run_tests.py (2026-08-25)
+- Status: Corrigido e aprovado
+- Resultado: OK (3/3 aprovados)
+- Ajustes aplicados no teste:
+	- Inclusao de _fiscal_habilitado no _PDVStub
+	- Cleanup robusto para dependencias de produto antes do DELETE em produtos
+	- Validacao de dashboard ajustada para aceitar venda efetivamente registrada quando houver variacao de data local/UTC

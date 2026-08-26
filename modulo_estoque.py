@@ -1,3 +1,4 @@
+import csv
 import sqlite3
 import customtkinter as ctk
 from tkinter import StringVar, messagebox, filedialog
@@ -12,13 +13,7 @@ from modulo_config import carregar_configuracoes
 
 
 def exportar_produtos_para_xls_arquivo(caminho_arquivo: str):
-    """Exporta os produtos para um arquivo Excel .xls usando a biblioteca xlwt."""
-    try:
-        import xlwt
-    except ImportError as exc:
-        raise RuntimeError(
-            "Biblioteca xlwt não encontrada. Instale com: python -m pip install xlwt"
-        ) from exc
+    """Exporta os produtos para CSV (ou XLSX se openpyxl estiver disponível)."""
 
     with get_db_connection() as conn:
         rows = conn.execute(
@@ -74,14 +69,7 @@ def exportar_produtos_para_xls_arquivo(caminho_arquivo: str):
         "Caminho Imagem",
     ]
 
-    wb = xlwt.Workbook()
-    ws = wb.add_sheet("Produtos")
-    header_style = xlwt.easyxf("font: bold on; pattern: pattern solid, fore_colour gray25; align: horiz center")
-    body_style = xlwt.easyxf("align: vert center")
-
-    for col_index, header in enumerate(headers):
-        ws.write(0, col_index, header, header_style)
-
+    dados = []
     for row_index, row in enumerate(rows, start=1):
         valores = [
             row[0],
@@ -106,19 +94,33 @@ def exportar_produtos_para_xls_arquivo(caminho_arquivo: str):
             row[19],
             row[20],
         ]
-
-        for col_index, value in enumerate(valores):
-            if value is None:
-                value = ""
-            ws.write(row_index, col_index, value, body_style)
-
-    for col_index in range(len(headers)):
-        ws.col(col_index).width = 2200
+        dados.append(["" if v is None else v for v in valores])
 
     pasta = os.path.dirname(caminho_arquivo)
     if pasta and not os.path.exists(pasta):
         os.makedirs(pasta, exist_ok=True)
 
+    ext = Path(caminho_arquivo).suffix.lower()
+    if ext == ".csv":
+        with open(caminho_arquivo, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow(headers)
+            writer.writerows(dados)
+        return caminho_arquivo
+
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:
+        raise RuntimeError(
+            "Para exportar em .xlsx é necessário openpyxl. Use .csv ou instale: python -m pip install openpyxl"
+        ) from exc
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Produtos"
+    ws.append(headers)
+    for linha in dados:
+        ws.append(linha)
     wb.save(caminho_arquivo)
     return caminho_arquivo
 

@@ -1,3 +1,4 @@
+import argparse
 import os
 import importlib.util
 import sysconfig
@@ -7,6 +8,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from subprocess import CalledProcessError
 
 import PyInstaller.__main__
 from release_manager import prepare_release_artifacts
@@ -18,6 +20,22 @@ SUPPORT_DIR = ROOT_DIR / "_build_support"
 APP_EXE_NAME = "FRS_Mercado.exe"
 APP_DIST_DIR = ROOT_DIR / "dist" / "FRS_Mercado"
 WINDOWS_VERSION_INFO_PATH = ROOT_DIR / "_build_support" / "version_info.txt"
+SECURE_OBFUSCATED_DIR = ROOT_DIR / "_secure_obf"
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build Desktop FRS Mercado")
+    parser.add_argument(
+        "--secure-obfuscation",
+        action="store_true",
+        help="Ativa ofuscacao com PyArmor antes do PyInstaller.",
+    )
+    parser.add_argument(
+        "--skip-deploy",
+        action="store_true",
+        help="Nao pergunta deploy ao final do build.",
+    )
+    return parser.parse_args()
 
 
 def _confirm(prompt: str) -> bool:
@@ -67,13 +85,13 @@ def _validate_security_files() -> None:
         )
 
 
-def _resolve_entrypoint() -> str:
-    main_py = ROOT_DIR / "main.py"
+def _resolve_entrypoint(base_dir: Path = ROOT_DIR) -> str:
+    main_py = base_dir / "main.py"
     if not main_py.exists():
         raise FileNotFoundError(
             "main.py não encontrado. Ajuste o entrypoint antes do build para manter o padrão solicitado."
         )
-    return "main.py"
+    return str(main_py)
 
 
 def _ensure_runtime_hook() -> Path:
@@ -175,9 +193,14 @@ def _resolve_customtkinter_assets_dir() -> Path | None:
     return None
 
 
-def _build_pyinstaller_args(app_version: str) -> list[str]:
-    entrypoint = _resolve_entrypoint()
-    hook_path = _ensure_runtime_hook()
+def _build_pyinstaller_args(
+    app_version: str,
+    entrypoint: str | None = None,
+    runtime_hook: Path | None = None,
+    extra_paths: list[Path] | None = None,
+) -> list[str]:
+    entrypoint = entrypoint or _resolve_entrypoint()
+    hook_path = runtime_hook or _ensure_runtime_hook()
     version_file = _ensure_windows_version_file(app_version)
     icon_file = ROOT_DIR / "assets" / "logo.ico"
     if not icon_file.exists():
@@ -228,6 +251,11 @@ def _build_pyinstaller_args(app_version: str) -> list[str]:
     for std_path in sorted(p for p in std_paths if p and Path(p).exists()):
         args.append(f"--paths={std_path}")
 
+    if extra_paths:
+        for path in extra_paths:
+            if path.exists() and path.is_dir():
+                args.append(f"--paths={path}")
+
     collect_modules = [
         "customtkinter",
         "PIL",
@@ -272,11 +300,100 @@ def _clean_previous_builds() -> None:
         os.chmod(path, stat.S_IWRITE)
         func(path)
 
-    for folder_name in ["build", "dist"]:
+    for folder_name in ["build", "dist", "_secure_obf"]:
         target = ROOT_DIR / folder_name
         if target.exists() and target.is_dir():
             shutil.rmtree(target, onerror=_on_rm_error)
             print(f"Pasta removida: {target}")
+
+
+def _find_pyarmor_cli() -> Path:
+    scripts_dir = Path(sys.executable).resolve().parent / "Scripts"
+    candidate = scripts_dir / "pyarmor.exe"
+    if candidate.exists():
+        return candidate
+    raise FileNotFoundError(
+        f"PyArmor nao encontrado em {candidate}. Instale com: {sys.executable} -m pip install pyarmor"
+    )
+
+
+def _list_sources_for_obfuscation() -> list[str]:
+    excluded = {
+        "build_exe.py",
+        "build_secure_exe.py",
+        "build_flet_windows_bundle.py",
+        "deploy.py",
+        "release_master.py",
+        "run_tests.py",
+        "smoke_test_fiscal.py",
+        "smoke_test_webhook_token.py",
+        "test_update_flow.py",
+    }
+    sources = [p.name for p in sorted(ROOT_DIR.glob("*.py")) if p.name not in excluded]
+    if "main.py" not in sources:
+        raise FileNotFoundError("main.py nao encontrado na lista de fontes para ofuscacao")
+    return sources
+
+
+def _obfuscate_sources_with_pyarmor() -> tuple[str, Path, Path | None]:
+    pyarmor = _find_pyarmor_cli()
+    sources = _list_sources_for_obfuscation()
+
+    cmd = [
+        str(pyarmor),
+        "gen",
+        "-O",
+        str(SECURE_OBFUSCATED_DIR),
+        "-r",
+        "-i",
+        "--obf-module",
+        "1",
+        "--obf-code",
+        "1",
+    ] + sources
+
+    print("Executando ofuscacao com PyArmor...")
+    subprocess.run(cmd, cwd=str(ROOT_DIR), check=True)
+
+    obf_entrypoint = SECURE_OBFUSCATED_DIR / "main.py"
+    if not obf_entrypoint.exists():
+        raise FileNotFoundError(f"Entrypoint ofuscado não encontrado: {obf_entrypoint}")
+
+    obf_runtime_hook = SECURE_OBFUSCATED_DIR / "_runtime_hook_error_logger.py"
+    return str(obf_entrypoint), SECURE_OBFUSCATED_DIR, (obf_runtime_hook if obf_runtime_hook.exists() else None)
+
+
+def _build_with_nuitka_secure_fallback() -> None:
+    print("[AVISO] Fallback ativado: compilacao fechada com Nuitka (PyArmor indisponivel/licenca).")
+    cmd = [
+        sys.executable,
+        "-m",
+        "nuitka",
+        "--standalone",
+        "--assume-yes-for-downloads",
+        "--windows-console-mode=disable",
+        "--enable-plugin=tk-inter",
+        "--windows-icon-from-ico=assets/logo.ico",
+        "--include-data-dir=assets=assets",
+        "--output-dir=dist",
+        "--output-filename=FRS_Mercado.exe",
+        "main.py",
+    ]
+
+    config_dir = ROOT_DIR / "config"
+    if config_dir.exists() and config_dir.is_dir():
+        cmd.append("--include-data-dir=config=config")
+
+    subprocess.run(cmd, cwd=str(ROOT_DIR), check=True)
+
+    produced_dir = ROOT_DIR / "dist" / "main.dist"
+    target_dir = ROOT_DIR / "dist" / "FRS_Mercado"
+    if not produced_dir.exists() or not produced_dir.is_dir():
+        raise FileNotFoundError("Saída esperada do Nuitka não encontrada em dist/main.dist")
+
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    produced_dir.rename(target_dir)
 
 
 def _copy_if_exists(src: Path, dst: Path) -> None:
@@ -417,6 +534,7 @@ def _build_installer(app_version: str) -> Path | None:
 
 
 def main() -> None:
+    cli_args = _parse_args()
     app_version = prepare_release_artifacts()
     _validate_security_files()
 
@@ -429,7 +547,28 @@ def main() -> None:
 
     _clean_previous_builds()
     _prepare_support_payload()
-    args = _build_pyinstaller_args(app_version)
+    if cli_args.secure_obfuscation:
+        try:
+            entrypoint, obf_path, obf_hook = _obfuscate_sources_with_pyarmor()
+            args = _build_pyinstaller_args(
+                app_version,
+                entrypoint=entrypoint,
+                runtime_hook=obf_hook,
+                extra_paths=[obf_path],
+            )
+            print("\nComando interno do PyInstaller:")
+            for item in args:
+                print(f"  {item}")
+            PyInstaller.__main__.run(args)
+        except Exception as exc:
+            print(f"[AVISO] PyArmor falhou: {exc}")
+            _build_with_nuitka_secure_fallback()
+    else:
+        args = _build_pyinstaller_args(app_version)
+        print("\nComando interno do PyInstaller:")
+        for item in args:
+            print(f"  {item}")
+        PyInstaller.__main__.run(args)
 
     print("Arquivos/recursos que serão empacotados:")
     print("- Entrypoint: main.py")
@@ -443,18 +582,16 @@ def main() -> None:
     if (ROOT_DIR / "config").exists():
         print("- config/ -> config/")
 
-    print("\nComando interno do PyInstaller:")
-    for item in args:
-        print(f"  {item}")
-
-    PyInstaller.__main__.run(args)
-
     zip_path = _create_portable_package(app_version)
     print(f"Pacote portátil gerado: {zip_path}")
 
     installer_path = _build_installer(app_version)
     if installer_path:
         print(f"Instalador gerado: {installer_path}")
+
+    if cli_args.skip_deploy:
+        print("Build concluido com --skip-deploy. Artefatos mantidos localmente para revisão")
+        return
 
     pergunta_deploy = "Build concluído com sucesso. Deseja realizar o deploy para o GitHub agora? [S/N]"
     if not _confirm(pergunta_deploy):

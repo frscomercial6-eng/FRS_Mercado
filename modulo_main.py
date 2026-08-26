@@ -894,7 +894,7 @@ class AppPrincipal(ctk.CTk):
         self._abrir_modulo_seguro("ESTOQUE", self._abrir_estoque_impl)
 
     def exportar_produtos_xls(self):
-        """Exporta os produtos para XLS diretamente pelo menu principal."""
+        """Exporta os produtos para CSV/XLSX diretamente pelo menu principal."""
         try:
             from modulo_estoque import exportar_produtos_para_xls_arquivo
         except Exception as exc:
@@ -903,13 +903,13 @@ class AppPrincipal(ctk.CTk):
 
         pasta_padrao = obter_caminho_dados("exportacao_fiscal")
         os.makedirs(pasta_padrao, exist_ok=True)
-        nome_padrao = f"produtos_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xls"
+        nome_padrao = f"produtos_{datetime.now().strftime('%d%m%Y_%H%M%S')}.csv"
 
         destino = filedialog.asksaveasfilename(
             initialdir=pasta_padrao,
             initialfile=nome_padrao,
-            defaultextension=".xls",
-            filetypes=[("Arquivo Excel", "*.xls")],
+            defaultextension=".csv",
+            filetypes=[("Arquivo CSV", "*.csv"), ("Arquivo Excel", "*.xlsx")],
             title="Salvar exportação de produtos",
         )
         if not destino:
@@ -924,46 +924,252 @@ class AppPrincipal(ctk.CTk):
             messagebox.showerror("Erro na exportação", f"Não foi possível exportar os produtos:\n{exc}")
 
     def importar_produtos_gdoor(self):
-        """Importa produtos de uma pasta de backup para o banco local do FRS."""
-        pasta_inicial = r"F:\\"
-        if not os.path.isdir(pasta_inicial):
-            pasta_inicial = str(Path.home())
-
-        pasta_origem = filedialog.askdirectory(
-            initialdir=pasta_inicial,
-            title="Selecione a pasta com backup do GDOOR",
-        )
-        if not pasta_origem:
+        """Abre opções para importar arquivo ou baixar planilha modelo."""
+        acao = self._abrir_dialogo_importacao_produtos()
+        if not acao:
             return
 
-        pasta_relatorios = obter_caminho_dados("exportacao_fiscal")
-        os.makedirs(pasta_relatorios, exist_ok=True)
-        nome_planilha = f"produtos_importados_{datetime.now().strftime('%d%m%Y_%H%M%S')}.xlsx"
-        caminho_planilha = os.path.join(pasta_relatorios, nome_planilha)
+        pasta_inicial = obter_caminho_dados("fiscal_in")
+        try:
+            os.makedirs(pasta_inicial, exist_ok=True)
+        except Exception:
+            pasta_inicial = str(Path.home() / "Documents")
+
+        if acao == "modelo":
+            destino_modelo = filedialog.asksaveasfilename(
+                initialdir=pasta_inicial,
+                initialfile="modelo_importacao_produtos.csv",
+                defaultextension=".csv",
+                filetypes=[("Arquivo CSV", "*.csv"), ("Arquivo Excel", "*.xlsx")],
+                title="Salvar planilha modelo de importação",
+            )
+            if not destino_modelo:
+                return
+            try:
+                self._gerar_planilha_modelo_importacao(destino_modelo)
+                messagebox.showinfo("Modelo gerado", f"Planilha modelo salva em:\n{destino_modelo}")
+            except PermissionError:
+                messagebox.showerror(
+                    "Sem permissão para salvar",
+                    "Não foi possível salvar a planilha nesse local.\n"
+                    "Escolha uma pasta com permissão de escrita (ex.: Documentos).",
+                )
+            except Exception as exc:
+                messagebox.showerror("Erro", f"Não foi possível gerar a planilha modelo:\n{exc}")
+            return
+
+        caminho_arquivo = filedialog.askopenfilename(
+            initialdir=pasta_inicial,
+            title="Selecione a planilha de produtos para importar",
+            filetypes=[
+                ("Planilhas", "*.csv;*.xlsx"),
+                ("Arquivo CSV", "*.csv"),
+                ("Arquivo Excel", "*.xlsx"),
+            ],
+        )
+        if not caminho_arquivo:
+            return
 
         try:
-            from migrar_produtos_gdoor import executar_migracao
-
-            resultado = executar_migracao(root=pasta_origem, output_excel=caminho_planilha)
+            resultado = self._importar_produtos_de_planilha(caminho_arquivo)
             registrar_log(
                 None,
                 "Importação de Produtos",
                 "Sucesso",
-                f"Origem: {pasta_origem} | Lidos: {resultado.get('quantidade_produtos', 0)} | Inseridos: {resultado.get('produtos_inseridos', 0)}",
+                f"Arquivo: {caminho_arquivo} | Lidos: {resultado.get('quantidade_produtos', 0)} | Inseridos: {resultado.get('produtos_inseridos', 0)}",
             )
             messagebox.showinfo(
                 "Importação concluída",
                 (
                     "Importação de produtos concluída com sucesso.\n\n"
-                    f"Origem: {resultado.get('origem', 'desconhecida')}\n"
+                    f"Arquivo: {caminho_arquivo}\n"
                     f"Produtos lidos: {resultado.get('quantidade_produtos', 0)}\n"
                     f"Produtos inseridos: {resultado.get('produtos_inseridos', 0)}\n"
-                    f"Planilha gerada: {resultado.get('arquivo_excel', caminho_planilha)}"
+                    f"Relatório: {resultado.get('arquivo_excel', '')}"
                 ),
             )
         except Exception as exc:
             registrar_log(None, "Importação de Produtos", "Falha", f"Erro: {exc}")
             messagebox.showerror("Erro na importação", f"Não foi possível importar os produtos:\n{exc}")
+
+    def _abrir_dialogo_importacao_produtos(self) -> str | None:
+        """Exibe uma janela simples com duas opções para o usuário."""
+        resultado = {"acao": None}
+
+        janela = ctk.CTkToplevel(self)
+        janela.title("Importação de Produtos")
+        janela.geometry("420x210")
+        janela.transient(self)
+        janela.grab_set()
+
+        ctk.CTkLabel(
+            janela,
+            text="Importação de Produtos",
+            font=("Roboto", 18, "bold"),
+        ).pack(pady=(18, 8))
+
+        ctk.CTkLabel(
+            janela,
+            text="Escolha uma opção:",
+            font=("Roboto", 12),
+        ).pack(pady=(0, 12))
+
+        def _definir_acao(valor: str):
+            resultado["acao"] = valor
+            try:
+                janela.grab_release()
+            except Exception:
+                pass
+            janela.destroy()
+
+        ctk.CTkButton(
+            janela,
+            text="Importar Produtos",
+            width=260,
+            height=40,
+            fg_color="#2563eb",
+            hover_color="#1e40af",
+            command=lambda: _definir_acao("importar"),
+        ).pack(pady=6)
+
+        ctk.CTkButton(
+            janela,
+            text="Baixar Modelo",
+            width=260,
+            height=40,
+            fg_color="#0f766e",
+            hover_color="#115e59",
+            command=lambda: _definir_acao("modelo"),
+        ).pack(pady=6)
+
+        def _cancelar():
+            _definir_acao(None)
+
+        janela.protocol("WM_DELETE_WINDOW", _cancelar)
+        self.wait_window(janela)
+        return resultado.get("acao")
+
+    def _gerar_planilha_modelo_importacao(self, destino: str):
+        import csv
+
+        colunas = ["codigo_barras", "nome", "preco_venda", "ncm", "quantidade_atual"]
+        exemplo = {
+            "codigo_barras": "7891234567890",
+            "nome": "PRODUTO EXEMPLO",
+            "preco_venda": "19.90",
+            "ncm": "22030000",
+            "quantidade_atual": "10",
+        }
+
+        ext = Path(destino).suffix.lower()
+        pasta_destino = str(Path(destino).parent)
+        if pasta_destino:
+            os.makedirs(pasta_destino, exist_ok=True)
+
+        if ext == ".csv":
+            with open(destino, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=colunas, delimiter=";")
+                writer.writeheader()
+                writer.writerow(exemplo)
+            return
+
+        if ext == ".xlsx":
+            try:
+                from openpyxl import Workbook
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Para gerar modelo em .xlsx é necessário openpyxl. Use .csv ou instale: python -m pip install openpyxl"
+                ) from exc
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Modelo"
+            ws.append(colunas)
+            ws.append([exemplo[c] for c in colunas])
+            wb.save(destino)
+            return
+
+        raise ValueError("Formato de arquivo inválido. Use .xlsx ou .csv para o modelo.")
+
+    def _importar_produtos_de_planilha(self, caminho_arquivo: str) -> dict:
+        import csv
+        from migrar_produtos_gdoor import inserir_produtos_frs_local
+
+        ext = Path(caminho_arquivo).suffix.lower()
+        if ext == ".csv":
+            with open(caminho_arquivo, "r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f, delimiter=";")
+                linhas = list(reader)
+        else:
+            try:
+                from openpyxl import load_workbook
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Para importar .xlsx é necessário openpyxl. Use .csv ou instale: python -m pip install openpyxl"
+                ) from exc
+
+            wb = load_workbook(caminho_arquivo, data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(values_only=True))
+            if not rows:
+                raise ValueError("Planilha vazia.")
+            headers = [str(h or "").strip() for h in rows[0]]
+            linhas = []
+            for vals in rows[1:]:
+                linhas.append({headers[i]: vals[i] if i < len(vals) else "" for i in range(len(headers))})
+
+        if not linhas:
+            raise ValueError("A planilha não possui dados para importar.")
+
+        mapa_colunas = {str(c).strip().lower(): str(c) for c in linhas[0].keys()}
+        obrigatorias = ["codigo_barras", "nome", "preco_venda", "ncm", "quantidade_atual"]
+        faltando = [c for c in obrigatorias if c not in mapa_colunas]
+        if faltando:
+            raise ValueError(f"Colunas obrigatórias ausentes na planilha: {', '.join(faltando)}")
+
+        def _to_float(valor):
+            txt = str(valor or "").strip()
+            if "," in txt and "." in txt:
+                txt = txt.replace(".", "").replace(",", ".")
+            else:
+                txt = txt.replace(",", ".")
+            txt = "".join(ch for ch in txt if ch.isdigit() or ch in ".-")
+            try:
+                return float(txt) if txt else 0.0
+            except Exception:
+                return 0.0
+
+        def _to_int(valor):
+            txt = "".join(ch for ch in str(valor or "") if ch.isdigit() or ch == "-")
+            try:
+                return int(txt) if txt else 0
+            except Exception:
+                return 0
+
+        produtos = []
+        for row in linhas:
+            nome = str(row.get(mapa_colunas["nome"], "") or "").strip()
+            if not nome:
+                continue
+            produtos.append(
+                {
+                    "codigo_barras": str(row.get(mapa_colunas["codigo_barras"], "") or "").strip(),
+                    "nome": nome,
+                    "preco_venda": _to_float(row.get(mapa_colunas["preco_venda"], "")),
+                    "ncm": str(row.get(mapa_colunas["ncm"], "") or "").strip(),
+                    "quantidade_atual": _to_int(row.get(mapa_colunas["quantidade_atual"], "")),
+                }
+            )
+
+        if not produtos:
+            raise ValueError("A planilha não possui produtos válidos para importar.")
+
+        pasta_relatorios = obter_caminho_dados("exportacao_fiscal")
+        os.makedirs(pasta_relatorios, exist_ok=True)
+        nome_relatorio = f"produtos_importados_{datetime.now().strftime('%d%m%Y_%H%M%S')}.csv"
+        caminho_relatorio = os.path.join(pasta_relatorios, nome_relatorio)
+
+        return inserir_produtos_frs_local(produtos, output_excel=caminho_relatorio)
 
     def _abrir_estoque_impl(self):
         from modulo_estoque import ModuloEstoque

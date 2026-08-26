@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import csv
 import importlib
 import os
 import re
 import sys
 from pathlib import Path
 from typing import Any, Iterable, List, Sequence
-
-import pandas as pd
 
 from database_manager import get_db_connection
 
@@ -192,8 +191,21 @@ def encontrar_banco_firebird(root: Path) -> Path | None:
 
 
 def carregar_csv_produtos(caminho: Path) -> List[dict[str, Any]]:
-    df = pd.read_csv(caminho, sep=None, engine="python", dtype=str, na_values=["", "NULL", "N/A", "#N/A"], keep_default_na=False)
-    colunas = [str(col).strip() for col in df.columns]
+    with caminho.open("r", encoding="utf-8-sig", newline="") as f:
+        amostra = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(amostra, delimiters=";,\t,")
+            delimitador = dialect.delimiter
+        except Exception:
+            delimitador = ";"
+        reader = csv.DictReader(f, delimiter=delimitador)
+        linhas = list(reader)
+
+    if not linhas:
+        return []
+
+    colunas = [str(col).strip() for col in linhas[0].keys()]
 
     ean_col = find_matching_column(colunas, ["EAN", "CODIGOBARRAS", "CODBAR", "CODIGO_DE_BARRAS", "BARCODE", "GTIN", "CODIGO"])
     desc_col = find_matching_column(colunas, ["DESCRICAO", "DESCRICAO_PRODUTO", "NOME", "NOME_PRODUTO", "PRODUTO", "DESCRICAOITEM", "ITEM"])
@@ -205,14 +217,14 @@ def carregar_csv_produtos(caminho: Path) -> List[dict[str, Any]]:
         raise ValueError(f"Não foi possível identificar a coluna de descrição do produto em: {caminho}")
 
     produtos: List[dict[str, Any]] = []
-    for _, linha in df.iterrows():
-        ean = normalize_ean(linha[ean_col] if ean_col else "")
-        nome = normalize_text(linha[desc_col] if desc_col else "")
+    for linha in linhas:
+        ean = normalize_ean(linha.get(ean_col, "") if ean_col else "")
+        nome = normalize_text(linha.get(desc_col, "") if desc_col else "")
         if not nome:
             continue
-        preco = normalize_decimal(linha[preco_col] if preco_col else 0.0)
-        ncm = normalize_ncm(linha[ncm_col] if ncm_col else "")
-        quantidade = normalize_int(linha[estoque_col] if estoque_col else 0)
+        preco = normalize_decimal(linha.get(preco_col, 0.0) if preco_col else 0.0)
+        ncm = normalize_ncm(linha.get(ncm_col, "") if ncm_col else "")
+        quantidade = normalize_int(linha.get(estoque_col, 0) if estoque_col else 0)
 
         produtos.append(
             {
@@ -381,21 +393,43 @@ def extrair_produtos_firebird(path: Path) -> List[dict[str, Any]]:
 
 
 def salvar_planilha(produtos: Iterable[dict[str, Any]], output_path: Path) -> None:
-    dataframe = pd.DataFrame(
-        [
-            {
-                "codigo_barras": p.get("codigo_barras", ""),
-                "nome": p.get("nome", ""),
-                "preco_venda": p.get("preco_venda", 0.0),
-                "ncm": p.get("ncm", ""),
-                "quantidade_atual": p.get("quantidade_atual", 0),
-            }
-            for p in produtos
-        ]
-    )
-    dataframe = dataframe.drop_duplicates(subset=["codigo_barras"], keep="last")
+    colunas = ["codigo_barras", "nome", "preco_venda", "ncm", "quantidade_atual"]
+    unicos = {}
+    for p in produtos:
+        codigo = str(p.get("codigo_barras", "") or "").strip()
+        chave = codigo or str(len(unicos))
+        unicos[chave] = {
+            "codigo_barras": p.get("codigo_barras", ""),
+            "nome": p.get("nome", ""),
+            "preco_venda": p.get("preco_venda", 0.0),
+            "ncm": p.get("ncm", ""),
+            "quantidade_atual": p.get("quantidade_atual", 0),
+        }
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    dataframe.to_excel(output_path, index=False)
+
+    if output_path.suffix.lower() == ".csv":
+        with output_path.open("w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=colunas, delimiter=";")
+            writer.writeheader()
+            for item in unicos.values():
+                writer.writerow(item)
+        return
+
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:
+        raise RuntimeError(
+            "Para gerar relatório .xlsx é necessário openpyxl. Use .csv ou instale: python -m pip install openpyxl"
+        ) from exc
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Produtos"
+    ws.append(colunas)
+    for item in unicos.values():
+        ws.append([item[c] for c in colunas])
+    wb.save(output_path)
 
 
 def inserir_produtos_frs(produtos: Iterable[dict[str, Any]]) -> int:

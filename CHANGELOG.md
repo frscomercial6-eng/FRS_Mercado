@@ -53,3 +53,9 @@
 ## 1.0.11 - 12/08/2026
 - Release automatizada gerada pelo Mestre de Release.
 
+## 1.0.11 - 13/08/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.11 - 25/08/2026
+- Release automatizada gerada pelo Mestre de Release.
+

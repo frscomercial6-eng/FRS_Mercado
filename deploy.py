@@ -165,7 +165,7 @@ def main() -> None:
         if not _confirm("Executar build antes do deploy?"):
             print("Deploy cancelado: build não autorizado.")
             return
-        subprocess.run([sys.executable, "build_exe.py"], cwd=str(ROOT_DIR), check=True)
+        subprocess.run([sys.executable, "build_exe.py", "--secure-obfuscation", "--skip-deploy"], cwd=str(ROOT_DIR), check=True)
 
     _ensure_git_commit(version)
     _ensure_tag(version)

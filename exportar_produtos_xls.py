@@ -1,23 +1,17 @@
+import csv
 import os
 import sqlite3
 import sys
 from datetime import datetime
 
-try:
-    import xlwt
-except ImportError as exc:
-    raise SystemExit(
-        "Biblioteca xlwt não encontrada. Instale com: python -m pip install xlwt"
-    ) from exc
-
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DB_PATH = os.path.abspath(os.path.join(BASE_DIR, "data", "mercado.db"))
-DEFAULT_OUTPUT_PATH = os.path.abspath(os.path.join(BASE_DIR, "produtos_exportados.xls"))
+DEFAULT_OUTPUT_PATH = os.path.abspath(os.path.join(BASE_DIR, "produtos_exportados.csv"))
 
 
 def gerar_nome_arquivo_exportacao():
     agora = datetime.now()
-    return f"produtos_{agora.strftime('%d%m%Y_%H%M%S')}.xls"
+    return f"produtos_{agora.strftime('%d%m%Y_%H%M%S')}.csv"
 
 
 def exportar_produtos_xls(output_path: str = DEFAULT_OUTPUT_PATH, db_path: str = DB_PATH):
@@ -82,16 +76,8 @@ def exportar_produtos_xls(output_path: str = DEFAULT_OUTPUT_PATH, db_path: str =
         "Caminho Imagem",
     ]
 
-    wb = xlwt.Workbook()
-    ws = wb.add_sheet("Produtos")
-
-    header_style = xlwt.easyxf("font: bold on; pattern: pattern solid, fore_colour gray25; align: horiz center")
-    body_style = xlwt.easyxf("align: vert center")
-
-    for col_index, header in enumerate(headers):
-        ws.write(0, col_index, header, header_style)
-
-    for row_index, row in enumerate(rows, start=1):
+    dados = []
+    for row in rows:
         values = [
             row["id"],
             row["codigo_barras"],
@@ -115,20 +101,35 @@ def exportar_produtos_xls(output_path: str = DEFAULT_OUTPUT_PATH, db_path: str =
             row["fim_promocao"],
             row["imagem_path"],
         ]
-
-        for col_index, value in enumerate(values):
-            if value is None:
-                value = ""
-            ws.write(row_index, col_index, value, body_style)
-
-    for col_index in range(len(headers)):
-        ws.col(col_index).width = 2200
+        dados.append(["" if v is None else v for v in values])
 
     out_dir = os.path.dirname(output_path)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
 
-    wb.save(output_path)
+    ext = os.path.splitext(output_path)[1].lower()
+    if ext == ".csv":
+        with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow(headers)
+            writer.writerows(dados)
+    elif ext == ".xlsx":
+        try:
+            from openpyxl import Workbook
+        except ImportError as exc:
+            raise RuntimeError(
+                "Para exportar em .xlsx é necessário openpyxl. Use .csv ou instale: python -m pip install openpyxl"
+            ) from exc
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Produtos"
+        ws.append(headers)
+        for linha in dados:
+            ws.append(linha)
+        wb.save(output_path)
+    else:
+        raise ValueError("Formato de saída inválido. Use .csv ou .xlsx.")
     return output_path
 
 
@@ -139,7 +140,7 @@ if __name__ == "__main__":
 
     try:
         file_path = exportar_produtos_xls(output_path=output_path)
-        print(f"Arquivo XLS gerado com sucesso: {file_path}")
+        print(f"Arquivo gerado com sucesso: {file_path}")
         print(f"Produtos exportados em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
     except Exception as exc:
         print(f"Erro ao exportar produtos: {exc}", file=sys.stderr)

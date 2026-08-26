@@ -21,7 +21,7 @@ def main() -> None:
     print(f"Metadados, contrato, EULA e changelog sincronizados para versão {version}.")
 
     if _confirm("Deseja executar o build agora?"):
-        subprocess.run([sys.executable, "build_exe.py"], cwd=str(ROOT_DIR), check=True)
+        subprocess.run([sys.executable, "build_exe.py", "--secure-obfuscation"], cwd=str(ROOT_DIR), check=True)
         print("Build concluído. O deploy agora é decidido ao final do build, após gerar artefatos.")
 
 
