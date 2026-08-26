@@ -218,6 +218,8 @@ def _build_pyinstaller_args(
         "--icon=assets/logo.ico",
         f"--version-file={version_file}",
         "--add-data=assets;assets",
+        "--add-data=version.txt;.",
+        "--add-data=EULA.txt;.",
         "--hidden-import=hashlib",
         "--hidden-import=uuid",
         "--hidden-import=encodings",
@@ -293,18 +295,47 @@ def _build_pyinstaller_args(
     return args
 
 
+def _terminate_stale_app_processes() -> None:
+    """Fecha qualquer instância anterior do app para liberar arquivos em dist/."""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "FRS_Mercado.exe"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 def _clean_previous_builds() -> None:
     """Remove artefatos antigos para evitar empacotamento sujo."""
+    _terminate_stale_app_processes()
+
     def _on_rm_error(func, path, _exc_info):
         # Alguns artefatos do Flutter/Flet ficam read-only no Windows.
-        os.chmod(path, stat.S_IWRITE)
-        func(path)
+        try:
+            os.chmod(path, stat.S_IWRITE)
+        except Exception:
+            pass
+        try:
+            func(path)
+        except FileNotFoundError:
+            pass
 
     for folder_name in ["build", "dist", "_secure_obf"]:
         target = ROOT_DIR / folder_name
         if target.exists() and target.is_dir():
-            shutil.rmtree(target, onerror=_on_rm_error)
-            print(f"Pasta removida: {target}")
+            for _ in range(3):
+                try:
+                    shutil.rmtree(target, onerror=_on_rm_error)
+                    print(f"Pasta removida: {target}")
+                    break
+                except PermissionError:
+                    _terminate_stale_app_processes()
+                    continue
+            else:
+                raise PermissionError(f"Não foi possível remover o diretório em uso: {target}")
 
 
 def _find_pyarmor_cli() -> Path:
@@ -375,6 +406,8 @@ def _build_with_nuitka_secure_fallback() -> None:
         "--enable-plugin=tk-inter",
         "--windows-icon-from-ico=assets/logo.ico",
         "--include-data-dir=assets=assets",
+        "--include-data-file=version.txt=version.txt",
+        "--include-data-file=EULA.txt=EULA.txt",
         "--output-dir=dist",
         "--output-filename=FRS_Mercado.exe",
         "main.py",

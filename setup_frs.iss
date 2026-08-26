@@ -31,7 +31,7 @@ Name: "desktopicon"; Description: "Criar atalhos na area de trabalho"; GroupDesc
 Name: "instalaracbr"; Description: "Instalar ACBrMonitor (motor fiscal)"; GroupDescription: "Componentes adicionais:"; Flags: checkedonce
 
 [Files]
-Source: "dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\FRS_Mercado\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "version.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
@@ -43,12 +43,12 @@ Source: "_build_support\data\*"; DestDir: "{app}\data"; Flags: ignoreversion rec
 Source: "_build_support\acbr\ACBrMonitor_Installer.exe"; DestDir: "{app}\instala"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\logo.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\logo.ico"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\assets\logo.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\assets\logo.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\instala\ACBrMonitor_Installer.exe"; Parameters: "/VERYSILENT /NORESTART"; Description: "Instalar ACBrMonitor"; Flags: waituntilterminated runhidden skipifsilent skipifdoesntexist; Tasks: instalaracbr
-Filename: "{app}\{#MyAppExeName}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent skipifdoesntexist
+Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent skipifdoesntexist
 
 [Code]
 function NextButtonClick(CurPageID: Integer): Boolean;

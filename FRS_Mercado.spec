@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('assets', 'assets'), ('C:/Users/Filipe/AppData/Local/Programs/Python/Python311/Lib/site-packages/customtkinter/assets', 'customtkinter/assets')]
+datas = [('assets', 'assets'), ('version.txt', '.'), ('EULA.txt', '.'), ('C:/Users/User/AppData/Local/Programs/Python/Python311/Lib/site-packages/customtkinter/assets', 'customtkinter/assets')]
 binaries = []
 hiddenimports = ['hashlib', 'uuid', 'encodings', 'codecs', 'importlib', 'importlib.util', 'pkgutil', 'zipimport', 'site', 'sysconfig', 'altgraph']
 hiddenimports += collect_submodules('encodings')
@@ -13,8 +13,6 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('reportlab')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('googleapiclient')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('google_auth_oauthlib')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('google.auth')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
@@ -29,8 +27,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['main.py'],
-    pathex=['C:/Users/Filipe/AppData/Local/Programs/Python/Python311/DLLs', 'C:/Users/Filipe/AppData/Local/Programs/Python/Python311/Lib', 'C:/Users/Filipe/AppData/Local/Programs/Python/Python311/Lib/site-packages'],
+    ['F:/PROGRAMA/FRS_MERCADO/main.py'],
+    pathex=['C:/Users/User/AppData/Local/Programs/Python/Python311/DLLs', 'C:/Users/User/AppData/Local/Programs/Python/Python311/Lib', 'C:/Users/User/AppData/Local/Programs/Python/Python311/Lib/site-packages'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
