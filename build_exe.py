@@ -63,7 +63,8 @@ def _validate_security_files() -> None:
     db_src = _read_current_file(database_file)
 
     required_login_markers = [
-        "hash_parte = partes_codigo[3]",
+        # Alineado com a validação corrigida (codigo de 4 segmentos ANO-MES-DIA-HASH).
+        "hash_parte = partes_codigo[3].lower()",
         "expected_hash[:16] == hash_parte[:16]",
     ]
     missing_login = [m for m in required_login_markers if m not in login_src]
@@ -268,6 +269,7 @@ def _build_pyinstaller_args(
         "httplib2",
         "requests",
         "bcrypt",
+        "openpyxl",
         "setuptools",
     ]
     for mod_name in collect_modules:
@@ -351,6 +353,7 @@ def _find_pyarmor_cli() -> Path:
 def _list_sources_for_obfuscation() -> list[str]:
     excluded = {
         "build_exe.py",
+        "build_portable.py",
         "build_secure_exe.py",
         "build_flet_windows_bundle.py",
         "deploy.py",
@@ -439,6 +442,38 @@ def _copy_if_exists(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def _es_nome_instalador_acbr(nome: str) -> bool:
+    """True se o nome corresponde a um instalador (-I/DEMO/installer),
+    nunca ao binario real do motor fiscal (ACBrMonitor.exe/ACBrMonitorPLUS.exe)."""
+    nome_low = str(nome or "").lower()
+    return (
+        "installer" in nome_low
+        or "demo" in nome_low
+        or nome_low.endswith("-i.exe")
+    )
+
+
+def _montar_instala_acbr_portatil(portable_dir: Path) -> None:
+    """Prepara <portatil>/instala/ com o binario REAL do motor fiscal para que
+    o runtime (modulo_fiscal/system_monitor) o localize em instala\ACBrMonitor.exe.
+    O instalador (-I/DEMO) jamais é copiado a instala/."""
+    monitor_src = SUPPORT_DIR / "acbr" / "ACBrMonitor.exe"
+    if not (monitor_src.exists() and monitor_src.is_file()):
+        print(
+            "[AVISO] Motor fiscal REAL não disponível para o portátil "
+            "(falta _build_support/acbr/ACBrMonitor.exe). "
+            "Coloca o binário extraído em instala/ACBrMonitor.exe antes do build "
+            "para que o pacote portátil inclua o motor funcional."
+        )
+        return
+    instala_portatil = portable_dir / "instala"
+    instala_portatil.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(monitor_src, instala_portatil / "ACBrMonitor.exe")
+    print(
+        f"- instala/ACBrMonitor.exe do portátil gerado com o motor real: {monitor_src}"
+    )
+
+
 def _create_portable_package(app_version: str) -> Path:
     """Monta uma versão portátil e gera ZIP em installer/."""
     if not APP_DIST_DIR.exists() or not APP_DIST_DIR.is_dir():
@@ -460,6 +495,7 @@ def _create_portable_package(app_version: str) -> Path:
     _copy_if_exists(ROOT_DIR / "version.txt", portable_dir / "version.txt")
     _copy_if_exists(ROOT_DIR / "EULA.txt", portable_dir / "EULA.txt")
     _copy_if_exists(SUPPORT_DIR, portable_dir)
+    _montar_instala_acbr_portatil(portable_dir)
 
     installer_dir = ROOT_DIR / "installer"
     installer_dir.mkdir(parents=True, exist_ok=True)
@@ -485,56 +521,49 @@ def _prepare_support_payload() -> None:
     _copy_if_exists(ROOT_DIR / "google-services.json", SUPPORT_DIR / "google-services.json")
     _copy_if_exists(ROOT_DIR / "checklist_homologacao.md", SUPPORT_DIR / "checklist_homologacao.md")
 
-    # ACBrMonitor (motor fiscal) para instalador all-in-one.
+    # ACBrMonitor: el binario REAL del motor y el instalador se empaquetan por
+    # separado. El instalador (-I/DEMO) nunca debe usarse ni renombrarse como motor.
     acbr_dir = SUPPORT_DIR / "acbr"
     acbr_dir.mkdir(parents=True, exist_ok=True)
-    acbr_candidates = [
-        ROOT_DIR / "instala" / "ACBrMonitorPLUS-DEMO-1.4.0.467-x86-I.exe",
-        ROOT_DIR / "instala" / "ACBrMonitor.exe",
-        ROOT_DIR / "instala" / "ACBrMonitorPLUS.exe",
-    ]
-    acbr_found = None
-    for acbr in acbr_candidates:
-        if acbr.exists() and acbr.is_file():
-            acbr_found = acbr
+    instala_dir = ROOT_DIR / "instala"
+
+    # 1) Binario real del motor fiscal -> nombre canonico ACBrMonitor.exe.
+    monitor_real = None
+    for nombre in ("ACBrMonitor.exe", "ACBrMonitorPLUS.exe"):
+        candidato = instala_dir / nombre
+        if candidato.exists() and candidato.is_file():
+            monitor_real = candidato
             break
-    if acbr_found is not None:
-        _copy_if_exists(acbr_found, acbr_dir / "ACBrMonitor_Installer.exe")
-        print(f"- ACBr incluído no payload: {acbr_found} -> {acbr_dir / 'ACBrMonitor_Installer.exe'}")
-    else:
-        print("[AVISO] Instalador do ACBr não encontrado para inclusão no setup all-in-one.")
-
-    # Banco principal vai para a pasta data (mesmo layout esperado em runtime).
-    data_dir = SUPPORT_DIR / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    db_candidates: list[Path] = []
-    try:
-        from database_manager import get_db_path
-
-        db_candidates.append(Path(get_db_path()))
-    except Exception:
-        pass
-
-    db_candidates.extend(
-        [
-            ROOT_DIR / "mercado.db",
-            ROOT_DIR / "database.db",
-            ROOT_DIR / "banco.db",
-        ]
-    )
-
-    db_found = None
-    for db_path in db_candidates:
-        if db_path.exists() and db_path.is_file():
-            db_found = db_path
+    if monitor_real is None and instala_dir.is_dir():
+        for arq in instala_dir.glob("*ACBrMonitor*.exe"):
+            if _es_nome_instalador_acbr(arq.name):
+                # Saltar instaladores/demo: no son el motor.
+                continue
+            monitor_real = arq
             break
 
-    if db_found is not None:
-        _copy_if_exists(db_found, data_dir / "mercado.db")
-        print(f"- Banco incluído no payload: {db_found} -> {data_dir / 'mercado.db'}")
+    if monitor_real is not None:
+        _copy_if_exists(monitor_real, acbr_dir / "ACBrMonitor.exe")
+        print(f"- Motor fiscal REAL incluido: {monitor_real.name} -> {acbr_dir / 'ACBrMonitor.exe'}")
     else:
-        print("[AVISO] Nenhum arquivo de banco encontrado para inclusão automática no pacote.")
+        print(
+            "[AVISO] Binario REAL del motor fiscal no encontrado en instala/. "
+            "Coloca instala/ACBrMonitor.exe (extraído) antes del build; el payload "
+            "contendrá solo el instalador."
+        )
+
+    # 2) Instalador (solo para el task all-in-one de Inno Setup). Jamás se usa como motor.
+    acbr_instalador = instala_dir / "ACBrMonitorPLUS-DEMO-1.4.0.467-x86-I.exe"
+    if acbr_instalador.exists() and acbr_instalador.is_file():
+        _copy_if_exists(acbr_instalador, acbr_dir / "ACBrMonitor_Installer.exe")
+        print(f"- Instalador ACBr (solo Inno): {acbr_instalador.name} -> {acbr_dir / 'ACBrMonitor_Installer.exe'}")
+    else:
+        print("[AVISO] Instalador del ACBr no encontrado; el task 'instalaracbr' del Inno quedará sin payload.")
+
+    # Não copie o banco local do desenvolvedor: ele pode conter licença expirada,
+    # credenciais e dados de clientes. O aplicativo cria um banco novo e o trial
+    # na primeira execução do cliente.
+    print("- Banco local não incluído no payload; cliente iniciará com banco e trial novos.")
 
 
 def _find_iscc() -> Path | None:
@@ -611,7 +640,7 @@ def main() -> None:
     print("- Pasta assets -> assets")
     print("- Runtime hook de log -> FRS_Mercado_runtime_error.log em dist/")
     print("- Coleta completa (quando instalado): customtkinter, PIL, reportlab, googleapiclient, google_auth_oauthlib, google.auth, httplib2, requests, bcrypt")
-    print("- Payload suporte (_build_support): credentials.json, google-services.json, checklist_homologacao.md, data/mercado.db, acbr/ACBrMonitor_Installer.exe")
+    print("- Payload suporte (_build_support): credentials.json, google-services.json, checklist_homologacao.md, data/mercado.db, acbr/ACBrMonitor.exe (motor real) + acbr/ACBrMonitor_Installer.exe (solo Inno)")
     if (ROOT_DIR / "config").exists():
         print("- config/ -> config/")
 

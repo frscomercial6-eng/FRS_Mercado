@@ -10,6 +10,7 @@ import threading
 from database_manager import obter_caminho_dados
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
 from modulo_config import carregar_configuracoes
+from modulo_fiscal import normalizar_data_iso
 
 
 def exportar_produtos_para_xls_arquivo(caminho_arquivo: str):
@@ -112,7 +113,8 @@ def exportar_produtos_para_xls_arquivo(caminho_arquivo: str):
         from openpyxl import Workbook
     except ImportError as exc:
         raise RuntimeError(
-            "Para exportar em .xlsx é necessário openpyxl. Use .csv ou instale: python -m pip install openpyxl"
+            "O exportador Excel não está disponível nesta instalação. "
+            "Use CSV ou atualize o aplicativo para a versão mais recente."
         ) from exc
 
     wb = Workbook()
@@ -153,6 +155,8 @@ class ModuloEstoque(ctk.CTkToplevel):
             return
 
         self.current_editing_id = None
+        self.produto_selecionado = None
+        self.row_selecionada = None
         self.temp_image_path = ""
         self.page_size = 50
         self.current_offset = 0
@@ -185,6 +189,17 @@ class ModuloEstoque(ctk.CTkToplevel):
             command=self.alternar_campo_importar_nfe,
         )
         self.btn_importar_nfe.pack(side="left", padx=6)
+
+        self.btn_anexar_nfe_direto = ctk.CTkButton(
+            self.frame_top,
+            text="ANEXAR XML",
+            width=130,
+            height=34,
+            fg_color="#2563eb",
+            hover_color="#1d4ed8",
+            command=self.anexar_nfe_xml,
+        )
+        self.btn_anexar_nfe_direto.pack(side="left", padx=6)
 
         self.frame_importar_nfe = ctk.CTkFrame(self.frame_top, fg_color="transparent")
         ctk.CTkLabel(
@@ -288,14 +303,36 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.btn_upload.pack(side="left", padx=5)
 
         # Barra de Ações do Cadastro
-        self.actions_frame = ctk.CTkFrame(self.frame_cadastro, fg_color="transparent")
-        self.actions_frame.pack(side="right", padx=10)
+        self.actions_frame = ctk.CTkFrame(self.frame_cadastro, width=170, fg_color="#20252b", corner_radius=8)
+        self.actions_frame.pack(side="right", padx=10, pady=10, fill="y")
+        self.actions_frame.pack_propagate(False)
+        ctk.CTkLabel(
+            self.actions_frame,
+            text="AÇÕES DO CADASTRO",
+            font=("Arial", 11, "bold"),
+            text_color="#DCE4EE",
+        ).pack(pady=(10, 6))
 
-        self.btn_save = ctk.CTkButton(self.actions_frame, text="Salvar Novo", fg_color="#27ae60", command=self.salvar_produto)
-        self.btn_save.pack(pady=5, fill="x")
+        self.btn_save = ctk.CTkButton(
+            self.actions_frame,
+            text="SALVAR CADASTRO",
+            height=42,
+            fg_color="#27ae60",
+            hover_color="#2ecc71",
+            command=self.salvar_produto,
+        )
+        self.btn_save.pack(padx=8, pady=5, fill="x")
 
-        self.btn_edit_sel = ctk.CTkButton(self.actions_frame, text="Atualizar", fg_color="#2980b9", command=self.salvar_produto)
-        self.btn_edit_sel.pack(pady=5, fill="x")
+        self.btn_edit_sel = ctk.CTkButton(
+            self.actions_frame,
+            text="EDITAR PRODUTO",
+            height=38,
+            fg_color="#2980b9",
+            hover_color="#2b8fd8",
+            command=self.editar_produto_selecionado,
+            state="disabled",
+        )
+        self.btn_edit_sel.pack(padx=8, pady=5, fill="x")
 
         self.lbl_badge_margem_manual = ctk.CTkLabel(
             self.actions_frame,
@@ -306,8 +343,19 @@ class ModuloEstoque(ctk.CTkToplevel):
             font=("Arial", 10, "bold"),
         )
 
-        self.btn_limpar = ctk.CTkButton(self.actions_frame, text="Limpar", fg_color="gray40", command=self.limpar_campos)
-        self.btn_limpar.pack(pady=5, fill="x")
+        self.btn_limpar = ctk.CTkButton(self.actions_frame, text="LIMPAR CAMPOS", height=34, fg_color="gray40", command=self.limpar_campos)
+        self.btn_limpar.pack(padx=8, pady=5, fill="x")
+
+        self.btn_excluir = ctk.CTkButton(
+            self.actions_frame,
+            text="EXCLUIR PRODUTO",
+            height=38,
+            fg_color="#c0392b",
+            hover_color="#e74c3c",
+            command=self.excluir_produto_selecionado,
+            state="disabled",
+        )
+        self.btn_excluir.pack(padx=8, pady=(5, 10), fill="x")
 
         # --- Alerta de Validade + Legenda de Código ---
         self.frame_info_topo = ctk.CTkFrame(self, fg_color="transparent")
@@ -366,16 +414,12 @@ class ModuloEstoque(ctk.CTkToplevel):
     def _atualizar_disponibilidade_importacao_nfe(self):
         cfg = carregar_configuracoes() or {}
         fiscal_ativo = bool(cfg.get("fiscal_ativo", False))
-        if fiscal_ativo:
-            self.btn_importar_nfe.configure(state="normal", fg_color="#14532d", hover_color="#166534")
-            return
-
-        self.btn_importar_nfe.configure(state="disabled", fg_color="#6b7280", hover_color="#6b7280")
-        self.frame_importar_nfe.pack_forget()
-        self.lbl_alerta.configure(
-            text="Busca de XML bloqueada: ative o ACBrMonitor nas Configurações para usar a importação NF-e.",
-            text_color="#ff6666",
-        )
+        self.btn_importar_nfe.configure(state="normal", fg_color="#14532d", hover_color="#166534")
+        if not fiscal_ativo:
+            self.lbl_alerta.configure(
+                text="Importação local de XML disponível. ACBr é necessário somente para emissão fiscal.",
+                text_color="#f1c40f",
+            )
 
     def exportar_produtos_xls(self):
         """Abre o diálogo de salvamento e exporta os produtos para XLS."""
@@ -406,19 +450,16 @@ class ModuloEstoque(ctk.CTkToplevel):
 
     def alternar_campo_importar_nfe(self):
         cfg = carregar_configuracoes() or {}
-        if not bool(cfg.get("fiscal_ativo", False)):
-            messagebox.showwarning(
-                "Integração Fiscal desativada",
-                "A busca de XML está bloqueada. Ative o ACBrMonitor nas Configurações para continuar.",
-            )
-            self._safe_focus(self.entry_barcode)
-            return
-
         if self.frame_importar_nfe.winfo_ismapped():
             self.frame_importar_nfe.pack_forget()
             self._safe_focus(self.entry_barcode)
             return
         self.frame_importar_nfe.pack(side="left", padx=6)
+        if not bool(cfg.get("fiscal_ativo", False)):
+            self.lbl_alerta.configure(
+                text="Importação local de XML disponível. ACBr é necessário somente para emissão fiscal.",
+                text_color="#f1c40f",
+            )
         self._safe_focus(self.entry_chave_nfe)
 
     def _listar_xml_nfe_candidatos(self):
@@ -493,9 +534,41 @@ class ModuloEstoque(ctk.CTkToplevel):
         threading.Thread(target=_worker, daemon=True).start()
         return "break"
 
-    def _aplicar_importacao_nfe(self, chave_nfe: str, dados_nfe: dict | None):
+    def anexar_nfe_xml(self):
+        caminho = filedialog.askopenfilename(
+            title="Selecionar XML da NF-e",
+            filetypes=[("Nota fiscal XML", "*.xml"), ("Todos os arquivos", "*.*")],
+        )
+        if not caminho:
+            return
+
+        self.lbl_alerta.configure(text="🔎 Lendo XML da NF-e selecionado...", text_color="cyan")
+
+        def _worker():
+            try:
+                from modulo_fiscal import FiscalManager
+
+                dados = FiscalManager().processar_xml_entrada(caminho)
+                chave = self._normalizar_chave_nfe(dados.get("chave_nfe", ""))
+                if not chave:
+                    chave = "XML_ANEXADO"
+            except Exception as exc:
+                dados = None
+                chave = "XML_ANEXADO"
+                erro = str(exc)
+            else:
+                erro = None
+
+            if self.winfo_exists():
+                self.after(0, lambda: self._aplicar_importacao_nfe(chave, dados, erro))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return "break"
+
+    def _aplicar_importacao_nfe(self, chave_nfe: str, dados_nfe: dict | None, erro: str | None = None):
         if not dados_nfe or not dados_nfe.get("itens"):
-            self.lbl_alerta.configure(text="NF-e não encontrada nos XMLs locais.", text_color="orange")
+            mensagem = f"Não foi possível ler o XML selecionado: {erro}" if erro else "NF-e sem itens válidos."
+            self.lbl_alerta.configure(text=mensagem, text_color="orange")
             return
 
         itens = list(dados_nfe.get("itens") or [])
@@ -508,13 +581,16 @@ class ModuloEstoque(ctk.CTkToplevel):
                 descricao = str(item.get("descricao") or "").strip() or "Produto sem descrição"
                 ncm = str(item.get("ncm") or "").strip()
                 preco = float(item.get("preco") or 0.0)
-
+                quantidade_nfe = float(item.get("quantidade") or 0.0)
+                validade_nfe = normalizar_data_iso(item.get("validade"))
+                lotes_nfe = list(item.get("lotes") or [])
                 codigo = ean if ean else self._gerar_codigo_interno_sequencial()
 
                 cursor.execute("SELECT id FROM produtos WHERE codigo_barras = ? LIMIT 1", (codigo,))
                 existente = cursor.fetchone()
 
                 if existente:
+                    produto_id = existente[0]
                     cursor.execute(
                         """
                         UPDATE produtos
@@ -523,10 +599,12 @@ class ModuloEstoque(ctk.CTkToplevel):
                             ncm = ?,
                             preco_custo = ?,
                             preco_venda = ?,
-                            margem_lucro = COALESCE(margem_lucro, 0.0)
+                            margem_lucro = COALESCE(margem_lucro, 0.0),
+                            validade = CASE WHEN ? <> '' THEN ? ELSE validade END,
+                            quantidade_atual = quantidade_atual + ?
                         WHERE id = ?
                         """,
-                        (descricao, ncm, preco, preco, existente[0]),
+                        (descricao, ncm, preco, preco, validade_nfe, validade_nfe, int(quantidade_nfe), produto_id),
                     )
                 else:
                     cursor.execute(
@@ -537,9 +615,47 @@ class ModuloEstoque(ctk.CTkToplevel):
                         )
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (codigo, descricao, "NF-e", ncm, preco, 0.0, preco, 0, 0, "", ""),
+                        (codigo, descricao, "NF-e", ncm, preco, 0.0, preco, int(quantidade_nfe), 0, validade_nfe, ""),
                     )
+                    produto_id = cursor.lastrowid
                     cadastrados += 1
+
+                # Entrada de mercadoria vinculada ao produto recebido.
+                if quantidade_nfe > 0:
+                    cursor.execute(
+                        "INSERT INTO entradas (produto_id, quantidade) VALUES (?, ?)",
+                        (produto_id, int(quantidade_nfe)),
+                    )
+
+                # Lotes do grupo <rastro> (nLote/qLote/dFab/dVal); sem rastro, usa a dVal do item.
+                lotes_para_gravar = lotes_nfe
+                if not lotes_para_gravar and (validade_nfe or quantidade_nfe):
+                    lotes_para_gravar = [
+                        {
+                            "numero_lote": "",
+                            "quantidade": quantidade_nfe,
+                            "data_fabricacao": "",
+                            "data_validade": validade_nfe,
+                        }
+                    ]
+
+                for lote in lotes_para_gravar:
+                    cursor.execute(
+                        """
+                        INSERT INTO produto_lotes
+                            (produto_id, codigo_barras, numero_lote, quantidade, data_fabricacao, data_validade, chave_nfe, origem)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'NF-e')
+                        """,
+                        (
+                            produto_id,
+                            codigo,
+                            str(lote.get("numero_lote") or ""),
+                            float(lote.get("quantidade") or quantidade_nfe or 0.0),
+                            normalizar_data_iso(lote.get("data_fabricacao")),
+                            normalizar_data_iso(lote.get("data_validade")),
+                            chave_nfe,
+                        ),
+                    )
 
         if itens:
             primeiro = itens[0]
@@ -549,6 +665,8 @@ class ModuloEstoque(ctk.CTkToplevel):
             self.ent_nome.insert(0, str(primeiro.get("descricao") or "").strip())
             self.ent_ncm.delete(0, "end")
             self.ent_ncm.insert(0, str(primeiro.get("ncm") or "").strip())
+            self.ent_val.delete(0, "end")
+            self.ent_val.insert(0, normalizar_data_iso(primeiro.get("validade")))
             preco_primeiro = float(primeiro.get("preco") or 0.0)
             self._preencher_precificacao(
                 custo=f"{preco_primeiro:.2f}".replace(".", ","),
@@ -556,6 +674,8 @@ class ModuloEstoque(ctk.CTkToplevel):
                 preco=f"{preco_primeiro:.2f}".replace(".", ","),
                 margem_manual=False,
             )
+            self.current_editing_id = None
+            self.produto_selecionado = None
             self.btn_save.configure(state="normal")
             self.btn_edit_sel.configure(state="disabled")
 
@@ -892,12 +1012,47 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.ent_qtd_min.delete(0, 'end')
         self.ent_qtd_min.insert(0, str(prod[9] if prod[9] is not None else 0))
         
-        self.btn_save.configure(state="disabled")
-        self.btn_edit_sel.configure(state="normal")
+        self.produto_selecionado = prod
+        self.btn_save.configure(state="normal")
+        self.btn_edit_sel.configure(state="disabled")
+        self.btn_excluir.configure(state="normal")
         self.lbl_preview_img.configure(text="Produto\nCarregado")
+
+    def editar_produto_selecionado(self):
+        """Carrega os dados do produto selecionado na listagem para alteração e salvamento."""
+        if not self.produto_selecionado:
+            messagebox.showwarning(
+                "Nenhum produto selecionado",
+                "Selecione um produto na listagem para editar.\n"
+                "Clique em uma linha da tabela de produtos.",
+            )
+            return
+        self.preencher_campos_cadastro(self.produto_selecionado)
+
+    def _selecionar_linha(self, prod, row_frame):
+        """Marca visualmente a linha selecionada na listagem de produtos."""
+        # Desmarca a linha anteriormente selecionada
+        if self.row_selecionada:
+            try:
+                self.row_selecionada.configure(fg_color="transparent")
+            except Exception:
+                pass
+        # Marca a nova linha selecionada
+        self.produto_selecionado = prod
+        self.row_selecionada = row_frame
+        try:
+            row_frame.configure(fg_color="#3a5a7a")
+        except Exception:
+            pass
+        # Habilita o botão de editar
+        self.btn_edit_sel.configure(state="normal")
+        # Habilita o botão de excluir para o produto selecionado
+        self.btn_excluir.configure(state="normal")
 
     def limpar_campos(self):
         self.current_editing_id = None
+        self.produto_selecionado = None
+        self.row_selecionada = None
         self.temp_image_path = ""
         self.entry_barcode.delete(0, 'end')
         self.ent_nome.delete(0, 'end')
@@ -909,11 +1064,21 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.ent_qtd_min.delete(0, 'end')
         self.lbl_preview_img.configure(text="Sem Imagem")
         self.btn_save.configure(state="normal")
+        self.btn_edit_sel.configure(state="disabled")
+        self.btn_excluir.configure(state="disabled")
 
     def carregar_produtos(self):
         """Carrega uma página de produtos e renderiza na interface."""
         for widget in self.scroll_estoque.winfo_children():
             widget.destroy()
+
+        self.row_selecionada = None
+        self.produto_selecionado = None
+        try:
+            self.btn_edit_sel.configure(state="disabled")
+            self.btn_excluir.configure(state="disabled")
+        except Exception:
+            pass
 
         try:
             produtos, self.total_produtos = self._consultar_produtos_paginados()
@@ -934,6 +1099,7 @@ class ModuloEstoque(ctk.CTkToplevel):
 
                 row_frame = ctk.CTkFrame(self.scroll_estoque, fg_color="transparent")
                 row_frame.pack(fill="x", pady=2)
+                row_frame.bind("<Button-1>", lambda e, p=prod, rf=row_frame: self._selecionar_linha(p, rf))
 
                 tipo_codigo, cor_badge = self._classificar_tipo_codigo(prod[1])
 
@@ -1007,6 +1173,7 @@ class ModuloEstoque(ctk.CTkToplevel):
         else:
             # Produto novo: abre cadastro imediatamente e segue com consulta inteligente em background.
             self.current_editing_id = None
+            self.produto_selecionado = None
             self.ent_nome.delete(0, "end")
             self.ent_variacao.delete(0, "end")
             self.ent_ncm.delete(0, "end")
@@ -1100,7 +1267,10 @@ class ModuloEstoque(ctk.CTkToplevel):
             ncm = self.ent_ncm.get().strip()
             qtd = self._parse_numero(self.ent_qtd.get(), "Estoque", permitir_vazio=False, inteiro=True)
             qtd_min = self._parse_numero(self.ent_qtd_min.get(), "Quantidade mínima", permitir_vazio=True, default=0, inteiro=True)
-            validade = self.ent_val.get().strip()
+            # Normaliza para AAAA-MM-DD quando a data for interpretável; preserva o
+            # texto digitado apenas se não corresponder a nenhum formato conhecido.
+            validade_digitada = self.ent_val.get().strip()
+            validade = normalizar_data_iso(validade_digitada) or validade_digitada
 
             self.ent_preco_venda.delete(0, 'end')
             self.ent_preco_venda.insert(0, f"{preco_venda:.2f}")
@@ -1138,21 +1308,50 @@ class ModuloEstoque(ctk.CTkToplevel):
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao salvar: {e}")
 
-    def deletar_produto(self, id_produto):
-        """Remove o produto com confirmação."""
-        if messagebox.askyesno("Confirmação", "Tem certeza que deseja excluir este produto?\nEsta ação não pode ser desfeita."):
-            try:
-                with get_db_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM produtos WHERE id = ?", (id_produto,))
-                self.recarregar_primeira_pagina()
-                registrar_log(None, "Exclusão de Produto", "Sucesso", f"Produto ID {id_produto} excluído.")
-            except sqlite3.IntegrityError:
-                messagebox.showerror("Erro", "Não é possível deletar: produto possui histórico de vendas/entradas.")
-                registrar_log(None, "Exclusão de Produto", "Falha", f"Produto ID {id_produto} não pode ser excluído devido a FK.")
-            except Exception as e:
-                messagebox.showerror("Erro", f"Erro ao deletar: {e}")
-                registrar_log(None, "Exclusão de Produto", "Falha", f"Erro inesperado ao excluir produto ID {id_produto}: {e}")
+    def excluir_produto_selecionado(self):
+        """Exclui o produto selecionado (listagem ou formulário) com confirmação prévia."""
+        prod = self.produto_selecionado
+        id_produto = prod[0] if prod else self.current_editing_id
+        if not id_produto:
+            messagebox.showwarning(
+                "Nenhum produto selecionado",
+                "Selecione um produto na listagem para excluir.\n"
+                "Clique em uma linha da tabela de produtos.",
+                parent=self,
+            )
+            return
+
+        nome = str(prod[2]) if prod else ""
+        if not messagebox.askyesno(
+            "Confirmação",
+            f"Excluir o produto '{nome}' (ID {id_produto})?\nEsta ação não pode ser desfeita.",
+            parent=self,
+        ):
+            return
+
+        self.deletar_produto(id_produto, confirmar=False)
+        self.limpar_campos()
+
+    def deletar_produto(self, id_produto, confirmar=True):
+        """Remove o produto do banco local (com confirmação prévia por padrão)."""
+        if confirmar and not messagebox.askyesno(
+            "Confirmação",
+            "Tem certeza que deseja excluir este produto?\nEsta ação não pode ser desfeita.",
+            parent=self,
+        ):
+            return
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM produtos WHERE id = ?", (id_produto,))
+            self.recarregar_primeira_pagina()
+            registrar_log(None, "Exclusão de Produto", "Sucesso", f"Produto ID {id_produto} excluído.")
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Erro", "Não é possível deletar: produto possui histórico de vendas/entradas.", parent=self)
+            registrar_log(None, "Exclusão de Produto", "Falha", f"Produto ID {id_produto} não pode ser excluído devido a FK.")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao deletar: {e}", parent=self)
+            registrar_log(None, "Exclusão de Produto", "Falha", f"Erro inesperado ao excluir produto ID {id_produto}: {e}")
 
 if __name__ == "__main__":
     # Script de teste

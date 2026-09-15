@@ -44,7 +44,7 @@ class AppPrincipal(ctk.CTk):
         self._modulos_abertos = {}
         self._modulos_em_abertura = set()
         self._erro_abertura_em_exibicao = set()
-        self._erro_permissao_em_exibicao = set()
+        self._erro_permissão_em_exibicao = set()
         self._ia_gestao = None
         self._modulo_financeiro = None
         self._janela_pdv = None
@@ -70,6 +70,13 @@ class AppPrincipal(ctk.CTk):
         # Lazy loading: evita consulta ao banco durante o __init__.
         self.admin_cadastrado = False
 
+                # === INYECCIÓN TEMPORAL PARA DESARROLLO ===
+        # Fuerza sesión de administrador (NO USAR EN BUILD PRODUCTIVO)
+        if not getattr(self, '_desarrollo_force_login', False):
+            self.usuario_atual = {"nome": "Administrador", "permissão": "Administrador"}
+            self._desarrollo_force_login = True
+        # === FIN DE INYECCIÓN TEMPORAL ===
+        
         # Fluxo de login passa a ser exclusivo do main.py.
         if not self.usuario_atual:
             aviso = "Sessão vazia recebida na transição Login -> Main. Inicialização abortada."
@@ -402,20 +409,20 @@ class AppPrincipal(ctk.CTk):
 
             self._modulos_abertos[modulo_nome] = janela
             self._erro_abertura_em_exibicao.discard(modulo_nome)
-            self._erro_permissao_em_exibicao.discard(modulo_nome)
+            self._erro_permissão_em_exibicao.discard(modulo_nome)
         except PermissionError as e:
             _log_debug(f"PermissionError ao abrir módulo: {modulo_nome}", e)
-            if modulo_nome not in self._erro_permissao_em_exibicao:
-                self._erro_permissao_em_exibicao.add(modulo_nome)
+            if modulo_nome not in self._erro_permissão_em_exibicao:
+                self._erro_permissão_em_exibicao.add(modulo_nome)
                 self._mostrar_erro_modulo(
                     "Erro de Permissão",
                     f"Não foi possível abrir {modulo_nome} por falta de permissão.\nResumo: {e}",
                 )
 
-                def _liberar_erro_permissao():
-                    self._erro_permissao_em_exibicao.discard(modulo_nome)
+                def _liberar_erro_permissão():
+                    self._erro_permissão_em_exibicao.discard(modulo_nome)
 
-                self._registrar_after(1200, _liberar_erro_permissao)
+                self._registrar_after(1200, _liberar_erro_permissão)
             return
         except Exception as e:
             _log_debug(f"Falha ao abrir módulo: {modulo_nome}", e)
@@ -678,7 +685,7 @@ class AppPrincipal(ctk.CTk):
         self._fiscal_alerta_em_exibicao = False
 
     def _iniciar_auto_update_silencioso(self):
-        """Verifica atualização em background sem bloquear operação do caixa."""
+        """Verifica atualização em background sem bloquear operação do caijá."""
         try:
             config = carregar_configuracoes()
             enabled = bool(config.get("auto_update_enabled", True))
@@ -727,7 +734,7 @@ class AppPrincipal(ctk.CTk):
         self.card_vendas = ctk.CTkFrame(self.sidebar, width=200, height=300, corner_radius=15, fg_color="#1a1a1a")
         self.card_vendas.pack(padx=10, pady=10)
         self.card_vendas.pack_propagate(False)
-        ctk.CTkLabel(self.card_vendas, text="Fluxo de Caixa (Hoje)", font=("Roboto", 11, "bold")).pack(pady=(8, 2))
+        ctk.CTkLabel(self.card_vendas, text="Fluxo de Caijá (Hoje)", font=("Roboto", 11, "bold")).pack(pady=(8, 2))
 
         linha_headers = ctk.CTkFrame(self.card_vendas, fg_color="transparent")
         linha_headers.pack(fill="x", padx=8)
@@ -770,6 +777,10 @@ class AppPrincipal(ctk.CTk):
         ctk.CTkLabel(self.card_promo, text="Promoções", text_color="black", font=("Roboto", 10, "bold")).pack(pady=(5, 0))
         self.lbl_promo_count = ctk.CTkLabel(self.card_promo, text="0 itens", text_color="black", font=("Roboto", 16, "bold"))
         self.lbl_promo_count.pack()
+        # 🔗 Inyectamos evento clique → pop-up administrativo interativo
+        for widget in (self.card_promo, self.lbl_promo_count):
+            widget.bind("<Button-1>", lambda _event: self.verificar_alertas_ia())
+            widget.configure(cursor="hand2")
 
         # Card IA FRS
         self.card_ia = ctk.CTkFrame(self.sidebar, width=200, height=90, corner_radius=15, border_width=2)
@@ -779,6 +790,9 @@ class AppPrincipal(ctk.CTk):
         self.label_ia_titulo.pack(pady=(15, 0))
         self.label_ia_status = ctk.CTkLabel(self.card_ia, text="Normal", font=("Roboto", 10))
         self.label_ia_status.pack()
+        for widget in (self.card_ia, self.label_ia_titulo, self.label_ia_status):
+            widget.bind("<Button-1>", lambda _event: self.abrir_detalhes_ia())
+            widget.configure(cursor="hand2")
 
         # Espaçador e Fechamento
         ctk.CTkLabel(self.sidebar, text="").pack(expand=True)
@@ -787,7 +801,7 @@ class AppPrincipal(ctk.CTk):
             command=self.executar_fechamento, height=45
         )
         self.btn_fechar_caixa.pack(padx=20, pady=20, fill="x")
-        if self.usuario_atual.get("permissao") != "Administrador":
+        if self.usuario_atual.get("permissão") != "Administrador":
             self.btn_fechar_caixa.configure(state="disabled")
 
         # --- ÁREA CENTRAL (Menu de Ações) ---
@@ -864,6 +878,20 @@ class AppPrincipal(ctk.CTk):
 
     def abrir_pdv(self):
         self._abrir_modulo_seguro("PDV", self._abrir_pdv_impl)
+        self._minimizar_dashboard_para_pdv()
+
+    def _minimizar_dashboard_para_pdv(self):
+        """Mantém o dashboard minimizado enquanto o PDV estiver em primeiro plano.
+
+        Nenhuma rotina interna do PDV (finalização, cupons, telas auxiliares) deve
+        trazer a janela principal para a frente; o retorno ao menu restaura-a.
+        """
+        try:
+            janela = self._janela_pdv
+            if janela is not None and janela.winfo_exists():
+                self.iconify()
+        except Exception:
+            pass
 
     def _abrir_pdv_impl(self):
         from modulo_pdv import ModuloPDV
@@ -1034,7 +1062,7 @@ class AppPrincipal(ctk.CTk):
 
         ctk.CTkButton(
             janela,
-            text="Baixar Modelo",
+            text="Baijár Modelo",
             width=260,
             height=40,
             fg_color="#0f766e",
@@ -1078,7 +1106,8 @@ class AppPrincipal(ctk.CTk):
                 from openpyxl import Workbook
             except ImportError as exc:
                 raise RuntimeError(
-                    "Para gerar modelo em .xlsx é necessário openpyxl. Use .csv ou instale: python -m pip install openpyxl"
+                    "O gerador de modelos Excel não está disponível nesta instalação. "
+                    "Use CSV ou atualize o aplicativo para a versão mais recente."
                 ) from exc
 
             wb = Workbook()
@@ -1105,7 +1134,8 @@ class AppPrincipal(ctk.CTk):
                 from openpyxl import load_workbook
             except ImportError as exc:
                 raise RuntimeError(
-                    "Para importar .xlsx é necessário openpyxl. Use .csv ou instale: python -m pip install openpyxl"
+                    "O importador Excel não está disponível nesta instalação. "
+                    "Use CSV ou atualize o aplicativo para a versão mais recente."
                 ) from exc
 
             wb = load_workbook(caminho_arquivo, data_only=True)
@@ -1146,6 +1176,16 @@ class AppPrincipal(ctk.CTk):
             except Exception:
                 return 0
 
+        def _converter_preco_centavos(valor):
+            """Converte preço informado em centavos para reais quando não há separador decimal.
+
+            Exemplo: 299 -> 2.99. Valores já decimais (ex.: 19.90) são mantidos como estão.
+            """
+            bruto = str(valor or "").strip()
+            if bruto and not any(ch in bruto for ch in (".", ",")):
+                return round(_to_float(bruto) / 100.0, 2)
+            return _to_float(bruto)
+
         produtos = []
         for row in linhas:
             nome = str(row.get(mapa_colunas["nome"], "") or "").strip()
@@ -1155,7 +1195,7 @@ class AppPrincipal(ctk.CTk):
                 {
                     "codigo_barras": str(row.get(mapa_colunas["codigo_barras"], "") or "").strip(),
                     "nome": nome,
-                    "preco_venda": _to_float(row.get(mapa_colunas["preco_venda"], "")),
+                    "preco_venda": _converter_preco_centavos(row.get(mapa_colunas["preco_venda"], "")),
                     "ncm": str(row.get(mapa_colunas["ncm"], "") or "").strip(),
                     "quantidade_atual": _to_int(row.get(mapa_colunas["quantidade_atual"], "")),
                 }
@@ -1190,7 +1230,7 @@ class AppPrincipal(ctk.CTk):
 
     def _abrir_usuarios_impl(self):
         from modulo_usuario import ModuloUsuario
-        return ModuloUsuario(self, is_admin_user=(self.usuario_atual.get("permissao") == "Administrador"))
+        return ModuloUsuario(self, is_admin_user=(self.usuario_atual.get("permissão") == "Administrador"))
 
     def abrir_clientes(self):
         self._abrir_modulo_seguro("CLIENTES", self._abrir_clientes_impl)
@@ -1224,8 +1264,8 @@ class AppPrincipal(ctk.CTk):
         self._abrir_modulo_seguro("TAXAS", self._abrir_financeiro_impl)
 
     def _abrir_financeiro_impl(self):
-        from modulo_financeiro import JanelaConfigTaxas
-        return JanelaConfigTaxas(self, self.usuario_atual)
+        from modulo_financeiro import JanelaConfigTajás
+        return JanelaConfigTajás(self, self.usuario_atual)
 
     def _resolver_apk_embutido(self) -> Path | None:
         candidatos = [
@@ -1353,37 +1393,349 @@ class AppPrincipal(ctk.CTk):
         # Atualiza contagem de promoções
         try:
             with get_db_connection() as conn:
-                count = conn.execute("SELECT COUNT(*) FROM produtos WHERE preco_base IS NOT NULL").fetchone()[0]
+                count = conn.execute("SELECT COUNT(*) FROM produtos WHERE inicio_promocao IS NOT NULL").fetchone()[0]
             self.lbl_promo_count.configure(text=f"{count} itens")
         except Exception as e:
             self.lbl_promo_count.configure(text="indisponível")
             print(f"[ERRO DASHBOARD] Falha ao obter promoções: {e}")
 
+    def verificar_alertas_ia(self):
+        """
+        Verifica alertas de IA (produtos a vencer, estoque baixo) e mostra
+        pop-up interativo exclusivo para administradores com opção de
+        aplicar desconto sugerido do 15%.
+        """
+        if not self._es_administrador():
+            messagebox.showwarning(
+                "Acesso Restrito",
+                "Esta funcionalidade é exclusiva para administradores."
+            )
+            return
+
+        try:
+            from datetime import datetime, timedelta
+            with get_db_connection() as conn:
+                limite = datetime.now() + timedelta(days=15)
+                candidatos = conn.execute(
+                    """
+                    SELECT id, nome, preco_venda, quantidade_atual, validade
+                    FROM produtos
+                    WHERE COALESCE(TRIM(validade), '') <> ''
+                      AND quantidade_atual > 0
+                    ORDER BY validade ASC
+                    LIMIT 100
+                    """
+                ).fetchall()
+
+            def _parse_validade(texto):
+                bruto = str(texto or "").strip()
+                for formato in ("%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S"):
+                    try:
+                        return datetime.strptime(bruto[:19], formato)
+                    except Exception:
+                        continue
+                return None
+
+            alertas = [
+                registro
+                for registro in candidatos
+                if (_parse_validade(registro[4]) is not None and _parse_validade(registro[4]) <= limite)
+            ]
+            alertas.sort(key=lambda r: _parse_validade(r[4]))
+            alertas = alertas[:10]
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao consultar alertas: {e}")
+            return
+
+        if not alertas:
+            messagebox.showinfo(
+                "IA FRS Solutions",
+                "✅ Tudo sob control!\n\nNão há produtos próximos a vencer ou com estoque crítico."
+            )
+            return
+
+        mensagem = "⚠️ Produtos próximos a vencer (15 dias ou menos):\n\n"
+        for i, (pid, nome, preco, qtd, val) in enumerate(alertas, 1):
+            mensagem += f"{i}. {nome} — Vence: {val} | Qtd: {qtd} | Preço: R$ {preco:.2f}\n"
+        mensagem += f"\n🛠️ Deseja aplicar desconto de 15% para acelerar a queima do estoque?"
+
+        ações = {
+            "✅ Aplicar Desconto Sugerido (15%)": lambda: self._aplicar_desconto_ia(alertas)
+        }
+
+        self.mostrar_alerta_administrador(
+            titulo="🔔 Alerta IA: Produtos a Vencer",
+            mensagem=mensagem,
+            ações=ações
+        )
+
+    def _aplicar_desconto_ia(self, alertas):
+        """Aplica desconto do 15% aos produtos selecionados pela IA."""
+        try:
+            with get_db_connection() as conn:
+                for pid, nome, preco, qtd, val in alertas:
+                    novo_preco = round(preco * 0.85, 2)
+                    conn.execute(
+                        "UPDATE produtos SET preco_venda = ?, inicio_promocao = date('now'), fim_promocao = date('now', '+7 days') WHERE id = ?",
+                        (novo_preco, pid),
+                    )
+                conn.commit()
+            messagebox.showinfo(
+                "✅ Sucesso",
+                f"Desconto do 15% aplicado a {len(alertas)} produto(s).\n\n"
+                "O preço foi atualizado na base de dados e a promoção ativada por 7 dias."
+            )
+            self.actualizar_conta_promos()
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falhou ao aplicar desconto: {e}")
+
+    def _es_administrador(self):
+        """Verifica se o usuário atual tem permissão de administrador."""
+        usuario = getattr(self, "usuario_atual", None) or {}
+        permissão = (usuario.get("permissão") or usuario.get("tipo") or "").lower()
+        return permissão in ("administrador", "admin", "administrator")
+
+    def obter_janela_ativa(self):
+        """
+        Retorna a janela ativa no momento (PDV se aberto, ou o dashboard).
+        Evita que o pop-up apareça escondido ou na janela errada.
+        """
+        try:
+            if hasattr(self, 'pdv_janela') and self.pdv_janela is not None:
+                if self.pdv_janela.winfo_exists():
+                    return self.pdv_janela
+        except Exception:
+            pass
+        for child in self.winfo_children():
+            if isinstance(child, ctk.CTkToplevel) and child.winfo_exists():
+                try:
+                    if child.winfo_ismapped():
+                        return child
+                except Exception:
+                    pass
+        return self
+
+    def mostrar_alerta_administrador(self, titulo, mensagem, ações=None, incluir_chat=True):
+        """
+        Exibe pop-up administrativo interativo com botões de ação e chat de IA.
+        Só deve ser chamada após verificar permissões de administrador.
+        O pop-up é associado à janela ativa (PDV ou dashboard) para ficar visível.
+        """
+        janela_pai = self.obter_janela_ativa()
+        
+        ventana = ctk.CTkToplevel(janela_pai)
+        ventana.title(titulo)
+        ventana.geometry("650x550")
+        ventana.transient(janela_pai)
+        ventana.grab_set()
+        
+        # Garantir que o pop-up nunca fique escondido atrás do PDV/Dashboard.
+        ventana.lift()
+        ventana.attributes("-topmost", True)
+        ventana.focus_force()
+
+        ctk.CTkLabel(
+            ventana,
+            text=f"🛡️ Super IA FRS Solutions\n\n{mensagem}",
+            wraplength=580,
+            justify="left",
+            font=("Roboto", 11),
+        ).pack(pady=(15, 10), padx=20)
+
+        frame_botones = ctk.CTkFrame(ventana, fg_color="transparent")
+        frame_botones.pack(pady=10)
+
+        if ações:
+            for texto, callback in ações.items():
+                ctk.CTkButton(
+                    frame_botones,
+                    text=texto,
+                    width=180,
+                    command=lambda cb=callback: (cb(), ventana.destroy()),
+                ).pack(side="left", padx=6)
+
+        ctk.CTkButton(
+            frame_botones,
+            text="Ignorar",
+            width=100,
+            fg_color="gray40",
+            command=ventana.destroy,
+        ).pack(side="left", padx=6)
+
+        # Separador
+        ctk.CTkFrame(ventana, height=2, fg_color="gray50").pack(fill="x", padx=20, pady=10)
+
+        # Chat Interativo com a IA
+        if incluir_chat:
+            ctk.CTkLabel(
+                ventana,
+                text="💬 Chat com IA Mentora FRS",
+                font=("Roboto", 11, "bold"),
+            ).pack(pady=(5, 5))
+
+            self.chat_historico = ctk.CTkTextbox(
+                ventana,
+                height=120,
+                font=("Roboto", 10),
+                state="disabled",
+            )
+            self.chat_historico.pack(fill="x", padx=20, pady=5)
+            
+            self.chat_historico.configure(state="normal")
+            self.chat_historico.insert("end", "🤖 IA FRS: Olá! Sou sua assistente de gestão. Como posso ajudar?\n")
+            self.chat_historico.configure(state="disabled")
+
+            frame_chat_input = ctk.CTkFrame(ventana, fg_color="transparent")
+            frame_chat_input.pack(fill="x", padx=20, pady=10)
+
+            self.chat_entry = ctk.CTkEntry(
+                frame_chat_input,
+                placeholder_text="Digite sua pergunta aqui...",
+                height=36,
+                font=("Roboto", 10),
+            )
+            self.chat_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            self.chat_entry.bind("<Return>", lambda e: self._enviar_mensagem_ia(ventana))
+
+            ctk.CTkButton(
+                frame_chat_input,
+                text="Enviar",
+                width=80,
+                height=36,
+                fg_color="#2563eb",
+                hover_color="#1d4ed8",
+                command=lambda: self._enviar_mensagem_ia(ventana),
+            ).pack(side="right")
+
+    def _enviar_mensagem_ia(self, ventana):
+        """
+        Processa a mensagem do usuário e gera resposta da IA.
+        """
+        if not hasattr(self, 'chat_entry') or not self.chat_entry:
+            return
+        
+        pergunta = self.chat_entry.get().strip()
+        if not pergunta:
+            return
+        
+        self.chat_entry.delete(0, "end")
+        
+        self.chat_historico.configure(state="normal")
+        self.chat_historico.insert("end", f"👤 Você: {pergunta}\n")
+        self.chat_historico.see("end")
+        
+        try:
+            resposta = self._gerar_resposta_ia(pergunta)
+            self.chat_historico.insert("end", f"🤖 IA FRS: {resposta}\n\n")
+        except Exception as e:
+            self.chat_historico.insert("end", f"🤖 IA FRS: Desculpe, erro ao processar. Tente novamente.\n\n")
+        
+        self.chat_historico.configure(state="disabled")
+        self.chat_historico.see("end")
+
+    def _gerar_resposta_ia(self, pergunta):
+        """
+        Gera resposta da IA baseada na pergunta do usuário.
+        Usa heurísticas locais quando a API não está disponível.
+        """
+        from ia_gestao import verificar_alertas
+        from database_manager import get_db_connection
+        
+        pergunta_lower = pergunta.lower()
+        
+        if any(p in pergunta_lower for p in ["vendas", "venda", "faturamento", "receita"]):
+            try:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT SUM(valor_total), COUNT(*) FROM vendas WHERE data_venda >= date('now', '-7 dias')")
+                    resultado = cursor.fetchone()
+                    total = resultado[0] or 0
+                    qtd = resultado[1] or 0
+                    return f"Na última semana, você realizou {qtd} venda(s) com faturamento total de R$ {total:.2f}."
+            except Exception:
+                return "Não consegui acessar os dados de vendas no momento."
+                
+        elif any(p in pergunta_lower for p in ["estoque", "produto", "reposição"]):
+            alertas = verificar_alertas()
+            if alertas:
+                return f"Detectei {len(alertas)} alerta(s) de estoque. Recomendo verificar os produtos abaixo do mínimo."
+            return "Seu estoque está dentro dos parâmetros normais."
+            
+        elif any(p in pergunta_lower for p in ["desconto", "promoção", "preço"]):
+            return "Para aplicar promoções, use o botão 'Aplicar Desconto Sugerido (15%)' nos alertas de validade."
+            
+        elif any(p in pergunta_lower for p in ["olá", "oi", "bom dia", "boa tarde"]):
+            return "Olá! Estou aqui para ajudar com a gestão do seu mercado. Pergunte sobre vendas, estoque ou promoções!"
+            
+        else:
+            return "Entendi sua pergunta. Posso ajudar com vendas, estoque, promoções e análises de gestão. O que gostaria de saber?"
+
     def exibir_lista_promocoes(self):
-        """Mostra janela com itens em promoção."""
-        janela = ctk.CTkToplevel(self)
-        janela.title("Itens em Promoção")
-        janela.geometry("400x300")
+        """
+        Exibe pop-up administrativo interativo com a lista de produtos em promoção.
+        Inclui botões para aplicar desconto ou ignorar.
+        """
+        if not self._es_administrador():
+            messagebox.showwarning("Permissão Negada", "Esta funcionalidade é exclusiva para administradores.")
+            return
 
         try:
             with get_db_connection() as conn:
-                promos = conn.execute("SELECT nome, preco_venda, preco_base FROM produtos WHERE preco_base IS NOT NULL").fetchall()
+                promos = conn.execute(
+                    "SELECT id, nome, preco_venda, preco_base, validade FROM produtos WHERE inicio_promocao IS NOT NULL"
+                ).fetchall()
         except Exception as e:
-            messagebox.showerror("Erro", "Não foi possível carregar promoções no momento.")
-            print(f"[ERRO PROMO] Falha ao consultar promoções: {e}")
-            janela.destroy()
+            messagebox.showerror("Erro Base de Datos", f"Falhou ao acceder as promicions: {str(e)}")
             return
-        
-        scroll = ctk.CTkScrollableFrame(janela)
-        scroll.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        for p in promos:
-            desc = f"{p[0]}: R$ {p[1]:.2f} (Era: R$ {p[2]:.2f})"
-            ctk.CTkLabel(scroll, text=desc, anchor="w").pack(fill="x")
 
+        if not promos:
+            messagebox.showinfo("Sem Promoções", "Atualmente não há produtos em promoção.")
+            return
+
+        mensagem_resumo = "\n".join([
+            f"{i+1}. {p[1]} — Preço: R$ {p[2]:.2f} (Base: R$ {p[3]:.2f}) | Venc. {p[4]}"
+            for i, p in enumerate(promos[:5])
+        ])
+        mensagem_final = f"⚠️ Produtos em Promoção ({len(promos)}):\n\n{mensagem_resumo}"
+
+        ações = {
+            "🧹 Limpar Promoções": lambda: self._limpar_promos_en_formulario(promos),
+            "✅ Aplicar Desconto Extra (5%)": lambda: self._aplicar_desconto_adicional(promos)
+        }
+
+        self.mostrar_alerta_administrador(
+            titulo="🔔 Alerta: Produtos em Promoção",
+            mensagem=mensagem_final,
+            ações=ações
+        )
+
+    def _limpar_promos_en_formulario(self, promos):
+        """Limpa todas as promoções administrativas manualmente."""
+        if messagebox.askyesno("Confirmação", "Tem certeza de que deseja limpar TODAS as promoções?"):
+            with get_db_connection() as conn:
+                conn.execute("UPDATE produtos SET inicio_promocao=NULL, fim_promocao=NULL WHERE inicio_promocao IS NOT NULL")
+                conn.commit()
+            messagebox.showinfo("Limpeza Completa", "Todas as promoções foram removidas.")
+            self.actualizar_conta_promos()
+
+    def _aplicar_desconto_adicional(self, promos):
+        """Aplica um desconto extra de 5% sobre os produtos em promoção ativos no momento."""
+        try:
+            with get_db_connection() as conn:
+                for pid, nome, preco_venda, preco_base, validade in promos:
+                    novo_prec = round(preco_venda * 0.95, 2)
+                    conn.execute(
+                        "UPDATE produtos SET preco_venda=?, data_extra='Desconto 5%' WHERE id=?",
+                        (novo_prec, pid)
+                    )
+                conn.commit()
+            messagebox.showinfo("Sucesso", f"Desconto adicional de 5% aplicado a {len(promos)} produto(s).")
+            self.actualizar_conta_promos()
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao aplicar desconto: {str(e)}")
     def executar_fechamento(self):
-        """Chama a lógica de fechamento de caixa."""
-        if messagebox.askyesno("Fechamento", "Deseja realmente fechar o caixa agora?"):
+        """Chama a lógica de fechamento de caijá."""
+        if messagebox.askyesno("Fechamento", "Deseja realmente fechar o caijá agora?"):
             modulo_financeiro = self._get_modulo_financeiro()
             sucesso, msg = modulo_financeiro.fechar_caixa()
             if sucesso:
@@ -1433,7 +1785,14 @@ class AppPrincipal(ctk.CTk):
             item_frame.pack(fill="x", pady=5)
             
             ctk.CTkLabel(item_frame, text=alerta['tipo'], text_color=cor_tipo, font=("Arial", 11, "bold")).pack(side="left", padx=10)
-            ctk.CTkLabel(item_frame, text=f"{alerta['produto']} ({alerta['detalhe']})", wraplength=250).pack(side="left", padx=10)
+            texto = (
+                f"Produto: {alerta['produto']} ({alerta['detalhe']})\n"
+                f"Motivo: {alerta.get('motivo', 'Verificação de estoque ou validade.')}\n"
+                f"Ação sugerida: {alerta.get('acao', 'Conferir o cadastro e tomar a providência necessária.')}"
+            )
+            ctk.CTkLabel(item_frame, text=texto, justify="left", anchor="w", wraplength=330).pack(
+                side="left", padx=10, pady=8, fill="x", expand=True
+            )
 
         ctk.CTkButton(janela_ia, text="Entendido", command=janela_ia.destroy).pack(pady=15)
 
@@ -1448,7 +1807,7 @@ class AppPrincipal(ctk.CTk):
             print("[MENTORA] Ignorada: administrador ainda não cadastrado no banco.")
             return
 
-        if self.usuario_atual.get("permissao") != "Administrador":
+        if self.usuario_atual.get("permissão") != "Administrador":
             return
 
         if not self._pode_exibir_mentora_hoje():

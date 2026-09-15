@@ -217,6 +217,10 @@ def _ensure_aux_schema(conn):
             cursor.execute("ALTER TABLE vendas ADD COLUMN valor_ibs REAL NOT NULL DEFAULT 0.0")
         if "valor_cbs" not in colunas_vendas:
             cursor.execute("ALTER TABLE vendas ADD COLUMN valor_cbs REAL NOT NULL DEFAULT 0.0")
+        if "valor_informado" not in colunas_vendas:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_informado REAL NOT NULL DEFAULT 0.0")
+        if "diferenca" not in colunas_vendas:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN diferenca REAL NOT NULL DEFAULT 0.0")
 
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendas_dia'")
     if cursor.fetchone():
@@ -381,6 +385,46 @@ def _ensure_aux_schema(conn):
         VALUES ('*', 0.0, 0.0, 0.0, 0.0, 0.0, 'Aliquotas fiscais padrao/fallback', 1)
         """
     )
+
+    # Conferência analítica do fechamento de caixa (uma linha por modalidade).
+    # Criada aqui (e não só em init_db) para existir também em bases legadas.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS caixa_conferencia (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            caixa_operacao_id INTEGER NOT NULL,
+            modalidade TEXT NOT NULL,
+            valor_calculado NUMERIC NOT NULL DEFAULT 0.0,
+            valor_sistema NUMERIC NOT NULL DEFAULT 0.0,
+            valor_informado NUMERIC NOT NULL DEFAULT 0.0,
+            diferenca NUMERIC NOT NULL DEFAULT 0.0,
+            data_registro DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    # Lotes de produtos (rastro da NF-e: nLote/qLote/dFab/dVal por item).
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS produto_lotes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            produto_id INTEGER,
+            codigo_barras TEXT,
+            numero_lote TEXT,
+            quantidade NUMERIC NOT NULL DEFAULT 0.0,
+            data_fabricacao TEXT,
+            data_validade TEXT,
+            chave_nfe TEXT,
+            origem TEXT DEFAULT 'NF-e',
+            data_registro DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    # Garante a modalidade VOUCHER na tabela de taxas em bases já existentes.
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='config_taxas'")
+    if cursor.fetchone():
+        cursor.execute("INSERT OR IGNORE INTO config_taxas (tipo, percentual) VALUES ('VOUCHER', 0.0)")
 
     _AUX_SCHEMA_MIGRATED = True
 

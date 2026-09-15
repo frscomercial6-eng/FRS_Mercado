@@ -326,7 +326,7 @@ class ModuloLogin(ctk.CTkToplevel):
         self.ent_codigo.pack(pady=10)
 
         def validar_ativacao():
-            entered_code = self.ent_codigo.get().strip()
+            entered_code = self.ent_codigo.get().strip().upper()
 
             # 1. Obter o identificador do cliente (Razão Social)
             try:
@@ -349,17 +349,29 @@ class ModuloLogin(ctk.CTkToplevel):
             data_to_hash = f"{client_identifier}-{expected_expiration_date}-{self.SECRET_SALT}"
             expected_hash = hashlib.sha256(data_to_hash.encode()).hexdigest()
 
-            partes_codigo = entered_code.split('-')
-            if len(partes_codigo) < 4:
+            if entered_code.startswith("LICENCA_FRS:"):
+                entered_code = entered_code[len("LICENCA_FRS:"):]
+
+            partes_codigo = entered_code.split("-")
+            if len(partes_codigo) != 4:
                 messagebox.showerror("Erro", "Código de ativação em formato inválido.")
                 registrar_log(None, "Ativação de Licença", "Falha", f"Formato inválido para {client_identifier}.")
                 return
 
-            hash_parte = partes_codigo[3]
+            data_chave = "-".join(partes_codigo[:3])
+            if data_chave != expected_expiration_date:
+                messagebox.showerror("Erro", "Código de ativação expirado ou gerado para outra data.")
+                registrar_log(None, "Ativação de Licença", "Falha", f"Data divergente para {client_identifier}.")
+                return
+
+            hash_parte = partes_codigo[3].lower()
             if expected_hash[:16] == hash_parte[:16]:
                 try:
                     with get_db_connection() as conn:
                         conn.execute("UPDATE licenca SET data_expiracao = ?", (expected_expiration_date,))
+                    config["license_mode"] = "licensed"
+                    config["license_expiration_date"] = expected_expiration_date
+                    salvar_configuracoes(config, exibir_alerta=False)
                 except Exception as e:
                     messagebox.showerror("Erro", "Licença válida, porém não foi possível gravar no banco.")
                     print(f"[ERRO LICENCA] Falha ao atualizar licença: {e}")

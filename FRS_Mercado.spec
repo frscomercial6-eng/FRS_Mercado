@@ -27,14 +27,14 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['F:/PROGRAMA/FRS_MERCADO/main.py'],
+    ['H:/PROGRAMA_FRS_MERCADO/FRS_MERCADO/main.py'],
     pathex=['C:/Users/User/AppData/Local/Programs/Python/Python311/DLLs', 'C:/Users/User/AppData/Local/Programs/Python/Python311/Lib', 'C:/Users/User/AppData/Local/Programs/Python/Python311/Lib/site-packages'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['F:/PROGRAMA/FRS_MERCADO/_runtime_hook_error_logger.py'],
+    runtime_hooks=['H:/PROGRAMA_FRS_MERCADO/FRS_MERCADO/_runtime_hook_error_logger.py'],
     excludes=[],
     noarchive=False,
     optimize=0,
@@ -57,7 +57,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    version='F:/PROGRAMA/FRS_MERCADO/_build_support/version_info.txt',
+    version='H:/PROGRAMA_FRS_MERCADO/FRS_MERCADO/_build_support/version_info.txt',
     icon=['assets/logo.ico'],
 )
 coll = COLLECT(

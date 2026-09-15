@@ -118,7 +118,8 @@ def exportar_produtos_xls(output_path: str = DEFAULT_OUTPUT_PATH, db_path: str =
             from openpyxl import Workbook
         except ImportError as exc:
             raise RuntimeError(
-                "Para exportar em .xlsx é necessário openpyxl. Use .csv ou instale: python -m pip install openpyxl"
+                "O exportador Excel não está disponível nesta instalação. "
+                "Use CSV ou atualize o aplicativo para a versão mais recente."
             ) from exc
 
         wb = Workbook()

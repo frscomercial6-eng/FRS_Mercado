@@ -362,9 +362,58 @@ def obter_total_vendas_dia():
     resumo = obter_resumo_fluxo_caixa_dia()
     return resumo["valor_bruto"]
 
+def obter_vendas_dia_por_forma():
+    """Retorna o total vendido hoje agrupado por forma de pagamento.
+
+    Fonte primária: tabela `vendas`; fallback: `vendas_dia` (PDV ágil).
+    Modalidades fora do conjunto padrão são somadas em 'OUTROS'.
+    """
+    MODALIDADES = ("DINHEIRO", "DEBITO", "CREDITO", "VOUCHER", "PIX")
+    resultado = {m: 0.0 for m in MODALIDADES}
+    resultado["OUTROS"] = 0.0
+
+    def _normalizar(tipo, valor):
+        chave = str(tipo or "").strip().upper()
+        total = float(valor or 0.0)
+        if chave in resultado:
+            resultado[chave] += total
+        else:
+            resultado["OUTROS"] += total
+
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT UPPER(COALESCE(forma_pagamento, '')), COALESCE(SUM(valor_total), 0.0)
+                FROM vendas
+                WHERE date(data_venda) = date('now', 'localtime')
+                GROUP BY UPPER(COALESCE(forma_pagamento, ''))
+                """
+            )
+            linhas = cursor.fetchall()
+
+            if not linhas:
+                cursor.execute(
+                    """
+                    SELECT UPPER(COALESCE(forma_pagamento, '')), COALESCE(SUM(valor_total), 0.0)
+                    FROM vendas_dia
+                    WHERE date(data_venda) = date('now', 'localtime')
+                    GROUP BY UPPER(COALESCE(forma_pagamento, ''))
+                    """
+                )
+                linhas = cursor.fetchall()
+
+            for tipo, total in linhas:
+                _normalizar(tipo, total)
+    except Exception as e:
+        registrar_log(None, "Resumo Vendas por Forma", "Falha", f"Erro: {e}")
+
+    return resultado
+
 def obter_taxas():
     """Retorna dicionário com as taxas configuradas."""
-    taxas = {"DEBITO": 0.0, "CREDITO": 0.0}
+    taxas = {"DEBITO": 0.0, "CREDITO": 0.0, "VOUCHER": 0.0}
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -379,7 +428,7 @@ class JanelaConfigTaxas(ctk.CTkToplevel):
     def __init__(self, master, usuario_atual):
         super().__init__(master)
         self.title("Configuração de Taxas de Cartão")
-        self.geometry("400x300")
+        self.geometry("400x360")
         self.grab_set()
         
         if usuario_atual.get("permissao") != "Administrador":
@@ -407,57 +456,148 @@ class JanelaConfigTaxas(ctk.CTkToplevel):
         self.ent_credito.grid(row=1, column=1, padx=10, pady=10)
         aplicar_padrao_entrada_numerica(self.ent_credito, inteiro=False, casas_decimais=2)
 
+        ctk.CTkLabel(self.frame_campos, text="Taxa Voucher (%):").grid(row=2, column=0, padx=10, pady=10)
+        self.ent_voucher = ctk.CTkEntry(self.frame_campos)
+        self.ent_voucher.insert(0, formatar_percentual_inteiro(taxas.get("VOUCHER", 0.0)))
+        self.ent_voucher.grid(row=2, column=1, padx=10, pady=10)
+        aplicar_padrao_entrada_numerica(self.ent_voucher, inteiro=False, casas_decimais=2)
+
         def salvar():
             try:
                 deb = parse_numero(self.ent_debito.get(), "Taxa Débito", minimo=0)
                 cre = parse_numero(self.ent_credito.get(), "Taxa Crédito", minimo=0)
+                vou = parse_numero(self.ent_voucher.get(), "Taxa Voucher", minimo=0)
                 
                 with get_db_connection() as conn:
                     conn.execute("UPDATE config_taxas SET percentual = ? WHERE tipo = 'DEBITO'", (deb,))
                     conn.execute("UPDATE config_taxas SET percentual = ? WHERE tipo = 'CREDITO'", (cre,))
+                    conn.execute("INSERT OR IGNORE INTO config_taxas (tipo, percentual) VALUES ('VOUCHER', 0.0)")
+                    conn.execute("UPDATE config_taxas SET percentual = ? WHERE tipo = 'VOUCHER'", (vou,))
                 
                 messagebox.showinfo("Sucesso", "Taxas atualizadas globalmente.")
-                registrar_log(usuario_atual.get("id"), "Config Taxas", "Sucesso", f"Débito: {deb}%, Crédito: {cre}%")
+                registrar_log(usuario_atual.get("id"), "Config Taxas", "Sucesso", f"Débito: {deb}%, Crédito: {cre}%, Voucher: {vou}%")
                 self.destroy()
             except ValueError:
                 messagebox.showerror("Erro", "Insira valores numéricos válidos (ex: 2,99)")
 
         ctk.CTkButton(self, text="SALVAR CONFIGURAÇÃO", fg_color="green", command=salvar).pack(pady=20)
 
+def obter_divergencias_ultima_conferencia():
+    """Retorna as divergências (informado - sistema) da última conferência de caixa.
+
+    Lê a tabela `caixa_conferencia` e devolve (caixa_operacao_id, lista de
+    dicionários por modalidade). Retorna (None, []) quando a tabela ainda não
+    existe em bases antigas ou não há conferência registrada.
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            linha = cursor.execute(
+                "SELECT caixa_operacao_id FROM caixa_conferencia ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if not linha:
+                return None, []
+            caixa_id = linha[0]
+            linhas = cursor.execute(
+                """
+                SELECT modalidade, valor_sistema, valor_informado, diferenca
+                FROM caixa_conferencia
+                WHERE caixa_operacao_id = ?
+                ORDER BY id
+                """,
+                (caixa_id,),
+            ).fetchall()
+        divergencias = [
+            {
+                "modalidade": str(modalidade or "").upper(),
+                "valor_sistema": float(valor_sistema or 0.0),
+                "valor_informado": float(valor_informado or 0.0),
+                "diferenca": float(diferenca or 0.0),
+            }
+            for modalidade, valor_sistema, valor_informado, diferenca in linhas
+        ]
+        return caixa_id, divergencias
+    except Exception as e:
+        registrar_log(None, "Fechamento de Caixa (Divergências)", "Aviso", f"Conferência indisponível: {e}")
+        return None, []
+
+
 def fechar_caixa():
-    """Consolida vendas_dia no financeiro e limpa a tabela temporária."""
+    """Consolida vendas_dia no financeiro, reflete as divergências por modalidade
+    apuradas em `caixa_conferencia` e limpa a tabela temporária.
+
+    Cada modalidade é tratada individualmente: sobras entram como 'Entrada' e
+    faltas como 'Saída', jamais com compensação cruzada entre modalidades.
+    """
     resumo = obter_resumo_fluxo_caixa_dia()
     total_bruto = resumo["valor_bruto"]
     total_impostos = resumo["valor_impostos"]
     total_liquido = resumo["valor_liquido"]
     
-    if total_bruto <= 0:
+    caixa_id, divergencias = obter_divergencias_ultima_conferencia()
+    divergencias_relevantes = [d for d in divergencias if abs(d["diferenca"]) >= 0.005]
+    total_divergencias = round(sum(d["diferenca"] for d in divergencias_relevantes), 2)
+
+    if total_bruto <= 0 and not divergencias_relevantes:
         return False, "Não há vendas registradas para fechamento."
 
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             
-            # 1. Inserir no financeiro
             data_atual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            cursor.execute('''
-                INSERT INTO financeiro (data_registro, valor, tipo, valor_bruto, valor_impostos_retidos, descricao)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (
-                data_atual,
-                total_liquido,
-                'Entrada',
-                total_bruto,
-                total_impostos,
-                f"Fechamento de Caixa - {data_atual[:10]} | Bruto: {total_bruto:.2f} | Impostos: {total_impostos:.2f} | Liquido: {total_liquido:.2f}",
-            ))
+
+            # 1. Inserir a consolidação das vendas do dia no financeiro
+            if total_bruto > 0:
+                cursor.execute('''
+                    INSERT INTO financeiro (data_registro, valor, tipo, valor_bruto, valor_impostos_retidos, descricao)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    data_atual,
+                    total_liquido,
+                    'Entrada',
+                    total_bruto,
+                    total_impostos,
+                    f"Fechamento de Caixa - {data_atual[:10]} | Bruto: {total_bruto:.2f} | Impostos: {total_impostos:.2f} | Liquido: {total_liquido:.2f}",
+                ))
             
-            # 2. Arquivar/Limpar vendas_dia 
+            # 2. Refletir as divergências da conferência analítica (sobra/falta por modalidade)
+            for div in divergencias_relevantes:
+                modalidade = div["modalidade"]
+                diferenca = round(div["diferenca"], 2)
+                tipo_movimento = 'Entrada' if diferenca > 0 else 'Saída'
+                rotulo = 'Sobra' if diferenca > 0 else 'Falta'
+                cursor.execute('''
+                    INSERT INTO financeiro (data_registro, valor, tipo, valor_bruto, valor_impostos_retidos, descricao)
+                    VALUES (?, ?, ?, ?, 0.0, ?)
+                ''', (
+                    data_atual,
+                    abs(diferenca),
+                    tipo_movimento,
+                    abs(diferenca),
+                    f"Fechamento de Caixa {data_atual[:10]} #{caixa_id} - {rotulo} {modalidade} "
+                    f"(Sistema: {div['valor_sistema']:.2f} | Informado: {div['valor_informado']:.2f})",
+                ))
+
+            # 3. Arquivar/Limpar vendas_dia
             cursor.execute("DELETE FROM vendas_dia")
             
+        if divergencias_relevantes:
+            detalhe = "; ".join(f"{d['modalidade']} {d['diferenca']:+.2f}" for d in divergencias_relevantes)
+            registrar_log(
+                None,
+                "Fechamento de Caixa (Consolidação)",
+                "Sucesso",
+                f"Caixa {caixa_id} | Bruto: {total_bruto:.2f} | Liquido: {total_liquido:.2f} | "
+                f"Ajuste por divergência: {total_divergencias:+.2f} | {detalhe}",
+            )
+            sufixo_divergencias = f" | Divergências: {detalhe} | Ajuste: R$ {total_divergencias:+.2f}"
+        else:
+            sufixo_divergencias = ""
+
         return True, (
             f"Caixa fechado com sucesso! Bruto: R$ {total_bruto:.2f} | "
-            f"Impostos: R$ {total_impostos:.2f} | Liquido: R$ {total_liquido:.2f}"
+            f"Impostos: R$ {total_impostos:.2f} | Liquido: R$ {total_liquido:.2f}{sufixo_divergencias}"
         )
     except Exception as e:
         # get_db_connection já faz o rollback

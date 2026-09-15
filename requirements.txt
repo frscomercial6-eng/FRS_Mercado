@@ -6,3 +6,4 @@ google-auth-httplib2
 bcrypt
 firebase-admin
 flet
+openpyxl

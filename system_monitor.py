@@ -8,6 +8,17 @@ from modulo_config import carregar_configuracoes
 from license_manager import LicenseManager
 
 
+def _es_nome_instalador_acbr(nome: str) -> bool:
+    """True se o nome corresponde a um instalador (-I/DEMO/installer),
+    nunca ao binario real do motor fiscal."""
+    nome_low = str(nome or "").lower()
+    return (
+        "installer" in nome_low
+        or "demo" in nome_low
+        or nome_low.endswith("-i.exe")
+    )
+
+
 class SystemMonitor:
     def __init__(self, on_status=None, interval_seconds=6):
         self.on_status = on_status
@@ -139,7 +150,12 @@ class SystemMonitor:
                 pasta_instala / "ACBrMonitor.exe",
             ]
         )
-        candidatos.extend(list(pasta_instala.glob("*ACBrMonitor*.exe")))
+        # Excluye instaladores (-I/DEMO): nunca deben lanzarse como motor fiscal.
+        candidatos.extend(
+            arq
+            for arq in pasta_instala.glob("*ACBrMonitor*.exe")
+            if not _es_nome_instalador_acbr(arq.name)
+        )
 
         for exe in candidatos:
             try:

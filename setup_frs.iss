@@ -28,7 +28,7 @@ Name: "portuguesebrazilian"; MessagesFile: "compiler:Languages\BrazilianPortugue
 
 [Tasks]
 Name: "desktopicon"; Description: "Criar atalhos na area de trabalho"; GroupDescription: "Atalhos:"; Flags: unchecked
-Name: "instalaracbr"; Description: "Instalar ACBrMonitor (motor fiscal)"; GroupDescription: "Componentes adicionais:"; Flags: checkedonce
+Name: "instalaracbr"; Description: "Instalar e configurar ACBrMonitor (motor fiscal)"; GroupDescription: "Componentes adicionais:"; Flags: checkedonce
 
 [Files]
 Source: "dist\FRS_Mercado\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -40,6 +40,7 @@ Source: "_build_support\credentials.json"; DestDir: "{app}"; Flags: ignoreversio
 Source: "_build_support\google-services.json"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "_build_support\checklist_homologacao.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "_build_support\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "_build_support\acbr\ACBrMonitor.exe"; DestDir: "{app}\instala"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "_build_support\acbr\ACBrMonitor_Installer.exe"; DestDir: "{app}\instala"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Dirs]
@@ -57,6 +58,43 @@ Filename: "{app}\instala\ACBrMonitor_Installer.exe"; Parameters: "/VERYSILENT /N
 Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent skipifdoesntexist
 
 [Code]
+procedure CriarConfiguracaoInicial;
+var
+	DataDir, FiscalIn, FiscalOut, ExportDir, ConfigFile, Json: string;
+begin
+	DataDir := ExpandConstant('{userappdata}\FRS_Mercado\data');
+	FiscalIn := DataDir + '\fiscal_in';
+	FiscalOut := DataDir + '\fiscal_out';
+	ExportDir := DataDir + '\exportacao_fiscal';
+	ConfigFile := DataDir + '\config.json';
+
+	ForceDirectories(FiscalIn);
+	ForceDirectories(FiscalOut);
+	ForceDirectories(ExportDir);
+
+	if not FileExists(ConfigFile) then
+	begin
+		Json :=
+			'{' + #13#10 +
+			'  "razao_social": "",' + #13#10 +
+			'  "nome_estabelecimento": "",' + #13#10 +
+			'  "fiscal_ativo": false,' + #13#10 +
+			'  "auto_update_enabled": true,' + #13#10 +
+			'  "pasta_entrada_fiscal": "' + FiscalIn + '",' + #13#10 +
+			'  "pasta_retorno_fiscal": "' + FiscalOut + '",' + #13#10 +
+			'  "pasta_exportacao_fiscal": "' + ExportDir + '"' + #13#10 +
+			'}';
+		StringChangeEx(Json, '\', '\\', True);
+		SaveStringToFile(ConfigFile, Json, False);
+	end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+	if CurStep = ssPostInstall then
+		CriarConfiguracaoInicial;
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
 	Resp: Integer;

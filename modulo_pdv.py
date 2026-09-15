@@ -58,6 +58,9 @@ class ModuloPDV(ctk.CTkToplevel):
         self.forma_pagamento_selecionada = "DINHEIRO"
         self.clientes_orcamento_map = {}
         self._cache_xml_por_ean = {}
+        self._cache_imagens_produtos = {}
+        self._grid_pending_refresh = False
+        self._grid_rows_cache = {}
 
         if master is not None and not getattr(master, "usuario_atual", None):
             self.destroy()
@@ -67,6 +70,8 @@ class ModuloPDV(ctk.CTkToplevel):
         self.bind("<F2>", lambda e: self.selecionar_forma_pagamento("PIX"))
         self.bind("<F3>", lambda e: self.selecionar_forma_pagamento("DEBITO"))
         self.bind("<F4>", lambda e: self.selecionar_forma_pagamento("CREDITO"))
+        self.bind("<F5>", lambda e: self.selecionar_forma_pagamento("VOUCHER"))
+        self.bind("<F9>", lambda e: self.finalizar_venda_com_confirmacoes())
         self.bind("<F12>", lambda e: self.finalizar_venda_com_confirmacoes())
 
         try:
@@ -287,7 +292,43 @@ class ModuloPDV(ctk.CTkToplevel):
 
         self.top_bar = ctk.CTkFrame(self.main_pdv, height=50, fg_color="#1a1a1a", corner_radius=0)
         self.top_bar.pack(side="top", fill="x")
-        ctk.CTkLabel(self.top_bar, text="CAIXA LIVRE", font=("Roboto", 16, "bold"), text_color="#2ecc71").pack(side="left", padx=20)
+        self.btn_menu_retratil = ctk.CTkButton(
+            self.top_bar,
+            text="≡",
+            width=48,
+            height=34,
+            font=("Roboto", 22, "bold"),
+            fg_color="#333333",
+            hover_color="#444444",
+            command=self._alternar_menu_operacoes,
+        )
+        self.btn_menu_retratil.pack(side="left", padx=(12, 4), pady=8)
+        ctk.CTkLabel(self.top_bar, text="CAIXA LIVRE", font=("Roboto", 16, "bold"), text_color="#2ecc71").pack(side="left", padx=6)
+
+        # Menu retrátil de operações secundárias (abre/fecha pelo ícone "≡").
+        self.menu_operacoes = ctk.CTkFrame(self.main_pdv, fg_color="#181818", corner_radius=0, height=0)
+        self.menu_operacoes.pack(side="top", fill="x")
+        self.menu_operacoes.pack_propagate(False)
+        self._menu_operacoes_aberto = False
+
+        self.menu_operacoes_miolo = ctk.CTkFrame(self.menu_operacoes, fg_color="transparent")
+
+        linha_superior = ctk.CTkFrame(self.menu_operacoes_miolo, fg_color="transparent")
+        linha_superior.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(linha_superior, text="OPERAÇÕES", font=("Roboto", 12, "bold"), text_color="gray").pack(side="left", padx=(0, 12))
+        ctk.CTkButton(linha_superior, text="SANGRIA", fg_color="#c0392b", width=130, command=self.modal_sangria).pack(side="left", padx=6)
+        ctk.CTkButton(linha_superior, text="SUPRIMENTO", fg_color="#2980b9", width=150, command=self.modal_suprimento).pack(side="left", padx=6)
+        ctk.CTkButton(linha_superior, text="CANCELAR ITEM", fg_color="#d35400", width=150, command=self.cancelar_item).pack(side="left", padx=6)
+        ctk.CTkButton(linha_superior, text="FECHAR CAIXA", fg_color="#8e44ad", width=150, command=self.processar_fechamento_inteligente).pack(side="left", padx=6)
+
+        linha_orcamento = ctk.CTkFrame(self.menu_operacoes_miolo, fg_color="transparent")
+        linha_orcamento.pack(fill="x", pady=(4, 0))
+        ctk.CTkLabel(linha_orcamento, text="CLIENTE (ORÇAMENTO)", font=("Roboto", 11, "bold"), text_color="gray").pack(side="left", padx=(0, 10))
+        self.combo_cliente_orcamento = ctk.CTkOptionMenu(linha_orcamento, values=["Sem clientes cadastrados"], width=210)
+        self.combo_cliente_orcamento.pack(side="left", padx=6)
+        ctk.CTkButton(linha_orcamento, text="SALVAR ORÇAMENTO", fg_color="#1565c0", width=160, command=self.salvar_orcamento_atual).pack(side="left", padx=6)
+        ctk.CTkButton(linha_orcamento, text="ABRIR ORÇAMENTOS", fg_color="#5d4037", width=160, command=self.abrir_tela_orcamentos).pack(side="left", padx=6)
+        self._carregar_clientes_orcamento()
 
         self.centro_container = ctk.CTkFrame(self.main_pdv, fg_color="black")
         self.centro_container.pack(fill="both", expand=True, padx=10, pady=10)
@@ -303,6 +344,8 @@ class ModuloPDV(ctk.CTkToplevel):
         self.ent_quantidade.bind("<Return>", lambda _e: self._safe_focus(self.ent_cod_barras))
         self.ent_quantidade.bind("<Tab>", self._focar_produto_pelo_tab)
         aplicar_padrao_entrada_numerica(self.ent_quantidade, inteiro=True)
+        # Campo de quantidade inicia vazio; vazio assume 1 por padrão.
+        self.ent_quantidade.delete(0, "end")
 
         self.ent_cod_barras = ctk.CTkEntry(
             self.input_topo,
@@ -331,36 +374,7 @@ class ModuloPDV(ctk.CTkToplevel):
         self.scroll_operacoes = ctk.CTkScrollableFrame(self.painel_lateral, fg_color="#1a1a1a", corner_radius=0)
         self.scroll_operacoes.pack(fill="both", expand=True)
 
-        ctk.CTkLabel(self.scroll_operacoes, text="OPERACOES", font=("Roboto", 12, "bold"), text_color="gray").pack(pady=10)
-
-        ctk.CTkButton(self.scroll_operacoes, text="SANGRIA", fg_color="#c0392b", command=self.modal_sangria).pack(fill="x", padx=10, pady=5)
-        ctk.CTkButton(
-            self.scroll_operacoes,
-            text="SUPRIMENTO",
-            fg_color="#2980b9",
-            command=self.modal_suprimento,
-        ).pack(fill="x", padx=10, pady=5)
-        ctk.CTkButton(self.scroll_operacoes, text="CANCELAR ITEM", fg_color="#d35400", command=self.cancelar_item).pack(fill="x", padx=10, pady=5)
-
-        ctk.CTkLabel(self.scroll_operacoes, text="CLIENTE (ORCAMENTO)", font=("Roboto", 11, "bold"), text_color="gray").pack(pady=(10, 2))
-        self.combo_cliente_orcamento = ctk.CTkOptionMenu(self.scroll_operacoes, values=["Sem clientes cadastrados"], width=180)
-        self.combo_cliente_orcamento.pack(padx=10, pady=(0, 8))
-        self._carregar_clientes_orcamento()
-
-        ctk.CTkButton(
-            self.scroll_operacoes,
-            text="SALVAR ORÇAMENTO",
-            fg_color="#1565c0",
-            command=self.salvar_orcamento_atual,
-        ).pack(fill="x", padx=10, pady=4)
-        ctk.CTkButton(
-            self.scroll_operacoes,
-            text="ABRIR ORÇAMENTOS",
-            fg_color="#5d4037",
-            command=self.abrir_tela_orcamentos,
-        ).pack(fill="x", padx=10, pady=4)
-
-        ctk.CTkLabel(self.scroll_operacoes, text="VALOR PAGO", font=("Roboto", 11, "bold"), text_color="gray").pack(pady=(8, 2))
+        ctk.CTkLabel(self.scroll_operacoes, text="VALOR PAGO", font=("Roboto", 11, "bold"), text_color="gray").pack(pady=(10, 2))
         self.ent_valor_pago = ctk.CTkEntry(self.scroll_operacoes, width=180, placeholder_text="0,00")
         self.ent_valor_pago.pack(padx=10, pady=(0, 8))
         self.ent_valor_pago.bind("<KeyRelease>", lambda _e: self.atualizar_troco_display())
@@ -371,10 +385,11 @@ class ModuloPDV(ctk.CTkToplevel):
         ctk.CTkButton(self.scroll_operacoes, text="PIX (F2)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("PIX")).pack(fill="x", padx=10, pady=2)
         ctk.CTkButton(self.scroll_operacoes, text="CARTAO DEBITO (F3)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("DEBITO")).pack(fill="x", padx=10, pady=2)
         ctk.CTkButton(self.scroll_operacoes, text="CARTAO CREDITO (F4)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("CREDITO")).pack(fill="x", padx=10, pady=2)
+        ctk.CTkButton(self.scroll_operacoes, text="VOUCHER (F5)", fg_color="#16a085", command=lambda: self.selecionar_forma_pagamento("VOUCHER")).pack(fill="x", padx=10, pady=2)
 
         ctk.CTkButton(
             self.scroll_operacoes,
-            text="FINALIZAR VENDA",
+            text="FINALIZAR VENDA (F9)",
             fg_color="#27ae60",
             height=60,
             font=("Roboto", 14, "bold"),
@@ -423,6 +438,21 @@ class ModuloPDV(ctk.CTkToplevel):
 
         self._safe_focus(self.ent_quantidade)
         self._safe_after(300, self._processar_fila_delivery)
+
+    def _alternar_menu_operacoes(self):
+        """Abre/fecha o menu retrátil de operações secundárias (ícone ≡)."""
+        try:
+            if getattr(self, "_menu_operacoes_aberto", False):
+                self.menu_operacoes_miolo.pack_forget()
+                self.menu_operacoes.configure(height=0)
+                self._menu_operacoes_aberto = False
+            else:
+                self.menu_operacoes_miolo.pack(fill="x", padx=14, pady=8)
+                altura = self.menu_operacoes_miolo.winfo_reqheight() + 16
+                self.menu_operacoes.configure(height=altura)
+                self._menu_operacoes_aberto = True
+        except Exception:
+            pass
 
     def _focar_produto_pelo_tab(self, _event=None):
         self._safe_focus(self.ent_cod_barras)
@@ -774,26 +804,77 @@ class ModuloPDV(ctk.CTkToplevel):
         )
 
     def processar_entrada_produto(self, event=None):
-        entrada = self.ent_cod_barras.get().strip()
-        self.ent_cod_barras.delete(0, "end")
+        entrada_original = self.ent_cod_barras.get().strip()
+        entrada = entrada_original
+        # Só limpa o campo após processamento bem-sucedido para evitar "colocar e apagar".
+        processado_com_sucesso = False
+
         if not entrada:
-            return
+            # Recuperação: o leitor pode ter bipado com o foco no campo de quantidade.
+            # Resgata o código preso lá e processa como produto, sem abrir busca genérica.
+            qtd_resgatada = self.ent_quantidade.get().strip() if hasattr(self, "ent_quantidade") else ""
+            digitos_resgatados = "".join(ch for ch in qtd_resgatada if ch.isdigit())
+            if len(digitos_resgatados) >= 4:
+                self.ent_quantidade.delete(0, "end")
+                self.ent_cod_barras.delete(0, "end")
+                self.ent_cod_barras.insert(0, digitos_resgatados)
+                entrada_original = digitos_resgatados
+                entrada = digitos_resgatados
+                self._set_status("Código resgatado do campo de quantidade. Processando...", "#f1c40f")
+            else:
+                return
 
         qtd_digitada = 1
+        qtd_especificada = False
         qtd_texto = self.ent_quantidade.get().strip() if hasattr(self, "ent_quantidade") else ""
         if qtd_texto:
             try:
                 qtd_digitada = parse_numero(qtd_texto, "Quantidade", inteiro=True, minimo=1)
+                qtd_especificada = True
             except ValueError:
                 self._set_status("Quantidade inválida. Informe número inteiro.", "#ff6666")
+                # Em caso de erro, restaura o texto original no campo.
+                self.ent_cod_barras.delete(0, "end")
+                self.ent_cod_barras.insert(0, entrada_original)
                 return
+
+        # Suporte ao operador de multiplicação na leitura: "12*<bipagem>" (ex.: 12*7891234567).
+        if "*" in entrada:
+            parte_qtd, _, parte_produto = entrada.partition("*")
+            parte_qtd = parte_qtd.strip()
+            parte_produto = parte_produto.strip()
+            if parte_qtd:
+                try:
+                    qtd_digitada = parse_numero(parte_qtd, "Quantidade", inteiro=True, minimo=1)
+                    qtd_especificada = True
+                except ValueError:
+                    self._set_status("Quantidade inválida. Use ex.: 12*Código do produto.", "#ff6666")
+                    self.ent_cod_barras.delete(0, "end")
+                    self.ent_cod_barras.insert(0, entrada_original)
+                    return
+            if not parte_produto:
+                # "12*" sem o código na sequência: pré-define a quantidade para a próxima bipagem.
+                self.multiplicador_atual = qtd_digitada
+                self.ent_cod_barras.delete(0, "end")
+                self.ent_cod_barras.configure(placeholder_text=f"Qtd: {self.multiplicador_atual} x ...")
+                self._set_status(f"Quantidade definida: {self.multiplicador_atual}. Bipa o produto agora.", "#f1c40f")
+                self._safe_focus(self.ent_cod_barras)
+                processado_com_sucesso = True
+            else:
+                entrada = parte_produto
         elif entrada.isdigit() and len(entrada) <= 3:
             self.multiplicador_atual = int(entrada)
+            self.ent_cod_barras.delete(0, "end")
             self.ent_cod_barras.configure(placeholder_text=f"Qtd: {self.multiplicador_atual} x ...")
             self._set_status(f"Quantidade definida: {self.multiplicador_atual}", "#f1c40f")
+            processado_com_sucesso = True
+
+        # Limpa o campo apenas quando o processamento foi bem-sucedido.
+        if processado_com_sucesso:
             return
 
-        qtd_item = qtd_digitada if qtd_texto else self.multiplicador_atual
+        # Campo de quantidade vazio assume 1 por padrão quando nada foi definido explicitamente.
+        qtd_item = qtd_digitada if qtd_especificada else self.multiplicador_atual
 
         if entrada.isdigit():
             produto = self.buscar_produto_por_ean(entrada)
@@ -846,8 +927,11 @@ class ModuloPDV(ctk.CTkToplevel):
 
         self.multiplicador_atual = 1
         self.ent_cod_barras.configure(placeholder_text="Código ou Nome do Produto (Enter para adicionar)")
+        self.ent_cod_barras.delete(0, "end")
         self.ent_quantidade.delete(0, "end")
-        self._safe_focus(self.ent_quantidade)
+        # Devolve o foco ao campo principal para que a próxima bipagem não caia
+        # no campo de quantidade (causa de busca genérica indevida).
+        self._safe_focus(self.ent_cod_barras)
 
     def _abrir_modal_selecao_produtos(self, termo, produtos, qtd_item):
         modal = ctk.CTkToplevel(self)
@@ -912,7 +996,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 pass
             modal.destroy()
             self._adicionar_item_produto(produto, qtd_item)
-            self._safe_focus(self.ent_quantidade)
+            self._safe_focus(self.ent_cod_barras)
             return "break"
 
         def selecionar_produto_mouse(_event=None):
@@ -928,7 +1012,7 @@ class ModuloPDV(ctk.CTkToplevel):
             except Exception:
                 pass
             modal.destroy()
-            self._safe_focus(self.ent_quantidade)
+            self._safe_focus(self.ent_cod_barras)
 
         ctk.CTkLabel(
             modal,
@@ -948,12 +1032,93 @@ class ModuloPDV(ctk.CTkToplevel):
         arvore.focus_set()
 
     def _renderizar_carrinho(self):
-        for widget in self.scroll_vendas.winfo_children():
-            widget.destroy()
+        """Renderização otimizada com cache e batch update."""
+        # Debounce: agenda refresh único se múltiplas adições rápidas ocorrerem
+        if getattr(self, '_grid_pending_refresh', False):
+            return
+        
+        self._grid_pending_refresh = True
+        self._safe_after(50, self._executar_renderizacao_carrinho)
 
-        self.item_selecionado_idx = None
-        for idx, item in enumerate(self.itens_carrinho):
-            self._adicionar_linha_grid(item, idx)
+    def _executar_renderizacao_carrinho(self):
+        """Executa a renderização real com otimizações de performance."""
+        self._grid_pending_refresh = False
+        
+        try:
+            # Limpa grid existente
+            for widget in self.scroll_vendas.winfo_children():
+                widget.destroy()
+
+            self.item_selecionado_idx = None
+            
+            # Batch render: processa todos os itens de uma vez
+            for idx, item in enumerate(self.itens_carrinho):
+                self._adicionar_linha_grid_otimizado(item, idx)
+                
+        except Exception as e:
+            registrar_log(None, "PDV Grid", "Erro", f"Erro ao renderizar carrinho: {e}")
+
+    def _adicionar_linha_grid_otimizado(self, item, idx):
+        """Versão otimizada com cache de imagens e operações mínimas."""
+        row = ctk.CTkFrame(self.scroll_vendas, fg_color="transparent")
+        row.pack(fill="x", pady=2)
+
+        origem = str(item.get("origem", "BALCAO")).upper()
+        cor_base = "#143350" if origem == "DELIVERY" else "transparent"
+        row.configure(fg_color=cor_base)
+        row._cor_base = cor_base
+
+        # Cache de seleção para evitar recriar funções
+        def selecionar(_event=None, r=row, cor=cor_base):
+            self.item_selecionado_idx = idx
+            for filho in self.scroll_vendas.winfo_children():
+                try:
+                    cor_filho = getattr(filho, "_cor_base", "transparent")
+                    filho.configure(fg_color=cor_filho)
+                except Exception:
+                    pass
+            r.configure(fg_color="#2a2a2a")
+            self._set_status(f"Item selecionado: {item['nome']}", "#f1c40f")
+
+        # Busca imagem do cache
+        barcode = item.get("barcode", "default")
+        cache_key = f"{barcode}_{id(item)}"
+        
+        if cache_key in getattr(self, '_cache_imagens_produtos', {}):
+            ctk_img = self._cache_imagens_produtos[cache_key]
+        else:
+            caminho_img = self.buscar_imagem_produto(barcode)
+            try:
+                img_pil = Image.open(caminho_img) if caminho_img else None
+                ctk_img = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(28, 28)) if img_pil else None
+            except Exception:
+                ctk_img = None
+            
+            if not hasattr(self, '_cache_imagens_produtos'):
+                self._cache_imagens_produtos = {}
+            self._cache_imagens_produtos[cache_key] = ctk_img
+
+        # Cria labels
+        lbl_id = ctk.CTkLabel(row, text=str(item["id"]), width=130)
+        lbl_nome = ctk.CTkLabel(row, text=f"[{origem}] {item['nome']}", width=540, anchor="w")
+        lbl_qtd = ctk.CTkLabel(row, text=str(item["quantidade"]), width=90)
+        lbl_total = ctk.CTkLabel(row, text=self._formatar_moeda_br(item["total"]), width=140, font=("Roboto", 12, "bold"))
+        
+        for w in (lbl_id, lbl_nome, lbl_qtd, lbl_total):
+            w.pack(side="left", padx=5)
+            w.bind("<Button-1>", selecionar)
+
+        # Imagem
+        lbl_img = ctk.CTkLabel(row, image=ctk_img, text="[img]" if not ctk_img else "", width=55)
+        lbl_img.pack(side="left", padx=5)
+        lbl_img.bind("<Button-1>", selecionar)
+
+        # Scroll para o último item (apenas uma vez)
+        try:
+            if self.scroll_vendas.winfo_exists():
+                self.scroll_vendas._parent_canvas.yview_moveto(1.0)
+        except Exception:
+            pass
 
     def _adicionar_linha_grid(self, item, idx):
         row = ctk.CTkFrame(self.scroll_vendas, fg_color="transparent")
@@ -1257,8 +1422,13 @@ class ModuloPDV(ctk.CTkToplevel):
         ctk.CTkLabel(form, text="Estoque Inicial:").pack(anchor="w", padx=12, pady=(10, 2))
         entry_qtd = ctk.CTkEntry(form)
         entry_qtd.pack(fill="x", padx=12)
-        entry_qtd.insert(0, "0")
+        entry_qtd.insert(0, str(int(float(dados_xml.get("quantidade") or 0))))
         aplicar_padrao_entrada_numerica(entry_qtd, inteiro=True)
+
+        ctk.CTkLabel(form, text="Validade (AAAA-MM-DD):").pack(anchor="w", padx=12, pady=(10, 2))
+        entry_validade = ctk.CTkEntry(form)
+        entry_validade.pack(fill="x", padx=12)
+        entry_validade.insert(0, str(dados_xml.get("validade") or ""))
 
         img_state = {"path": imagem_existente or ""}
         drop_frame = ctk.CTkFrame(form, fg_color="#1e1e1e")
@@ -1316,6 +1486,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 margem = parse_numero(entry_margem.get(), "Margem", permitir_vazio=True, default=0.0, minimo=0)
                 preco_venda = parse_numero(entry_preco.get(), "Preço de venda", permitir_vazio=True, default=0.0, minimo=0)
                 qtd = parse_numero(entry_qtd.get(), "Quantidade", permitir_vazio=True, default=0, inteiro=True, minimo=0)
+                validade = entry_validade.get().strip()
 
                 ncm = entry_ncm.get().strip()
                 imagem_final = self._salvar_imagem_produto_por_ean(img_state.get("path", ""), ean_salvar)
@@ -1333,14 +1504,14 @@ class ModuloPDV(ctk.CTkToplevel):
                         (
                             ean_salvar,
                             nome,
-                            "UN",
+                            str(dados_xml.get("unidade") or "UN"),
                             ncm,
                             float(preco_custo),
                             float(margem),
                             float(preco_venda),
                             int(qtd),
                             0,
-                            "",
+                            validade,
                             imagem_final,
                         ),
                     )
@@ -1357,9 +1528,9 @@ class ModuloPDV(ctk.CTkToplevel):
                     self._set_status(f"Produto {nome} cadastrado e adicionado à venda.", "#2ecc71")
                     registrar_log(None, "PDV Cadastro Rápido", "Sucesso", f"Produto EAN {ean_salvar} cadastrado no PDV.")
             except sqlite3.IntegrityError:
-                messagebox.showwarning("Cadastro", "Este EAN já está cadastrado no sistema.")
+                messagebox.showwarning("Cadastro", "Este EAN já está cadastrado no sistema.", parent=self)
             except Exception as e:
-                messagebox.showerror("Cadastro", f"Falha ao cadastrar produto: {e}")
+                messagebox.showerror("Cadastro", f"Falha ao cadastrar produto: {e}", parent=self)
 
         footer = ctk.CTkFrame(form, fg_color="transparent")
         footer.pack(fill="x", padx=12, pady=(8, 12))
@@ -1378,7 +1549,7 @@ class ModuloPDV(ctk.CTkToplevel):
     def _tratar_produto_nao_cadastrado(self, ean):
         self._set_status("Produto não cadastrado.", "#ff6666")
         try:
-            messagebox.showwarning("Produto não cadastrado", f"EAN {ean} não cadastrado. Abra o cadastro rápido.")
+            messagebox.showwarning("Produto não cadastrado", f"EAN {ean} não cadastrado. Abra o cadastro rápido.", parent=self)
         except Exception:
             pass
         self._abrir_modal_cadastro_rapido_produto(ean)
@@ -1459,7 +1630,7 @@ class ModuloPDV(ctk.CTkToplevel):
         if valor_pago is None:
             return
 
-        imprimir = messagebox.askyesno("Finalizar Venda", "Deseja imprimir o cupom? (Sim/Não)")
+        imprimir = messagebox.askyesno("Finalizar Venda", "Deseja imprimir o cupom? (Sim/Não)", parent=self)
 
         self.finalizar_venda_pdv(forma_pgto, valor_pago, imprimir_cupom=imprimir)
 
@@ -1596,10 +1767,34 @@ class ModuloPDV(ctk.CTkToplevel):
                 spool.EndDocPrinter(handle)
             spool.ClosePrinter(handle)
 
-    def abrir_gaveta(self):
-        """Aciona pulso de abertura de gaveta via ESC/POS na impressora padrão."""
-        comando_gaveta = b"\x1bp\x00\x19\xfa"
-        self._enviar_raw_impressora_padrao(comando_gaveta)
+    def abrir_gaveta(self, forma_pagamento=None):
+        """
+        Aciona pulso de abertura de gaveta via ESC/POS na impressora padrão.
+        RESTRITIVO: Só abre a gaveta se a forma de pagamento for DINHEIRO/ESPECIE.
+        Comando ESC/POS universal: \x1B\x70\x00\x19\x81 (pulso 0, 25ms, 129 cycles).
+        """
+        # === TRAVA DE SEGURANÇA: SOMENTE DINHEIRO ===
+        if forma_pagamento is not None:
+            forma_normalizada = str(forma_pagamento).strip().lower()
+            if forma_normalizada not in ("dinheiro", "espécie", "especie"):
+                registrar_log(
+                    None,
+                    "PDV Gaveta",
+                    "Bloqueado",
+                    f"Gaveta NÃO acionada: forma de pagamento '{forma_pagamento}' não é dinheiro.",
+                )
+                self._set_status("Gaveta bloqueada: pagamento não é em dinheiro.", "#f1c40f")
+                return False
+
+        # Comando ESC/POS universal para gaveta (mais compatível)
+        comando_gaveta = b"\x1B\x70\x00\x19\x81"
+        try:
+            self._enviar_raw_impressora_padrao(comando_gaveta)
+            registrar_log(None, "PDV Gaveta", "Sucesso", "Comando de abertura de gaveta enviado.")
+            return True
+        except Exception as e:
+            registrar_log(None, "PDV Gaveta", "Falha", f"Erro ao abrir gaveta: {e}")
+            return False
 
     def imprimir_cupom(self, dados_venda):
         """Imprime cupom não fiscal em impressora térmica (58mm/80mm) via ESC/POS."""
@@ -1752,7 +1947,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 mensagem_erro = analise.get("mensagem") or "Falha desconhecida no ACBrMonitor."
                 self._set_status(f"Erro na emissão: {mensagem_erro}", "#ff6666")
                 try:
-                    messagebox.showerror("Erro Fiscal", f"Erro na emissão: {mensagem_erro}")
+                    messagebox.showerror("Erro Fiscal", f"Erro na emissão: {mensagem_erro}", parent=self)
                 except Exception:
                     pass
                 registrar_log(None, "PDV Fiscal", "Falha", f"Erro na emissão: {mensagem_erro}")
@@ -1763,7 +1958,7 @@ class ModuloPDV(ctk.CTkToplevel):
         except Exception as e:
             self._set_status(f"Erro na emissão: {e}", "#ff6666")
             try:
-                messagebox.showerror("Erro Fiscal", f"Erro na emissão: {e}")
+                messagebox.showerror("Erro Fiscal", f"Erro na emissão: {e}", parent=self)
             except Exception:
                 pass
             registrar_log(None, "PDV Fiscal", "Falha", f"Erro ao enviar comando NFC-e: {e}")
@@ -2189,41 +2384,214 @@ class ModuloPDV(ctk.CTkToplevel):
 
         self._abrir_modal_movimento("SANGRIA", valor_sugerido=valor_sugerido, motivo_padrao=motivo)
 
-    def processar_fechamento_inteligente(self):
+    MODALIDADES_FECHAMENTO = ("DINHEIRO", "DEBITO", "CREDITO", "VOUCHER", "PIX")
+
+    def _abrir_modal_conferencia_fechamento(self, esperado):
+        """Modal de conferência analítica: Informado x Sistema x Diferença por modalidade.
+
+        Retorna {modalidade: valor_informado} ao confirmar ou None ao cancelar.
+        Cada linha calcula a diferença de forma independente — jamais há
+        compensação automática entre modalidades distintas.
+        """
+        modal = ctk.CTkToplevel(self)
+        modal.title("Conferência Analítica de Fechamento")
+        modal.geometry("680x440")
+        modal.transient(self)
+        modal.grab_set()
+        modal.resizable(False, False)
+        modal.configure(fg_color="#181818")
+
+        resultado = {"informado": None}
+
+        ctk.CTkLabel(
+            modal,
+            text="CONFERÊNCIA POR MODALIDADE (sem compensação cruzada)",
+            font=("Roboto", 15, "bold"),
+            text_color="#f1c40f",
+        ).pack(pady=(14, 4))
+        ctk.CTkLabel(
+            modal,
+            text="Informe o valor contado de cada modalidade. Faltas e sobras permanecem individuais.",
+            font=("Roboto", 11),
+            text_color="#9aa0a6",
+        ).pack(pady=(0, 10))
+
+        grid = ctk.CTkFrame(modal, fg_color="#202020")
+        grid.pack(fill="both", expand=True, padx=16)
+
+        for col, titulo in enumerate(("MODALIDADE", "SISTEMA (R$)", "INFORMADO (R$)", "DIFERENÇA (R$)")):
+            ctk.CTkLabel(grid, text=titulo, font=("Roboto", 12, "bold"), text_color="#4aa3ff").grid(
+                row=0, column=col, padx=10, pady=(10, 6), sticky="w"
+            )
+
+        def _fmt_br(valor):
+            return f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+        entradas = {}
+        labels_diferenca = {}
+
+        for linha, modalidade in enumerate(self.MODALIDADES_FECHAMENTO, start=1):
+            ctk.CTkLabel(grid, text=modalidade, font=("Roboto", 12, "bold")).grid(
+                row=linha, column=0, padx=10, pady=4, sticky="w"
+            )
+            ctk.CTkLabel(grid, text=_fmt_br(esperado.get(modalidade, 0.0)), font=("Roboto", 12)).grid(
+                row=linha, column=1, padx=10, pady=4, sticky="w"
+            )
+            entrada = ctk.CTkEntry(grid, width=130, justify="center", font=("Roboto", 12))
+            entrada.insert(0, _fmt_br(esperado.get(modalidade, 0.0)))
+            entrada.grid(row=linha, column=2, padx=10, pady=4)
+            aplicar_padrao_entrada_numerica(entrada, inteiro=False, casas_decimais=2)
+            label_dif = ctk.CTkLabel(grid, text="0,00", font=("Roboto", 12, "bold"), text_color="#2ecc71")
+            label_dif.grid(row=linha, column=3, padx=10, pady=4, sticky="w")
+            entradas[modalidade] = entrada
+            labels_diferenca[modalidade] = label_dif
+
+        def _parse_valor(txt):
+            try:
+                return float(str(txt).strip().replace("R$", "").replace(".", "").replace(",", ".") or "0")
+            except ValueError:
+                return 0.0
+
+        def _atualizar_diferencas(_event=None):
+            total_inf = 0.0
+            total_sis = 0.0
+            for mod in self.MODALIDADES_FECHAMENTO:
+                sis = float(esperado.get(mod, 0.0))
+                inf = _parse_valor(entradas[mod].get())
+                dif = inf - sis
+                total_inf += inf
+                total_sis += sis
+                cor = "#2ecc71" if abs(dif) < 0.005 else ("#ff6666" if dif < 0 else "#f1c40f")
+                labels_diferenca[mod].configure(text=_fmt_br(dif), text_color=cor)
+            lbl_tot_inf.configure(text=_fmt_br(total_inf))
+            lbl_tot_sis.configure(text=_fmt_br(total_sis))
+            dif_geral = total_inf - total_sis
+            cor_geral = "#2ecc71" if abs(dif_geral) < 0.005 else "#ff6666"
+            lbl_tot_dif.configure(
+                text=_fmt_br(dif_geral) + " (individual por modalidade)",
+                text_color=cor_geral,
+            )
+
+        # Totais gerais — divergências individuais permanecem visíveis acima.
+        linha_totais = len(self.MODALIDADES_FECHAMENTO) + 1
+        ctk.CTkLabel(grid, text="TOTAL GERAL", font=("Roboto", 13, "bold"), text_color="#f1c40f").grid(
+            row=linha_totais, column=0, padx=10, pady=(10, 8), sticky="w"
+        )
+        lbl_tot_sis = ctk.CTkLabel(grid, text="0,00", font=("Roboto", 13, "bold"))
+        lbl_tot_sis.grid(row=linha_totais, column=1, padx=10, pady=(10, 8), sticky="w")
+        lbl_tot_inf = ctk.CTkLabel(grid, text="0,00", font=("Roboto", 13, "bold"))
+        lbl_tot_inf.grid(row=linha_totais, column=2, padx=10, pady=(10, 8), sticky="w")
+        lbl_tot_dif = ctk.CTkLabel(grid, text="0,00", font=("Roboto", 13, "bold"))
+        lbl_tot_dif.grid(row=linha_totais, column=3, padx=10, pady=(10, 8), sticky="w")
+
+        botoes = ctk.CTkFrame(modal, fg_color="transparent")
+        botoes.pack(fill="x", padx=16, pady=(6, 14))
+        ctk.CTkButton(
+            botoes, text="CANCELAR", fg_color="#6c757d", width=140,
+            command=lambda: (resultado.__setitem__("informado", None), modal.destroy()),
+        ).pack(side="right", padx=6)
+
+        def _confirmar():
+            informado = {}
+            for mod in self.MODALIDADES_FECHAMENTO:
+                informado[mod] = _parse_valor(entradas[mod].get())
+            resultado["informado"] = informado
+            modal.destroy()
+
+        ctk.CTkButton(
+            botoes, text="CONFIRMAR FECHAMENTO", fg_color="#27ae60", width=220,
+            command=_confirmar,
+        ).pack(side="right", padx=6)
+
+        for mod in self.MODALIDADES_FECHAMENTO:
+            entradas[mod].bind("<KeyRelease>", _atualizar_diferencas, add="+")
+        _atualizar_diferencas()
+
+        modal.protocol("WM_DELETE_WINDOW", lambda: (resultado.__setitem__("informado", None), modal.destroy()))
+        modal.wait_window()
+        return resultado["informado"]
+
+    def processar_fechamento_inteligente(self, exibir_conferencia=True):
+        """Fechamento analítico por modalidade, sem compensação cruzada.
+
+        Compara Valor Informado x Valor Calculado x Diferença individual para
+        DINHEIRO, DEBITO, CREDITO, VOUCHER e PIX. Falta em uma modalidade jamais
+        abate sobra em outra: cada divergência é gravada individualmente na tabela
+        caixa_conferencia e mantida visível no resumo final.
+        """
+        MODALIDADES = self.MODALIDADES_FECHAMENTO
         try:
+            if self.caixa_id is None:
+                self._set_status("Nenhum caixa aberto para fechar.", "#ff6666")
+                return
+
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT saldo_inicial FROM caixa_operacao WHERE id = ?", (self.caixa_id,))
-                saldo_inicial = cursor.fetchone()[0]
-                total_vendas = modulo_financeiro.obter_total_vendas_dia()
+                linha_saldo = cursor.fetchone()
+                saldo_inicial = float(linha_saldo[0] or 0.0) if linha_saldo else 0.0
                 try:
                     cursor.execute(
-                        "SELECT SUM(valor) FROM sangrias WHERE data_sangria >= (SELECT data_abertura FROM caixa_operacao WHERE id = ?) AND caixa_operacao_id = ?",
-                        (self.caixa_id, self.caixa_id),
+                        "SELECT COALESCE(SUM(valor), 0.0) FROM sangrias WHERE caixa_operacao_id = ?",
+                        (self.caixa_id,),
                     )
                 except sqlite3.OperationalError:
                     cursor.execute(
-                        "SELECT SUM(valor) FROM sangrias WHERE data_sangria >= (SELECT data_abertura FROM caixa_operacao WHERE id = ?)",
+                        "SELECT COALESCE(SUM(valor), 0.0) FROM sangrias WHERE data_sangria >= (SELECT data_abertura FROM caixa_operacao WHERE id = ?)",
                         (self.caixa_id,),
                     )
-                total_sangrias = cursor.fetchone()[0] or 0.0
+                total_sangrias = float(cursor.fetchone()[0] or 0.0)
 
-                valor_esperado = (saldo_inicial + total_vendas) - total_sangrias
+            vendas_por_forma = modulo_financeiro.obter_vendas_dia_por_forma()
+            esperado = {}
+            for modalidade in MODALIDADES:
+                if modalidade == "DINHEIRO":
+                    esperado[modalidade] = round(saldo_inicial + vendas_por_forma.get("DINHEIRO", 0.0) - total_sangrias, 2)
+                else:
+                    esperado[modalidade] = round(vendas_por_forma.get(modalidade, 0.0), 2)
+
+            informado = dict(esperado)
+            if exibir_conferencia:
+                try:
+                    informado_modal = self._abrir_modal_conferencia_fechamento(esperado)
+                    if informado_modal is None:
+                        self._set_status("Fechamento cancelado pelo operador.", "#f39c12")
+                        return
+                    informado = informado_modal
+                except Exception as e_modal:
+                    # Rotinas automáticas/sem UI (ex.: checklist): grava conferência espelhada e fecha.
+                    registrar_log(None, "Fechamento de Caixa", "Aviso", f"Conferência visual indisponível ({e_modal}); fechamento automático.")
+                    informado = dict(esperado)
 
             with get_db_connection() as conn_fechamento:
+                for modalidade in MODALIDADES:
+                    diferenca = round(informado[modalidade] - esperado[modalidade], 2)
+                    conn_fechamento.execute(
+                        """
+                        INSERT INTO caixa_conferencia
+                            (caixa_operacao_id, modalidade, valor_calculado, valor_sistema, valor_informado, diferenca)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (self.caixa_id, modalidade, esperado[modalidade], esperado[modalidade], informado[modalidade], diferenca),
+                    )
                 conn_fechamento.execute(
                     "UPDATE caixa_operacao SET status = 'FECHADO', data_fechamento = CURRENT_TIMESTAMP WHERE id = ?",
                     (self.caixa_id,),
                 )
 
             sucesso, msg_fechamento = modulo_financeiro.fechar_caixa()
+            total_sistema = round(sum(esperado.values()), 2)
+            total_informado = round(sum(informado.values()), 2)
+            diferenca_geral = round(total_informado - total_sistema, 2)
             if sucesso:
                 self._set_status("Caixa fechado com sucesso.", "#2ecc71")
+                divergencias = ", ".join(f"{m} {informado[m] - esperado[m]:+.2f}" for m in MODALIDADES)
                 registrar_log(
                     None,
                     "Fechamento de Caixa",
                     "Sucesso",
-                    f"Caixa {self.caixa_id} fechado. Valor esperado: {self._formatar_moeda_br(valor_esperado)}",
+                    f"Caixa {self.caixa_id} fechado. Sistema {total_sistema:.2f} | Informado {total_informado:.2f} "
+                    f"| Diferença geral {diferenca_geral:+.2f} | Divergências: {divergencias}",
                 )
             else:
                 self._set_status(msg_fechamento, "#ff6666")
@@ -2233,6 +2601,15 @@ class ModuloPDV(ctk.CTkToplevel):
             registrar_log(None, "Fechamento de Caixa", "Falha", f"Erro: {e}")
 
     def voltar_ao_menu(self):
+        # Restaura o dashboard que permaneceu minimizado em segundo plano durante o PDV.
+        try:
+            master = self.master
+            if master is not None and master.winfo_exists():
+                master.deiconify()
+                master.lift()
+        except Exception:
+            pass
+
         try:
             if self.modal_abertura is not None and self.modal_abertura.winfo_exists():
                 self.modal_abertura.grab_release()

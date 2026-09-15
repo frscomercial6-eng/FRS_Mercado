@@ -10,6 +10,44 @@ import configparser
 from modulo_config import carregar_configuracoes
 from database_manager import obter_caminho_dados
 
+
+def _es_nome_instalador_acbr(nome: str) -> bool:
+    """True se o nome corresponde a um instalador (-I/DEMO/installer),
+    nunca ao binario real do motor fiscal."""
+    nome_low = str(nome or "").lower()
+    return (
+        "installer" in nome_low
+        or "demo" in nome_low
+        or nome_low.endswith("-i.exe")
+    )
+
+
+def normalizar_data_iso(valor) -> str:
+    """Normaliza uma data (NF-e ou digitada) para o formato AAAA-MM-DD.
+
+    Aceita AAAA-MM-DD, AAAA/MM/DD, DD/MM/AAAA, DD-MM-AAAA, AAAAMMDD, DDMMAAAA
+    e datas com horário (ex.: 2026-10-15T00:00:00). Retorna "" quando não for
+    possível interpretar uma data válida.
+    """
+    texto = str(valor or "").strip()
+    if not texto:
+        return ""
+
+    candidatos = [texto]
+    if len(texto) > 10 and "T" in texto:
+        candidatos.insert(0, texto.split("T", 1)[0])
+    if len(texto) > 10 and " " in texto:
+        candidatos.insert(0, texto.split(" ", 1)[0])
+
+    for candidato in candidatos:
+        for formato in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y", "%Y%m%d", "%d%m%Y"):
+            try:
+                return datetime.strptime(candidato, formato).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+    return ""
+
+
 class ModuloExportacaoFiscal:
     def __init__(self):
         self.config = carregar_configuracoes()
@@ -182,6 +220,9 @@ class FiscalManager:
                 return str(candidato)
 
         for arq in self.pasta_instala.glob("*ACBrMonitor*.exe"):
+            if _es_nome_instalador_acbr(arq.name):
+                # Instaladores (-I/DEMO) nunca deben servir como motor fiscal.
+                continue
             return str(arq)
         return ""
 
@@ -418,7 +459,7 @@ class FiscalManager:
 
     def processar_xml_entrada(self, caminho_xml):
         """
-        Le XML e extrai EAN, NCM, preco e impostos por item.
+        Le XML e extrai EAN, NCM, quantidade, validade, preco e impostos por item.
         Retorna dicionario pronto para persistencia.
         """
         caminho = Path(caminho_xml)
@@ -464,6 +505,37 @@ class FiscalManager:
             descricao = _buscar_texto(prod, {"xProd"})
             ean = _buscar_texto(prod, {"cEAN", "cEANTrib"})
             ncm = _buscar_texto(prod, {"NCM"})
+            unidade = _buscar_texto(prod, {"uCom", "uTrib"}) or "UN"
+            quantidade_txt = _buscar_texto(prod, {"qCom", "qTrib"})
+            try:
+                quantidade = float((quantidade_txt or "0").replace(",", "."))
+            except Exception:
+                quantidade = 0.0
+            validade = normalizar_data_iso(_buscar_texto(det, {"dVal"}))
+
+            lotes = []
+            for no_rastro in prod.iter():
+                if _tag_local(no_rastro.tag) != "rastro":
+                    continue
+                numero_lote = _buscar_texto(no_rastro, {"nLote"})
+                d_fab = normalizar_data_iso(_buscar_texto(no_rastro, {"dFab"}))
+                d_val_lote = normalizar_data_iso(_buscar_texto(no_rastro, {"dVal"}))
+                try:
+                    q_lote = float(str(_buscar_texto(no_rastro, {"qLote"}) or "0").replace(",", "."))
+                except Exception:
+                    q_lote = 0.0
+                if numero_lote or d_val_lote or d_fab:
+                    lotes.append(
+                        {
+                            "numero_lote": numero_lote,
+                            "quantidade": q_lote,
+                            "data_fabricacao": d_fab,
+                            "data_validade": d_val_lote,
+                        }
+                    )
+
+            if not validade and lotes:
+                validade = lotes[0]["data_validade"]
 
             preco_txt = _buscar_texto(prod, {"vUnCom", "vProd"})
             try:
@@ -497,6 +569,10 @@ class FiscalManager:
                     "descricao": descricao,
                     "ean": ean,
                     "ncm": ncm,
+                    "unidade": unidade,
+                    "quantidade": quantidade,
+                    "validade": validade,
+                    "lotes": lotes,
                     "preco": round(preco, 2),
                     "impostos": impostos_item,
                     "total_impostos_item": total_item_imposto,

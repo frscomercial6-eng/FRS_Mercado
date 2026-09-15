@@ -4,8 +4,8 @@ from database_manager import get_db_connection, registrar_log
 
 def verificar_alertas():
     """
-    Analisa o banco de dados em busca de produtos com estoque baixo ou validade próxima.
-    Retorna uma lista de dicionários com os alertas encontrados.
+    Gera alertas resumidos para a operação, sem uma entrada para cada produto.
+    A lista de exemplos é limitada para manter o painel leve com milhares de itens.
     """
     alertas = []
     db_path = 'mercado.db'
@@ -14,18 +14,40 @@ def verificar_alertas():
         with get_db_connection() as conn:
             cursor = conn.cursor()
             
-            # 1. Verificar Estoque Crítico (Ex: menos de 5 unidades)
-            cursor.execute("SELECT nome, quantidade_atual FROM produtos WHERE quantidade_atual < 5")
+            # Usa o mínimo cadastrado; 5 cobre cadastros antigos sem mínimo definido.
+            cursor.execute(
+                """
+                SELECT nome, quantidade_atual, quantidade_minima
+                FROM produtos
+                WHERE quantidade_atual < CASE WHEN quantidade_minima > 0 THEN quantidade_minima ELSE 5 END
+                ORDER BY (quantidade_minima - quantidade_atual) DESC, nome COLLATE NOCASE
+                """
+            )
             estoque_baixo = cursor.fetchall()
-            for item in estoque_baixo:
-                alertas.append({"tipo": "Estoque Baixo", "produto": item[0], "detalhe": f"{item[1]} unid."})
+            if estoque_baixo:
+                faltante = sum(max((item[2] or 5) - (item[1] or 0), 0) for item in estoque_baixo)
+                exemplos = "; ".join(f"{item[0]} ({item[1] or 0}/{item[2] or 5})" for item in estoque_baixo[:10])
+                alertas.append({
+                    "tipo": "Resumo de reposição",
+                    "produto": f"{len(estoque_baixo)} produto(s)",
+                    "detalhe": f"faltam aproximadamente {faltante} unidade(s)",
+                    "motivo": "A quantidade atual está abaixo do mínimo cadastrado (ou de 5 quando o mínimo está zerado).",
+                    "acao": f"Priorizar reposição. Exemplos atual/mínimo: {exemplos}",
+                })
                 
             # 2. Verificar Validade Próxima (Ex: próximos 15 dias)
             data_limite = (datetime.now() + timedelta(days=15)).strftime('%Y-%m-%d')
             cursor.execute("SELECT nome, validade FROM produtos WHERE validade <= ? AND validade != ''", (data_limite,))
             vencendo = cursor.fetchall()
-            for item in vencendo:
-                alertas.append({"tipo": "Validade Próxima", "produto": item[0], "detalhe": item[1]})
+            if vencendo:
+                exemplos = "; ".join(f"{item[0]} ({item[1]})" for item in vencendo[:10])
+                alertas.append({
+                    "tipo": "Resumo de validade",
+                    "produto": f"{len(vencendo)} produto(s)",
+                    "detalhe": "vencendo em até 15 dias ou já vencidos",
+                    "motivo": "A validade cadastrada está dentro da janela de atenção.",
+                    "acao": f"Separar e priorizar pelo método PVPS. Exemplos: {exemplos}",
+                })
     except Exception as e:
         registrar_log(None, "Verificação de Alertas IA", "Falha", f"Erro: {e}")
         print(f"Erro na IA de Gestão: {e}")

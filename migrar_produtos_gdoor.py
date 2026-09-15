@@ -420,7 +420,8 @@ def salvar_planilha(produtos: Iterable[dict[str, Any]], output_path: Path) -> No
         from openpyxl import Workbook
     except ImportError as exc:
         raise RuntimeError(
-            "Para gerar relatório .xlsx é necessário openpyxl. Use .csv ou instale: python -m pip install openpyxl"
+            "O gerador de relatórios Excel não está disponível nesta instalação. "
+            "Use CSV ou atualize o aplicativo para a versão mais recente."
         ) from exc
 
     wb = Workbook()

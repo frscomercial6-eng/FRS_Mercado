@@ -252,7 +252,9 @@ def init_db():
                 origem TEXT NOT NULL DEFAULT 'LOJA_FISICA',
                 status_pedido TEXT NOT NULL DEFAULT 'APROVADO',
                 status_pagamento TEXT NOT NULL DEFAULT 'PAGO',
-                forma_pagamento TEXT NOT NULL
+                forma_pagamento TEXT NOT NULL,
+                valor_informado NUMERIC NOT NULL DEFAULT 0.0,
+                diferenca NUMERIC NOT NULL DEFAULT 0.0
             )
         ''')
         cursor.execute("PRAGMA table_info(vendas)")
@@ -277,6 +279,10 @@ def init_db():
             cursor.execute("ALTER TABLE vendas ADD COLUMN valor_ibs NUMERIC NOT NULL DEFAULT 0.0")
         if "valor_cbs" not in vendas_cols:
             cursor.execute("ALTER TABLE vendas ADD COLUMN valor_cbs NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_informado" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN valor_informado NUMERIC NOT NULL DEFAULT 0.0")
+        if "diferenca" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN diferenca NUMERIC NOT NULL DEFAULT 0.0")
 
         # Tabela de Orçamentos (Propostas Comerciais)
         cursor.execute('''
@@ -332,6 +338,36 @@ def init_db():
                 justificativa TEXT,
                 data_sangria DATETIME DEFAULT CURRENT_TIMESTAMP,
                 caixa_operacao_id INTEGER
+            )
+        ''')
+
+        # Conferência analítica do fechamento de caixa (uma linha por modalidade)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS caixa_conferencia (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caixa_operacao_id INTEGER NOT NULL,
+                modalidade TEXT NOT NULL,
+                valor_calculado NUMERIC NOT NULL DEFAULT 0.0,
+                valor_sistema NUMERIC NOT NULL DEFAULT 0.0,
+                valor_informado NUMERIC NOT NULL DEFAULT 0.0,
+                diferenca NUMERIC NOT NULL DEFAULT 0.0,
+                data_registro DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Lotes de produtos (rastro da NF-e: nLote/qLote/dFab/dVal por item)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS produto_lotes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                produto_id INTEGER,
+                codigo_barras TEXT,
+                numero_lote TEXT,
+                quantidade NUMERIC NOT NULL DEFAULT 0.0,
+                data_fabricacao TEXT,
+                data_validade TEXT,
+                chave_nfe TEXT,
+                origem TEXT DEFAULT 'NF-e',
+                data_registro DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
 
@@ -544,6 +580,7 @@ def init_db():
         # Inserção inicial de taxas se não existirem
         cursor.execute("INSERT OR IGNORE INTO config_taxas (tipo, percentual) VALUES ('DEBITO', 0.0)")
         cursor.execute("INSERT OR IGNORE INTO config_taxas (tipo, percentual) VALUES ('CREDITO', 0.0)")
+        cursor.execute("INSERT OR IGNORE INTO config_taxas (tipo, percentual) VALUES ('VOUCHER', 0.0)")
         cursor.execute("INSERT OR IGNORE INTO config_sistema (chave, valor) VALUES ('limite_caixa', '500.00')")
         cursor.execute("INSERT OR IGNORE INTO config_fiscal (id, api_key, ambiente, webhook_token_hash) VALUES (1, '', 'HOMOLOGACAO', '')")
         cursor.execute(
