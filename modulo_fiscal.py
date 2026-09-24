@@ -2,6 +2,7 @@ import os
 import json
 import time
 import subprocess
+import sys
 import threading
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -20,6 +21,207 @@ def _es_nome_instalador_acbr(nome: str) -> bool:
         or "demo" in nome_low
         or nome_low.endswith("-i.exe")
     )
+
+
+def _pasta_base_aplicacao() -> Path:
+    """Pasta base do aplicativo (pasta do executável quando congelado).
+
+    No executável (PyInstaller onedir), Path(__file__) aponta para a pasta
+    interna do runtime (_internal), enquanto a pasta "instala"/"acbr" oficial
+    fica junto ao executável principal. Em código-fonte, é a raiz do projeto.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _pastas_instala_candidatas(pasta_instala=None):
+    """Pastas candidatas de empacotamento do ACBr, preservando a ordem do mecanismo atual."""
+    pastas = []
+    if pasta_instala is not None:
+        pastas.append(Path(pasta_instala))
+    pastas.append(Path(__file__).resolve().parent / "instala")
+    pastas.append(_pasta_base_aplicacao() / "instala")
+    pastas.append(_pasta_base_aplicacao() / "acbr")
+    pastas.append(Path(__file__).resolve().parent / "_build_support" / "acbr")
+
+    unicas = []
+    vistos = set()
+    for pasta in pastas:
+        try:
+            chave = str(pasta).lower()
+        except Exception:
+            chave = str(pasta)
+        if chave not in vistos:
+            vistos.add(chave)
+            unicas.append(pasta)
+    return unicas
+
+
+def _caminhos_acbr_do_registro():
+    """InstallLocation das instalações do ACBrMonitor registradas no Windows."""
+    caminhos = []
+    try:
+        import winreg
+    except Exception:
+        return caminhos
+
+    raizes = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ]
+    vistas = [
+        0,
+        getattr(winreg, "KEY_WOW64_32KEY", 0),
+        getattr(winreg, "KEY_WOW64_64KEY", 0),
+    ]
+    for hive, caminho_raiz in raizes:
+        for vista in vistas:
+            try:
+                with winreg.OpenKey(hive, caminho_raiz, 0, winreg.KEY_READ | vista) as raiz:
+                    indice = 0
+                    while True:
+                        try:
+                            subchave = winreg.EnumKey(raiz, indice)
+                        except OSError:
+                            break
+                        indice += 1
+                        try:
+                            with winreg.OpenKey(raiz, subchave) as item:
+                                nome, _ = winreg.QueryValueEx(item, "DisplayName")
+                                if "acbrmonitor" not in str(nome or "").lower():
+                                    continue
+                                local, _ = winreg.QueryValueEx(item, "InstallLocation")
+                                texto = str(local or "").strip().strip('"')
+                                if texto:
+                                    caminhos.append(Path(texto))
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+    return caminhos
+
+
+def _caminhos_padrao_acbr_demo():
+    """Diretórios padrão do instalador oficial ACBrMonitorPLUS (DEMO)."""
+    pastas = [Path("C:/ACBrMonitorPLUS")]
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(var)
+        if base:
+            pastas.append(Path(base) / "ACBrMonitorPLUS")
+    return pastas
+
+
+def localizar_acbr_instalado(pasta_instala=None):
+    """Localiza o executável REAL do motor fiscal (ACBrMonitor.exe).
+
+    Mantém primeiro os caminhos já usados pelo FRS (pastas "instala") e depois
+    acrescenta os destinos reais do instalador oficial DEMO: InstallLocation no
+    registro do Windows e os diretórios padrão do ACBrMonitorPLUS. O instalador
+    (DEMO/-I/Installer) nunca é retornado como motor.
+    """
+    for pasta in _pastas_instala_candidatas(pasta_instala):
+        for nome in ("ACBrMonitorPLUS.exe", "ACBrMonitor.exe"):
+            candidato = pasta / nome
+            if candidato.exists():
+                return candidato
+        try:
+            for arq in pasta.glob("*ACBrMonitor*.exe"):
+                if _es_nome_instalador_acbr(arq.name):
+                    continue
+                return arq
+        except Exception:
+            pass
+
+    pastas_extras = _caminhos_acbr_do_registro() + _caminhos_padrao_acbr_demo()
+    for pasta in pastas_extras:
+        try:
+            if not pasta.is_dir():
+                continue
+        except Exception:
+            continue
+        for nome in ("ACBrMonitorPLUS.exe", "ACBrMonitor.exe"):
+            candidato = pasta / nome
+            if candidato.exists():
+                return candidato
+        try:
+            for arq in pasta.glob("*ACBrMonitor*.exe"):
+                if _es_nome_instalador_acbr(arq.name):
+                    continue
+                return arq
+        except Exception:
+            pass
+    return None
+
+
+def localizar_instalador_acbr_empacotado(pasta_instala=None):
+    """Localiza o instalador oficial DEMO empacotado com o aplicativo."""
+    for pasta in _pastas_instala_candidatas(pasta_instala):
+        if not pasta.is_dir():
+            continue
+        fixo = pasta / "ACBrMonitor_Installer.exe"
+        if fixo.exists():
+            return fixo
+        for padrao in (
+            "ACBrMonitorPLUS-DEMO-*-I.exe",
+            "ACBrMonitorPLUS*DEMO*.exe",
+            "*ACBrMonitor*Installer*.exe",
+        ):
+            try:
+                for arq in pasta.glob(padrao):
+                    if arq.is_file():
+                        return arq
+            except Exception:
+                continue
+    return None
+
+
+def instalar_acbr_demo(timeout_segundos=600):
+    """Instala o ACBr Monitor com o instalador oficial DEMO empacotado.
+
+    Usa exatamente os parâmetros já definidos no setup Inno do FRS
+    (setup_frs.iss): /VERYSILENT /NORESTART. O UAC do Windows é apresentado
+    normalmente pelo próprio instalador (sem elevação forçada). Aguarda a
+    conclusão e retorna o executável real localizado (ou None).
+    """
+    # ACBr já instalado? NÃO executar o instalador novamente.
+    existente = localizar_acbr_instalado()
+    if existente:
+        return existente
+
+    instalador = localizar_instalador_acbr_empacotado()
+    if instalador is None:
+        return None
+
+    comando = [
+        "cmd",
+        "/c",
+        "start",
+        "",
+        "/wait",
+        str(instalador),
+        "/VERYSILENT",
+        "/NORESTART",
+    ]
+    try:
+        subprocess.run(
+            comando,
+            check=False,
+            timeout=max(60, int(timeout_segundos)),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        pass
+
+    # Após o término, localiza o motor real instalado (nome original).
+    inicio = time.time()
+    while time.time() - inicio < 30:
+        existente = localizar_acbr_instalado()
+        if existente:
+            return existente
+        time.sleep(1.0)
+    return localizar_acbr_instalado()
 
 
 def normalizar_data_iso(valor) -> str:
@@ -210,21 +412,28 @@ class FiscalManager:
             # Sem permissao de escrita: mantem app funcionando, apenas sem atualizar o ini local.
             pass
 
-    def _localizar_executavel_acbr(self):
-        candidatos = [
-            self.pasta_instala / "ACBrMonitorPLUS.exe",
-            self.pasta_instala / "ACBrMonitor.exe",
-        ]
-        for candidato in candidatos:
-            if candidato.exists():
-                return str(candidato)
+        # O ACBrMonitor real le o ACBrMonitor.ini na propria pasta de instalacao.
+        # Provisiona a MESMA configuracao (mesmas chaves/valores ja usados pelo
+        # FRS) no diretorio do motor apenas quando o monitor ainda nao possui
+        # INI (primeiro uso), sem sobrescrever configuracao propria do ACBr e
+        # sem criar nenhuma chave fiscal nova.
+        if executavel_acbr:
+            try:
+                pasta_motor = Path(executavel_acbr).resolve().parent
+                ini_motor = pasta_motor / "ACBrMonitor.ini"
+                if pasta_motor.is_dir() and not ini_motor.exists():
+                    with open(ini_motor, "w", encoding="utf-8") as f:
+                        cfg.write(f)
+            except OSError:
+                pass
 
-        for arq in self.pasta_instala.glob("*ACBrMonitor*.exe"):
-            if _es_nome_instalador_acbr(arq.name):
-                # Instaladores (-I/DEMO) nunca deben servir como motor fiscal.
-                continue
-            return str(arq)
-        return ""
+    def _localizar_executavel_acbr(self):
+        # Mantém primeiro os caminhos já usados pelo FRS (pasta "instala") e
+        # acrescenta, como fallback, os destinos reais do instalador oficial
+        # DEMO (InstallLocation no registro + diretórios padrão do ACBr).
+        # Instaladores (DEMO/-I/Installer) nunca são considerados motor.
+        caminho = localizar_acbr_instalado(self.pasta_instala)
+        return str(caminho) if caminho else ""
 
     def _to_float(self, valor, default=0.0):
         try:

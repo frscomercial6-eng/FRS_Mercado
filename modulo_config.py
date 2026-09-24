@@ -45,16 +45,23 @@ def _garantir_pastas_usuario():
 
 def _config_padrao():
     return {
+        "nome_fantasia": "",
         "razao_social": "",
         "nome_estabelecimento": "",
-        "market_id": "",
+        "cnpj": "",
+        "cep": "",
+        "logradouro": "",
+        "numero": "",
+        "complemento": "",
+        "bairro": "",
+        "cidade": "",
+        "uf": "",
         "fiscal_ativo": False,
         "auto_update_enabled": True,
         "auto_update_repo": (AUTO_UPDATE_REPO or "").strip(),
         "auto_update_remind_hours": 24,
         "app_executable_path": "",
         "update_executable_path": "",
-        "cnpj": "",
         "email_cliente": "",
         "drive_credentials_path": "",
         "drive_backup_folder_id": "",
@@ -85,6 +92,26 @@ def _normalizar_config(dados):
     cfg = _config_padrao()
     if isinstance(dados, dict):
         cfg.update(dados)
+
+    # Compat: campo legado "endereco" (texto livre) não é mais usado pela
+    # impressão; os campos estruturados prevalecem. Se existirem valores
+    # novos vazios mas houver legado preenchido, expõe o legado como
+    # logradouro somente para visualização (sem duplicar impressão).
+    try:
+        legado = str((dados or {}).get("endereco") or "").strip()
+    except Exception:
+        legado = ""
+    if legado and not str(cfg.get("logradouro") or "").strip():
+        cfg["logradouro"] = legado
+
+    # Compat: nome_estabelecimento antigo alimenta nome_fantasia vazio.
+    try:
+        if not str(cfg.get("nome_fantasia") or "").strip():
+            antigo = str((dados or {}).get("nome_estabelecimento") or "").strip()
+            if antigo:
+                cfg["nome_fantasia"] = antigo
+    except Exception:
+        pass
 
     cfg["auto_update_repo"] = _resolver_auto_update_repo(cfg.get("auto_update_repo"))
 
@@ -420,29 +447,75 @@ def exibir_configuracoes(master=None):
     tabview.add("Geral")
     tabview.add("Fiscal")
 
-    frame_geral = tabview.tab("Geral")
-    frame_fiscal = tabview.tab("Fiscal")
+    # LAYOUT (correção cirúrgica): o conteúdo de cada aba vai para um
+    # CTkScrollableFrame — os campos ficam acessíveis por rolagem tanto em
+    # janela normal quanto maximizada, a altura do tabview deixa de estourar
+    # e os botões inferiores (principalmente SALVAR) permanecem visíveis.
+    # Campos, textos e lógica de salvar/carregar: NÃO alterados.
+    frame_geral = ctk.CTkScrollableFrame(tabview.tab("Geral"))
+    frame_geral.pack(fill="both", expand=True)
+
+    frame_fiscal = ctk.CTkScrollableFrame(tabview.tab("Fiscal"))
+    frame_fiscal.pack(fill="both", expand=True)
 
     # --- ABA GERAL ---
-    ctk.CTkLabel(frame_geral, text="Razão Social:").grid(row=0, column=0, padx=10, pady=6, sticky="e")
+    ctk.CTkLabel(frame_geral, text="Nome Fantasia:").grid(row=0, column=0, padx=10, pady=6, sticky="e")
+    entry_fantasia = ctk.CTkEntry(frame_geral, width=360)
+    entry_fantasia.insert(0, config_atual.get("nome_fantasia", "") or config_atual.get("nome_estabelecimento", ""))
+    entry_fantasia.grid(row=0, column=1, padx=10, pady=6)
+
+    ctk.CTkLabel(frame_geral, text="Razão Social:").grid(row=1, column=0, padx=10, pady=6, sticky="e")
     entry_razao = ctk.CTkEntry(frame_geral, width=360)
     entry_razao.insert(0, config_atual.get("razao_social", ""))
-    entry_razao.grid(row=0, column=1, padx=10, pady=6)
+    entry_razao.grid(row=1, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="CNPJ:").grid(row=1, column=0, padx=10, pady=6, sticky="e")
+    ctk.CTkLabel(frame_geral, text="CNPJ:").grid(row=2, column=0, padx=10, pady=6, sticky="e")
     entry_cnpj = ctk.CTkEntry(frame_geral, width=360)
     entry_cnpj.insert(0, config_atual.get("cnpj", ""))
-    entry_cnpj.grid(row=1, column=1, padx=10, pady=6)
+    entry_cnpj.grid(row=2, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="E-mail do Cliente:").grid(row=2, column=0, padx=10, pady=6, sticky="e")
+    ctk.CTkLabel(frame_geral, text="Endereço — Logradouro:").grid(row=3, column=0, padx=10, pady=6, sticky="e")
+    entry_logradouro = ctk.CTkEntry(frame_geral, width=280)
+    entry_logradouro.insert(0, config_atual.get("logradouro", ""))
+    entry_logradouro.grid(row=3, column=1, padx=(10, 0), pady=6, sticky="w")
+    ctk.CTkLabel(frame_geral, text="Nº:").grid(row=3, column=1, padx=(0, 0), pady=6, sticky="e")
+    entry_numero = ctk.CTkEntry(frame_geral, width=70)
+    entry_numero.insert(0, config_atual.get("numero", ""))
+    entry_numero.grid(row=3, column=1, padx=(0, 10), pady=6, sticky="e")
+
+    ctk.CTkLabel(frame_geral, text="Complemento:").grid(row=4, column=0, padx=10, pady=6, sticky="e")
+    entry_complemento = ctk.CTkEntry(frame_geral, width=360)
+    entry_complemento.insert(0, config_atual.get("complemento", ""))
+    entry_complemento.grid(row=4, column=1, padx=10, pady=6)
+
+    ctk.CTkLabel(frame_geral, text="Bairro:").grid(row=5, column=0, padx=10, pady=6, sticky="e")
+    entry_bairro = ctk.CTkEntry(frame_geral, width=360)
+    entry_bairro.insert(0, config_atual.get("bairro", ""))
+    entry_bairro.grid(row=5, column=1, padx=10, pady=6)
+
+    ctk.CTkLabel(frame_geral, text="Cidade:").grid(row=6, column=0, padx=10, pady=6, sticky="e")
+    entry_cidade = ctk.CTkEntry(frame_geral, width=220)
+    entry_cidade.insert(0, config_atual.get("cidade", ""))
+    entry_cidade.grid(row=6, column=1, padx=(10, 0), pady=6, sticky="w")
+    ctk.CTkLabel(frame_geral, text="UF:").grid(row=6, column=1, padx=(0, 90), pady=6, sticky="e")
+    entry_uf = ctk.CTkEntry(frame_geral, width=60)
+    entry_uf.insert(0, config_atual.get("uf", ""))
+    entry_uf.grid(row=6, column=1, padx=(0, 10), pady=6, sticky="e")
+
+    ctk.CTkLabel(frame_geral, text="CEP:").grid(row=7, column=0, padx=10, pady=6, sticky="e")
+    entry_cep = ctk.CTkEntry(frame_geral, width=360)
+    entry_cep.insert(0, config_atual.get("cep", ""))
+    entry_cep.grid(row=7, column=1, padx=10, pady=6)
+
+    ctk.CTkLabel(frame_geral, text="E-mail do Cliente:").grid(row=8, column=0, padx=10, pady=6, sticky="e")
     entry_email_cliente = ctk.CTkEntry(frame_geral, width=360)
     entry_email_cliente.insert(0, config_atual.get("email_cliente", ""))
-    entry_email_cliente.grid(row=2, column=1, padx=10, pady=6)
+    entry_email_cliente.grid(row=8, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="Emissor Fiscal (.exe):").grid(row=3, column=0, padx=10, pady=6, sticky="e")
+    ctk.CTkLabel(frame_geral, text="Emissor Fiscal (.exe):").grid(row=9, column=0, padx=10, pady=6, sticky="e")
     entry_emissor = ctk.CTkEntry(frame_geral, width=270)
     entry_emissor.insert(0, config_atual.get("emissor_fiscal_path", ""))
-    entry_emissor.grid(row=3, column=1, padx=(10, 0), pady=6, sticky="w")
+    entry_emissor.grid(row=9, column=1, padx=(10, 0), pady=6, sticky="w")
 
     fiscal_ativo_var = ctk.BooleanVar(value=bool(config_atual.get("fiscal_ativo", False)))
     check_fiscal_ativo = ctk.CTkCheckBox(
@@ -452,36 +525,36 @@ def exibir_configuracoes(master=None):
         onvalue=True,
         offvalue=False,
     )
-    check_fiscal_ativo.grid(row=11, column=0, columnspan=2, padx=10, pady=(2, 8), sticky="w")
+    check_fiscal_ativo.grid(row=15, column=0, columnspan=2, padx=10, pady=(2, 8), sticky="w")
 
-    ctk.CTkLabel(frame_geral, text="Google Drive (Credenciais):").grid(row=4, column=0, padx=10, pady=6, sticky="e")
+    ctk.CTkLabel(frame_geral, text="Google Drive (Credenciais):").grid(row=10, column=0, padx=10, pady=6, sticky="e")
     entry_drive_creds = ctk.CTkEntry(frame_geral, width=360)
     entry_drive_creds.insert(0, config_atual.get("drive_credentials_path", ""))
-    entry_drive_creds.grid(row=4, column=1, padx=10, pady=6)
+    entry_drive_creds.grid(row=10, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="ID Pasta Backup:").grid(row=5, column=0, padx=10, pady=6, sticky="e")
+    ctk.CTkLabel(frame_geral, text="ID Pasta Backup:").grid(row=11, column=0, padx=10, pady=6, sticky="e")
     entry_drive_id = ctk.CTkEntry(frame_geral, width=360)
     entry_drive_id.insert(0, config_atual.get("drive_backup_folder_id", ""))
-    entry_drive_id.grid(row=5, column=1, padx=10, pady=6)
+    entry_drive_id.grid(row=11, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="Pasta Entrada Fiscal:").grid(row=6, column=0, padx=10, pady=6, sticky="e")
+    ctk.CTkLabel(frame_geral, text="Pasta Entrada Fiscal:").grid(row=12, column=0, padx=10, pady=6, sticky="e")
     entry_in = ctk.CTkEntry(frame_geral, width=270)
     entry_in.insert(0, config_atual.get("pasta_entrada_fiscal", ""))
-    entry_in.grid(row=6, column=1, padx=(10, 0), pady=6, sticky="w")
+    entry_in.grid(row=12, column=1, padx=(10, 0), pady=6, sticky="w")
 
-    ctk.CTkLabel(frame_geral, text="Pasta Retorno Fiscal:").grid(row=7, column=0, padx=10, pady=6, sticky="e")
+    ctk.CTkLabel(frame_geral, text="Pasta Retorno Fiscal:").grid(row=13, column=0, padx=10, pady=6, sticky="e")
     entry_out = ctk.CTkEntry(frame_geral, width=270)
     entry_out.insert(0, config_atual.get("pasta_retorno_fiscal", ""))
-    entry_out.grid(row=7, column=1, padx=(10, 0), pady=6, sticky="w")
+    entry_out.grid(row=13, column=1, padx=(10, 0), pady=6, sticky="w")
 
-    ctk.CTkLabel(frame_geral, text="Limite de Sangria Preventiva:").grid(row=8, column=0, padx=10, pady=6, sticky="e")
+    ctk.CTkLabel(frame_geral, text="Limite de Sangria Preventiva:").grid(row=14, column=0, padx=10, pady=6, sticky="e")
     entry_limite = ctk.CTkEntry(frame_geral, width=360)
     entry_limite.insert(0, f"{obter_limite_sangria_preventiva():.2f}")
-    entry_limite.grid(row=8, column=1, padx=10, pady=6)
+    entry_limite.grid(row=14, column=1, padx=10, pady=6)
     aplicar_padrao_entrada_numerica(entry_limite, inteiro=False, casas_decimais=2)
 
     lbl_status_backup_drive = ctk.CTkLabel(frame_geral, text="", font=("Arial", 11, "bold"))
-    lbl_status_backup_drive.grid(row=9, column=0, columnspan=2, padx=10, pady=(8, 4), sticky="w")
+    lbl_status_backup_drive.grid(row=16, column=0, columnspan=2, padx=10, pady=(8, 4), sticky="w")
 
     def atualizar_alerta_backup_drive():
         status = obter_status_backup_local()
@@ -505,7 +578,7 @@ def exibir_configuracoes(master=None):
         fg_color="#1f6aa5",
         hover_color="#144870",
         command=acao_provisionar_cliente_drive,
-    ).grid(row=10, column=0, columnspan=2, padx=10, pady=(4, 8), sticky="w")
+    ).grid(row=17, column=0, columnspan=2, padx=10, pady=(4, 8), sticky="w")
 
     def procurar_exe(entry_widget):
         caminho = filedialog.askopenfilename(
@@ -524,9 +597,9 @@ def exibir_configuracoes(master=None):
             entry_widget.insert(0, caminho)
             janela_config.focus_force()
 
-    ctk.CTkButton(frame_geral, text="...", width=40, command=lambda: procurar_exe(entry_emissor)).grid(row=3, column=1, padx=(0, 10), pady=6, sticky="e")
-    ctk.CTkButton(frame_geral, text="...", width=40, command=lambda: selecionar_pasta(entry_in)).grid(row=6, column=1, padx=(0, 10), pady=6, sticky="e")
-    ctk.CTkButton(frame_geral, text="...", width=40, command=lambda: selecionar_pasta(entry_out)).grid(row=7, column=1, padx=(0, 10), pady=6, sticky="e")
+    ctk.CTkButton(frame_geral, text="...", width=40, command=lambda: procurar_exe(entry_emissor)).grid(row=9, column=1, padx=(0, 10), pady=6, sticky="e")
+    ctk.CTkButton(frame_geral, text="...", width=40, command=lambda: selecionar_pasta(entry_in)).grid(row=12, column=1, padx=(0, 10), pady=6, sticky="e")
+    ctk.CTkButton(frame_geral, text="...", width=40, command=lambda: selecionar_pasta(entry_out)).grid(row=13, column=1, padx=(0, 10), pady=6, sticky="e")
 
     # --- ABA FISCAL (PlugNotas) ---
     ctk.CTkLabel(frame_fiscal, text="Integração Fiscal PlugNotas (API v2.4.2)", font=("Arial", 16, "bold")).pack(pady=(12, 14))
@@ -612,9 +685,17 @@ def exibir_configuracoes(master=None):
                     return
 
             novos_dados = {
+                "nome_fantasia": entry_fantasia.get().strip(),
                 "razao_social": entry_razao.get(),
-                "nome_estabelecimento": entry_razao.get(),
-                "cnpj": entry_cnpj.get(),
+                "nome_estabelecimento": (entry_fantasia.get().strip() or entry_razao.get()),
+                "cnpj": entry_cnpj.get().strip(),
+                "cep": entry_cep.get().strip(),
+                "logradouro": entry_logradouro.get().strip(),
+                "numero": entry_numero.get().strip(),
+                "complemento": entry_complemento.get().strip(),
+                "bairro": entry_bairro.get().strip(),
+                "cidade": entry_cidade.get().strip(),
+                "uf": entry_uf.get().strip().upper(),
                 "email_cliente": entry_email_cliente.get(),
                 "drive_credentials_path": entry_drive_creds.get(),
                 "drive_backup_folder_id": entry_drive_id.get(),

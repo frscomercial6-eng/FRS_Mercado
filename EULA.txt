@@ -1,6 +1,6 @@
 FRS SOLUTIONS - CONTRATO DE LICENCA DE USO DO SOFTWARE FRS MERCADO
-Versao 1.0.12
-Data de vigencia: 13/09/2026
+Versao 1.0.18
+Data de vigencia: 23/09/2026
 
 IMPORTANTE: LEIA ESTE CONTRATO ANTES DE INSTALAR OU UTILIZAR O SOFTWARE.
 Ao prosseguir com a instalacao ou uso do FRS Mercado, o cliente declara que leu e concorda com os termos abaixo.

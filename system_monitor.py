@@ -27,6 +27,9 @@ class SystemMonitor:
         self._thread = None
         self._ultimo_alerta_inicio = 0.0
         self._license_manager = LicenseManager()
+        # Instalação do ACBr Monitor DEMO oficial (motor fiscal ausente).
+        self._instalacao_acbr_em_andamento = False
+        self._ultima_tentativa_instalacao_acbr = 0.0
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -143,19 +146,30 @@ class SystemMonitor:
         if emissor_cfg:
             candidatos.append(Path(emissor_cfg))
 
-        pasta_instala = Path(__file__).resolve().parent / "instala"
-        candidatos.extend(
-            [
-                pasta_instala / "ACBrMonitorPLUS.exe",
-                pasta_instala / "ACBrMonitor.exe",
-            ]
-        )
-        # Excluye instaladores (-I/DEMO): nunca deben lanzarse como motor fiscal.
-        candidatos.extend(
-            arq
-            for arq in pasta_instala.glob("*ACBrMonitor*.exe")
-            if not _es_nome_instalador_acbr(arq.name)
-        )
+        # Pastas candidatas com a mesma resolução do runtime fiscal
+        # (_pasta_base_aplicacao: base do executável quando congelado).
+        try:
+            from modulo_fiscal import _pastas_instala_candidatas
+
+            pastas_instala = _pastas_instala_candidatas()
+        except Exception:
+            pastas_instala = [Path(__file__).resolve().parent / "instala"]
+        for pasta_instala in pastas_instala:
+            candidatos.extend(
+                [
+                    pasta_instala / "ACBrMonitorPLUS.exe",
+                    pasta_instala / "ACBrMonitor.exe",
+                ]
+            )
+            # Excluye instaladores (-I/DEMO): nunca deben lanzarse como motor fiscal.
+            try:
+                candidatos.extend(
+                    arq
+                    for arq in pasta_instala.glob("*ACBrMonitor*.exe")
+                    if not _es_nome_instalador_acbr(arq.name)
+                )
+            except Exception:
+                continue
 
         for exe in candidatos:
             try:
@@ -169,4 +183,86 @@ class SystemMonitor:
             except Exception:
                 continue
 
+        # Detecção ampliada: destinos reais do instalador oficial DEMO
+        # (InstallLocation no registro + diretórios padrão do ACBrMonitorPLUS).
+        # Instaladores nunca são considerados motor.
+        motor_ampliado = self._localizar_motor_ampliado()
+        if motor_ampliado is not None:
+            try:
+                subprocess.Popen(
+                    [str(motor_ampliado)],
+                    cwd=str(motor_ampliado.parent),
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                return True
+            except Exception:
+                pass
+
+        # Motor fiscal realmente ausente: agenda a instalação do ACBr Monitor
+        # DEMO oficial empacotado (mesmos parâmetros do setup Inno).
+        if self._agendar_instalacao_acbr():
+            return True
+
         return False
+
+    def _localizar_motor_ampliado(self):
+        """Localiza o motor além dos candidatos tradicionais (registro/DEMO padrão)."""
+        try:
+            from modulo_fiscal import localizar_acbr_instalado
+
+            return localizar_acbr_instalado()
+        except Exception:
+            return None
+
+    def _agendar_instalacao_acbr(self):
+        """Agenda a instalação do ACBr DEMO oficial quando o motor está ausente."""
+        if self._instalacao_acbr_em_andamento:
+            return False
+
+        # ACBr já instalado? NÃO executar o instalador.
+        try:
+            from modulo_fiscal import localizar_acbr_instalado
+
+            if localizar_acbr_instalado():
+                return False
+        except Exception:
+            return False
+
+        agora = time.time()
+        # Nova tentativa de instalação no máximo a cada 5 minutos.
+        if (agora - self._ultima_tentativa_instalacao_acbr) < 300:
+            return False
+        self._ultima_tentativa_instalacao_acbr = agora
+        self._instalacao_acbr_em_andamento = True
+        threading.Thread(target=self._instalar_acbr_e_iniciar, daemon=True).start()
+        return True
+
+    def _instalar_acbr_e_iniciar(self):
+        """Instala o DEMO oficial, aplica a configuração existente e inicia o motor."""
+        try:
+            from modulo_fiscal import instalar_acbr_demo, localizar_acbr_instalado
+
+            executavel = localizar_acbr_instalado()
+            if executavel is None:
+                executavel = instalar_acbr_demo()
+            if executavel is None:
+                return
+
+            # Aplica a configuração existente do FRS (pastas fiscal_in/fiscal_out
+            # e ACBrMonitor.ini nos locais corretos, inclusive o do ACBr).
+            try:
+                from modulo_fiscal import FiscalManager
+
+                FiscalManager()
+            except Exception:
+                pass
+
+            subprocess.Popen(
+                [str(executavel)],
+                cwd=str(executavel.parent),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
+        finally:
+            self._instalacao_acbr_em_andamento = False

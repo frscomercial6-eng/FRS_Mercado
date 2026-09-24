@@ -13,7 +13,7 @@ Use este checklist antes de entregar qualquer nova versao do executavel para o c
 ## 1. Pre-build e artefatos (30s)
 - [ ] Executar build oficial: `python build_exe.py`
 - [ ] Confirmar geracao do executavel: `dist/FRS_Mercado.exe`
-- [ ] Confirmar geracao do pacote portatil: `installer/FRS_Mercado_Portable_1.0.12.zip`
+- [ ] Confirmar geracao do pacote portatil: `installer/FRS_Mercado_Portable_1.0.18.zip`
 - [ ] Confirmar geracao do instalador: `installer/FRS_Mercado_Setup.exe`
 
 ## 2. Validacao de dados e padronizacao numerica (45s)

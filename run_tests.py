@@ -31,12 +31,13 @@ class _PDVStub:
         self.ent_valor_pago = _DummyEntry()
         self.lbl_troco_venda = _DummyLabel()
         self.ent_quantidade = object()
+        self.caixa_id = None
         self._status = []
 
     def exportar_venda_fiscal(self, _dados):
         return True
 
-    def _set_status(self, mensagem, cor):
+    def _set_status(self, mensagem, cor="#3498db"):
         self._status.append((mensagem, cor))
 
     def _formatar_moeda_br(self, valor):

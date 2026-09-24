@@ -1,11 +1,13 @@
 import argparse
 import os
 import importlib.util
+import sqlite3
 import sysconfig
 import stat
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from subprocess import CalledProcessError
@@ -19,6 +21,17 @@ RUNTIME_HOOK_PATH = ROOT_DIR / "_runtime_hook_error_logger.py"
 SUPPORT_DIR = ROOT_DIR / "_build_support"
 APP_EXE_NAME = "FRS_Mercado.exe"
 APP_DIST_DIR = ROOT_DIR / "dist" / "FRS_Mercado"
+# O Portable público recebe uma base de distribuição criada pelo schema oficial,
+# sempre sem dados operacionais ou cadastro comercial de clientes.
+PUBLIC_DELIVERY_DB_PATH = ROOT_DIR / "_build_staging" / "mercado_1.0.18_distribuicao_limpa.db"
+PUBLIC_ASSET_FILES = ("logo.ico", "frsMercado.ico", "frsMercado.jpeg")
+FORBIDDEN_PUBLIC_NAMES = {
+    "credentials.json",
+    "google-services.json",
+    "firebase-admin-key.json",
+    "client_credentials.sec.json",
+    "logo_mercado_mario.jpeg",
+}
 WINDOWS_VERSION_INFO_PATH = ROOT_DIR / "_build_support" / "version_info.txt"
 SECURE_OBFUSCATED_DIR = ROOT_DIR / "_secure_obf"
 
@@ -29,6 +42,11 @@ def _parse_args() -> argparse.Namespace:
         "--secure-obfuscation",
         action="store_true",
         help="Ativa ofuscacao com PyArmor antes do PyInstaller.",
+    )
+    parser.add_argument(
+        "--nuitka",
+        action="store_true",
+        help="Compila o executável final com Nuitka usando a configuração oficial do projeto.",
     )
     parser.add_argument(
         "--skip-deploy",
@@ -63,9 +81,10 @@ def _validate_security_files() -> None:
     db_src = _read_current_file(database_file)
 
     required_login_markers = [
-        # Alineado com a validação corrigida (codigo de 4 segmentos ANO-MES-DIA-HASH).
-        "hash_parte = partes_codigo[3].lower()",
-        "expected_hash[:16] == hash_parte[:16]",
+        # Validacao por periodo: mensal/trimestral/semestral/anual via validar_codigo_ativacao.
+        "def validar_codigo_ativacao",
+        "janelas = ((28, 31), (88, 92), (178, 183), (363, 368))",
+        "ATIVAR LICENCA",
     ]
     missing_login = [m for m in required_login_markers if m not in login_src]
     if missing_login:
@@ -216,11 +235,11 @@ def _build_pyinstaller_args(
         "--windowed",
         "--disable-windowed-traceback",
         "--name=FRS_Mercado",
-        "--icon=assets/logo.ico",
+        f"--icon={ROOT_DIR / 'assets' / 'logo.ico'}",
         f"--version-file={version_file}",
-        "--add-data=assets;assets",
-        "--add-data=version.txt;.",
-        "--add-data=EULA.txt;.",
+        f"--add-data={ROOT_DIR / 'assets'};assets",
+        f"--add-data={ROOT_DIR / 'version.txt'};.",
+        f"--add-data={ROOT_DIR / 'EULA.txt'};.",
         "--hidden-import=hashlib",
         "--hidden-import=uuid",
         "--hidden-import=encodings",
@@ -398,7 +417,7 @@ def _obfuscate_sources_with_pyarmor() -> tuple[str, Path, Path | None]:
 
 
 def _build_with_nuitka_secure_fallback() -> None:
-    print("[AVISO] Fallback ativado: compilacao fechada com Nuitka (PyArmor indisponivel/licenca).")
+    print("[NUITKA] Compilação final oficial com Nuitka.")
     cmd = [
         sys.executable,
         "-m",
@@ -408,7 +427,13 @@ def _build_with_nuitka_secure_fallback() -> None:
         "--windows-console-mode=disable",
         "--enable-plugin=tk-inter",
         "--windows-icon-from-ico=assets/logo.ico",
-        "--include-data-dir=assets=assets",
+        "--company-name=FRS Solutions",
+        "--product-name=FRS Mercado",
+        "--file-version=1.0.18",
+        "--product-version=1.0.18",
+        "--include-data-files=assets/logo.ico=assets/logo.ico",
+        "--include-data-files=assets/frsMercado.ico=assets/frsMercado.ico",
+        "--include-data-files=assets/frsMercado.jpeg=assets/frsMercado.jpeg",
         "--include-data-file=version.txt=version.txt",
         "--include-data-file=EULA.txt=EULA.txt",
         "--output-dir=dist",
@@ -454,23 +479,40 @@ def _es_nome_instalador_acbr(nome: str) -> bool:
 
 
 def _montar_instala_acbr_portatil(portable_dir: Path) -> None:
-    """Prepara <portatil>/instala/ com o binario REAL do motor fiscal para que
-    o runtime (modulo_fiscal/system_monitor) o localize em instala\ACBrMonitor.exe.
-    O instalador (-I/DEMO) jamais é copiado a instala/."""
+    """Prepara <portatil>/instala/ para o runtime fiscal.
+
+    1) Com o motor REAL disponível (_build_support/acbr/ACBrMonitor.exe), copia
+       o binário para instala/ACBrMonitor.exe (motor pronto, sem instalador).
+    2) Sem o motor real, copia o instalador oficial DEMO
+       (_build_support/acbr/ACBrMonitor_Installer.exe) para instala/, para que
+       o runtime (modulo_fiscal/system_monitor) possa instalá-lo no primeiro
+       uso com os mesmos parâmetros do setup Inno (/VERYSILENT /NORESTART).
+    O instalador (-I/DEMO) jamais é usado como motor fiscal."""
     monitor_src = SUPPORT_DIR / "acbr" / "ACBrMonitor.exe"
-    if not (monitor_src.exists() and monitor_src.is_file()):
+    if monitor_src.exists() and monitor_src.is_file():
+        instala_portatil = portable_dir / "instala"
+        instala_portatil.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(monitor_src, instala_portatil / "ACBrMonitor.exe")
         print(
-            "[AVISO] Motor fiscal REAL não disponível para o portátil "
-            "(falta _build_support/acbr/ACBrMonitor.exe). "
-            "Coloca o binário extraído em instala/ACBrMonitor.exe antes do build "
-            "para que o pacote portátil inclua o motor funcional."
+            f"- instala/ACBrMonitor.exe do portátil gerado com o motor real: {monitor_src}"
         )
         return
-    instala_portatil = portable_dir / "instala"
-    instala_portatil.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(monitor_src, instala_portatil / "ACBrMonitor.exe")
+
+    instalador_src = SUPPORT_DIR / "acbr" / "ACBrMonitor_Installer.exe"
+    if instalador_src.exists() and instalador_src.is_file():
+        instala_portatil = portable_dir / "instala"
+        instala_portatil.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(instalador_src, instala_portatil / "ACBrMonitor_Installer.exe")
+        print(
+            "- instala/ACBrMonitor_Installer.exe do portátil gerado com o "
+            f"instalador DEMO oficial (instala no primeiro uso): {instalador_src}"
+        )
+        return
+
     print(
-        f"- instala/ACBrMonitor.exe do portátil gerado com o motor real: {monitor_src}"
+        "[AVISO] Nem o motor REAL nem o instalador DEMO disponíveis em "
+        "_build_support/acbr/. O portátil ficará sem motor fiscal até que o "
+        "instalador oficial seja incluído no payload de suporte antes do build."
     )
 
 
@@ -491,10 +533,16 @@ def _create_portable_package(app_version: str) -> Path:
             destino.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, destino)
 
-    _copy_if_exists(ROOT_DIR / "assets", portable_dir / "assets")
+    for asset_name in PUBLIC_ASSET_FILES:
+        _copy_if_exists(ROOT_DIR / "assets" / asset_name, portable_dir / "assets" / asset_name)
     _copy_if_exists(ROOT_DIR / "version.txt", portable_dir / "version.txt")
     _copy_if_exists(ROOT_DIR / "EULA.txt", portable_dir / "EULA.txt")
     _copy_if_exists(SUPPORT_DIR, portable_dir)
+    _copy_if_exists(ROOT_DIR / "version.txt", portable_dir / "version.txt")
+    _copy_if_exists(ROOT_DIR / "EULA.txt", portable_dir / "EULA.txt")
+    _copy_if_exists(SUPPORT_DIR, portable_dir)
+    # Banco sanitizado final do Mário: somente .db principal, sem WAL/SHM.
+    _seed_delivery_db(portable_dir)
     _montar_instala_acbr_portatil(portable_dir)
 
     installer_dir = ROOT_DIR / "installer"
@@ -504,10 +552,121 @@ def _create_portable_package(app_version: str) -> Path:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in portable_dir.rglob("*"):
             if path.is_file():
+                # Nunca embarcar arquivos journal/WAL/SHM no ZIP de entrega.
+                if path.suffix.lower() in {".wal", ".shm"} or path.name.endswith("-wal") or path.name.endswith("-shm") or path.name.endswith("-journal"):
+                    continue
+                # Allowlist defensiva de segurança para o artefato público.
+                if path.name.lower() in FORBIDDEN_PUBLIC_NAMES:
+                    continue
                 arcname = path.relative_to(portable_dir)
                 zf.write(path, arcname)
 
+    _validate_public_portable(zip_path)
     return zip_path
+
+
+def _validate_public_portable(zip_path: Path) -> None:
+    """Falha se o Portable público contiver segredos, dados privados ou sidecars."""
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = [name.replace("\\", "/") for name in zf.namelist()]
+        forbidden = [
+            name for name in names
+            if Path(name).name.lower() in FORBIDDEN_PUBLIC_NAMES
+            or "logo_mercado_mario" in name.lower()
+            or "mercado_1.0.18_mario" in name.lower()
+            or name.lower().endswith(("-wal", "-shm", "-journal", ".tmp", "~"))
+        ]
+        if forbidden:
+            raise RuntimeError(f"Portable público contém artefatos privados/temporários: {forbidden[:10]}")
+        db_names = [name for name in names if name.lower() == "data/mercado.db"]
+        if len(db_names) != 1:
+            raise RuntimeError(f"Portable público deve conter exatamente um data/mercado.db: {db_names}")
+        db_bytes = zf.read(db_names[0])
+        with tempfile.TemporaryDirectory(prefix="frs_validate_public_") as temp_dir:
+            db_path = Path(temp_dir) / "mercado.db"
+            db_path.write_bytes(db_bytes)
+            conn = sqlite3.connect(str(db_path))
+            try:
+                if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise RuntimeError("Banco público inválido.")
+                if conn.execute("PRAGMA foreign_key_check").fetchall():
+                    raise RuntimeError("Banco público com foreign keys inválidas.")
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                for table in (
+                    "produtos", "vendas", "vendas_dia", "itens_venda", "clientes", "vales",
+                    "vale_itens", "orcamentos", "orcamento_itens", "financeiro",
+                    "caixa_operacao", "caixa_conferencia", "sangrias", "logs_auditoria",
+                    "logs_mentoria", "entradas", "usuarios", "licenca", "fornecedores",
+                    "fornecedor_produtos", "produto_lotes",
+                ):
+                    if table in tables and conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] != 0:
+                        raise RuntimeError(f"Banco público contém dados em {table}.")
+            finally:
+                conn.close()
+
+
+def _create_public_distribution_db() -> Path:
+    """Cria base pública limpa usando database.init_db em APPDATA temporário."""
+    PUBLIC_DELIVERY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate = Path(str(PUBLIC_DELIVERY_DB_PATH) + suffix)
+        if candidate.exists():
+            candidate.unlink()
+
+    with tempfile.TemporaryDirectory(prefix="frs_public_db_") as temp_dir:
+        env = os.environ.copy()
+        env["APPDATA"] = temp_dir
+        code = (
+            "import database; database.init_db(); "
+            "from database_manager import get_db_connection; "
+            "exec('with get_db_connection() as conn:\\n    conn.execute(\"SELECT 1\")')"
+        )
+        subprocess.run([sys.executable, "-c", code], cwd=str(ROOT_DIR), env=env, check=True)
+        source_db = Path(temp_dir) / "FRS_Mercado" / "data" / "mercado.db"
+        if not source_db.exists():
+            raise FileNotFoundError(f"Base pública criada sem arquivo principal: {source_db}")
+        shutil.copy2(source_db, PUBLIC_DELIVERY_DB_PATH)
+
+    conn = sqlite3.connect(str(PUBLIC_DELIVERY_DB_PATH))
+    try:
+        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("Base pública de distribuição passou em integrity_check com falha.")
+        if conn.execute("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError("Base pública de distribuição contém violação de foreign key.")
+        required_zero = (
+            "produtos", "vendas", "vendas_dia", "itens_venda", "clientes", "vales",
+            "vale_itens", "orcamentos", "orcamento_itens", "financeiro",
+            "caixa_operacao", "caixa_conferencia", "sangrias", "logs_auditoria",
+            "logs_mentoria", "entradas", "usuarios", "licenca", "fornecedores",
+            "fornecedor_produtos", "produto_lotes",
+        )
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in required_zero:
+            if table in tables and conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] != 0:
+                raise RuntimeError(f"Base pública contém dados em {table}.")
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(str(PUBLIC_DELIVERY_DB_PATH) + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+    print(f"- Base pública limpa criada: {PUBLIC_DELIVERY_DB_PATH}")
+    return PUBLIC_DELIVERY_DB_PATH
+
+
+def _seed_delivery_db(portable_dir: Path) -> None:
+    """Cria e copia apenas a base pública limpa para o Portable."""
+    source_db = _create_public_distribution_db()
+    data_dir = portable_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    destino = data_dir / "mercado.db"
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate = Path(str(destino) + suffix)
+        if candidate.exists():
+            candidate.unlink()
+    shutil.copy2(source_db, destino)
 
 
 def _prepare_support_payload() -> None:
@@ -517,8 +676,6 @@ def _prepare_support_payload() -> None:
     SUPPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Credenciais e documentos de apoio
-    _copy_if_exists(ROOT_DIR / "credentials.json", SUPPORT_DIR / "credentials.json")
-    _copy_if_exists(ROOT_DIR / "google-services.json", SUPPORT_DIR / "google-services.json")
     _copy_if_exists(ROOT_DIR / "checklist_homologacao.md", SUPPORT_DIR / "checklist_homologacao.md")
 
     # ACBrMonitor: el binario REAL del motor y el instalador se empaquetan por
@@ -552,9 +709,28 @@ def _prepare_support_payload() -> None:
             "contendrá solo el instalador."
         )
 
-    # 2) Instalador (solo para el task all-in-one de Inno Setup). Jamás se usa como motor.
+    # 2) Instalador oficial DEMO (task all-in-one do Inno + runtime portátil).
+    # Jamás se usa como motor. Nome oficial atual primeiro; se a versão mudar,
+    # cai para os mesmos globs do runtime (localizar_instalador_acbr_empacotado).
     acbr_instalador = instala_dir / "ACBrMonitorPLUS-DEMO-1.4.0.467-x86-I.exe"
-    if acbr_instalador.exists() and acbr_instalador.is_file():
+    if not (acbr_instalador.exists() and acbr_instalador.is_file()):
+        acbr_instalador = None
+        if instala_dir.is_dir():
+            for padrao in (
+                "ACBrMonitorPLUS-DEMO-*-I.exe",
+                "ACBrMonitorPLUS*DEMO*.exe",
+                "*ACBrMonitor*Installer*.exe",
+            ):
+                try:
+                    for arq in sorted(instala_dir.glob(padrao)):
+                        if arq.is_file():
+                            acbr_instalador = arq
+                            break
+                except Exception:
+                    continue
+                if acbr_instalador is not None:
+                    break
+    if acbr_instalador is not None and acbr_instalador.exists() and acbr_instalador.is_file():
         _copy_if_exists(acbr_instalador, acbr_dir / "ACBrMonitor_Installer.exe")
         print(f"- Instalador ACBr (solo Inno): {acbr_instalador.name} -> {acbr_dir / 'ACBrMonitor_Installer.exe'}")
     else:
@@ -609,7 +785,9 @@ def main() -> None:
 
     _clean_previous_builds()
     _prepare_support_payload()
-    if cli_args.secure_obfuscation:
+    if cli_args.nuitka:
+        _build_with_nuitka_secure_fallback()
+    elif cli_args.secure_obfuscation:
         try:
             entrypoint, obf_path, obf_hook = _obfuscate_sources_with_pyarmor()
             args = _build_pyinstaller_args(
@@ -640,7 +818,7 @@ def main() -> None:
     print("- Pasta assets -> assets")
     print("- Runtime hook de log -> FRS_Mercado_runtime_error.log em dist/")
     print("- Coleta completa (quando instalado): customtkinter, PIL, reportlab, googleapiclient, google_auth_oauthlib, google.auth, httplib2, requests, bcrypt")
-    print("- Payload suporte (_build_support): credentials.json, google-services.json, checklist_homologacao.md, data/mercado.db, acbr/ACBrMonitor.exe (motor real) + acbr/ACBrMonitor_Installer.exe (solo Inno)")
+    print("- Payload suporte (_build_support): checklist_homologacao.md, acbr/ACBrMonitor_Installer.exe; credenciais nunca incluídas")
     if (ROOT_DIR / "config").exists():
         print("- config/ -> config/")
 

@@ -22,10 +22,26 @@ _build_support/data/
 _build_support/version_info.txt
 *.spec.bak
 
+# Local build/test environments and private distribution artifacts
+build_venv*/
+FRS_Mercado_1.0.12_Teste/
+_build_staging/
+assets/logo_mercado_mario.*
+installer/*Mario*.zip
+produtos_gdoor.csv
+~$*
+*.tmp
+
 # Local runtime data
 logs/
 *.log
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
+*-wal
+*-shm
+*-journal
 *.sqlite
 *.sqlite3
 fiscal_in/

@@ -1,5 +1,5 @@
 #define MyAppName "FRS Mercado"
-#define MyAppVersion "1.0.12"
+#define MyAppVersion "1.0.18"
 #define MyAppPublisher "FRS Solutions"
 #define MyAppExeName "FRS_Mercado.exe"
 #define PaymentURL "https://invoice.infinitepay.io/plans/frsoficinadepesca/avka57U38g"
@@ -32,12 +32,12 @@ Name: "instalaracbr"; Description: "Instalar e configurar ACBrMonitor (motor fis
 
 [Files]
 Source: "dist\FRS_Mercado\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "assets\logo.ico"; DestDir: "{app}\assets"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "assets\frsMercado.ico"; DestDir: "{app}\assets"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "assets\frsMercado.jpeg"; DestDir: "{app}\assets"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "version.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "EULA.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "_build_support\credentials.json"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "_build_support\google-services.json"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "_build_support\checklist_homologacao.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "_build_support\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "_build_support\acbr\ACBrMonitor.exe"; DestDir: "{app}\instala"; Flags: ignoreversion skipifsourcedoesntexist

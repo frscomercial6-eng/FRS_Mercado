@@ -77,3 +77,33 @@
 ## 1.0.12 - 13/09/2026
 - Release automatizada gerada pelo Mestre de Release.
 
+## 1.0.12 - 17/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.13 - 18/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.14 - 18/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.14 - 19/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.15 - 19/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.15 - 22/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.16 - 22/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.16 - 23/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.17 - 23/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.18 - 23/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+

@@ -4,6 +4,7 @@ import queue
 import sqlite3
 import ctypes
 import shutil
+import webbrowser
 from ctypes import wintypes
 from datetime import datetime
 from tkinter import ttk, messagebox, filedialog
@@ -15,10 +16,15 @@ import modulo_financeiro
 from calculadora_tributaria import CalculadoraTributaria
 from database_manager import get_db_connection, obter_caminho_dados, registrar_log
 from modulo_config import carregar_configuracoes, obter_limite_sangria_preventiva
+from modulo_estoque import aplicar_baixa_fefo
 from modulo_fiscal import ModuloExportacaoFiscal, FiscalManager
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
 from webhook_delivery import iniciar_servidor_webhook
 from error_notifier import ensure_error_telemetry_started
+
+
+ROTULO_SEM_CLIENTE_ORCAMENTO = "Sem cliente cadastrado"
+
 
 
 def calcular_impostos_liquidos(valor_venda, ncm):
@@ -35,12 +41,48 @@ def calcular_impostos_liquidos(valor_venda, ncm):
     }
 
 
+def calcular_dv_ean13(base12):
+    """Calcula o dígito verificador EAN-13 (módulo 10) dos 12 primeiros dígitos."""
+    digitos = "".join(ch for ch in str(base12 or "") if ch.isdigit())
+    if len(digitos) != 12:
+        return None
+    soma = sum(int(d) * (1 if i % 2 == 0 else 3) for i, d in enumerate(digitos))
+    return str((10 - (soma % 10)) % 10)
+
+
+def parse_etiqueta_balanca_filizola(codigo):
+    """Parser isolado da etiqueta de peso/preço variável (Filizola Platina 15).
+
+    Formato: 2 | PPPPP | VVVVVV | DV — 13 dígitos numéricos com DV EAN-13 válido,
+    onde PPPPP é o PLU do produto (5 dígitos) e VVVVVV é o total da pesagem em
+    centavos (valor já calculado pela balança).
+
+    Retorna {"plu": "00010", "valor": 1.17} ou None se não for etiqueta válida.
+    O PLU é devolvido EXATO (zeros à esquerda preservados): o chamador deve
+    buscar por igualdade, sem normalizar zeros, sem fallback e sem LIKE.
+    """
+    texto = "".join(ch for ch in str(codigo or "").strip() if ch.isdigit())
+    if len(texto) != 13 or not texto.startswith("2"):
+        return None
+    if calcular_dv_ean13(texto[:12]) != texto[12]:
+        return None
+    plu = texto[1:6]
+    try:
+        valor = round(int(texto[6:12]) / 100.0, 2)
+    except ValueError:
+        return None
+    if valor <= 0:
+        return None
+    return {"plu": plu, "valor": valor}
+
+
 class ModuloPDV(ctk.CTkToplevel):
     def __init__(self, master=None):
         super().__init__(master)
         ensure_error_telemetry_started()
         self.title("Caixa PDV - Mercado FRS")
         self.geometry("1100x750")
+        self.attributes("-fullscreen", True)
 
         self.caixa_id = None
         self.fiscal = ModuloExportacaoFiscal()
@@ -49,6 +91,9 @@ class ModuloPDV(ctk.CTkToplevel):
         self.itens_carrinho = []
         self.item_selecionado_idx = None
         self.multiplicador_atual = 1
+        # FASE 1 UN/KG: modo atual da máscara do campo Qtd do PDV.
+        # "UN" = inteiro (padrao historico); "KG" = decimal ate 3 casas.
+        self._mascara_qtd_pdv = "UN"
         self.limite_caixa_atual = obter_limite_sangria_preventiva()
         self.excesso_caixa_atual = 0.0
         self.fila_pedidos_delivery = queue.Queue()
@@ -56,7 +101,17 @@ class ModuloPDV(ctk.CTkToplevel):
         self.modal_abertura = None
         self._id_after_verificacao_caixa = None
         self.forma_pagamento_selecionada = "DINHEIRO"
+        self.forma_pagamento_selecionada = "DINHEIRO"
+        # Pagamentos recebidos na venda corrente (regra 2): acumulam o valor
+        # efetivamente recebido, sem alterar o total da venda.
+        self.valor_pago_acumulado = 0.0
+        self.pagamentos_parciais = []  # [(forma_pagamento, valor_recebido)]
         self.clientes_orcamento_map = {}
+        # Contextos documentais são opcionais e não participam do pagamento normal.
+        self._vales_para_quitar = []
+        self._operacao_documento_tipo = None
+        self._orcamento_para_vender_id = None
+        self._operacao_vale_cliente_id = None
         self._cache_xml_por_ean = {}
         self._cache_imagens_produtos = {}
         self._grid_pending_refresh = False
@@ -71,8 +126,15 @@ class ModuloPDV(ctk.CTkToplevel):
         self.bind("<F3>", lambda e: self.selecionar_forma_pagamento("DEBITO"))
         self.bind("<F4>", lambda e: self.selecionar_forma_pagamento("CREDITO"))
         self.bind("<F5>", lambda e: self.selecionar_forma_pagamento("VOUCHER"))
+        self.bind("<F6>", lambda e: self.abrir_modal_diversos())
+        self.bind("<F7>", lambda e: self.modal_sangria())
+        self.bind("<F8>", lambda e: self.abrir_modal_pagamento_multiplo())
         self.bind("<F9>", lambda e: self.finalizar_venda_com_confirmacoes())
         self.bind("<F12>", lambda e: self.finalizar_venda_com_confirmacoes())
+        self.bind("<Delete>", self._ao_pressionar_delete_cancelar_item)
+        # Ao minimizar, restaura uma eventual tela de abertura já existente.
+        self.bind("<Map>", self._ao_reexibir_pdv, add="+")
+        self.protocol("WM_DELETE_WINDOW", self._ao_fechar_janela)
 
         try:
             info_webhook = iniciar_servidor_webhook(self._enfileirar_pedido_delivery)
@@ -111,6 +173,23 @@ class ModuloPDV(ctk.CTkToplevel):
         except Exception:
             pass
 
+    def _atualizar_indicadores_caixa(self, aberto):
+        """Sincroniza SOMENTE o indicador compacto do topo com o estado real.
+
+        Usa somente ``caixa_id`` como fonte (aberto = caixa_id não-None).
+        O painel grande (tela do cliente) NÃO é tocado aqui: ele exibe
+        exclusivamente os valores reais da venda (VALOR PAGO | TROCO |
+        TOTAL DA VENDA), atualizados por ``atualizar_troco_display`` e
+        ``atualizar_total_display``.
+        """
+        texto = "🟢 CAIXA ABERTO" if aberto else "🔴 CAIXA FECHADO"
+        cor = "#2ecc71" if aberto else "#ff6666"
+        try:
+            if hasattr(self, "lbl_estado_caixa_topo") and self.lbl_estado_caixa_topo.winfo_exists():
+                self.lbl_estado_caixa_topo.configure(text=texto, text_color=cor)
+        except Exception:
+            pass
+
     def _formatar_moeda_br(self, valor):
         try:
             numero = float(valor)
@@ -144,6 +223,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 self.caixa_id = caixa_id
                 registrar_log(None, "Verificação de Caixa", "Sucesso", f"Caixa {caixa_id} já aberto hoje.")
                 self._set_status(f"Caixa {caixa_id} aberto. PDV pronto para operação.", "#2ecc71")
+                self._atualizar_indicadores_caixa(True)
                 self._safe_focus(self.ent_quantidade)
                 return
 
@@ -162,6 +242,10 @@ class ModuloPDV(ctk.CTkToplevel):
             except Exception as e:
                 registrar_log(None, "Verificação de Caixa", "Falha", f"Erro ao fechar caixa antigo: {e}")
 
+        # Sem caixa válido para hoje: fonte única de verdade = caixa_id None,
+        # com o indicador compacto sincronizado (🔴 CAIXA FECHADO).
+        self.caixa_id = None
+        self._atualizar_indicadores_caixa(False)
         self.abrir_caixa_modal()
 
     def abrir_caixa_modal(self):
@@ -224,10 +308,27 @@ class ModuloPDV(ctk.CTkToplevel):
             aplicar_padrao_entrada_numerica(entry, inteiro=True)
             entries_contagem[valor] = entry
 
+        # ENTRADA DIRETA DO VALOR TOTAL (campo independente e OPCIONAL).
+        # Permite informar o valor inicial do caixa sem usar as denominações.
+        # A contagem por denominações acima permanece exatamente como estava.
+        ctk.CTkFrame(scroll_contagem, height=2, fg_color="#3a3a3a").pack(fill="x", pady=(10, 6))
+
+        frame_abertura_direta = ctk.CTkFrame(scroll_contagem)
+        frame_abertura_direta.pack(fill="x", pady=2)
+        ctk.CTkLabel(
+            frame_abertura_direta,
+            text="Abertura de caixa: R$",
+            width=170,
+            font=("Arial", 13, "bold"),
+        ).pack(side="left", padx=10)
+        entry_abertura = ctk.CTkEntry(frame_abertura_direta, width=150, placeholder_text="Valor total")
+        entry_abertura.pack(side="right", padx=10)
+        aplicar_padrao_entrada_numerica(entry_abertura, inteiro=False, casas_decimais=2)
+
         primeira_entry = next(iter(entries_contagem.values()), None)
 
         def confirmar_abertura():
-            total_inicial = 0.0
+            total_denominacoes = 0.0
             try:
                 for valor, entry in entries_contagem.items():
                     qtd = parse_numero(
@@ -238,7 +339,25 @@ class ModuloPDV(ctk.CTkToplevel):
                         inteiro=True,
                         minimo=0,
                     )
-                    total_inicial += float(valor) * qtd
+                    total_denominacoes += float(valor) * qtd
+
+                # PREVALÊNCIA DO VALOR DIRETO, sem conciliação: se o operador
+                # digitou o total no campo "Abertura de caixa: R$", esse valor é
+                # o saldo inicial. Campo em branco => vale a contagem por
+                # denominações (fluxo antigo, inalterado).
+                texto_abertura = entry_abertura.get().strip()
+                if texto_abertura:
+                    total_inicial = float(
+                        parse_numero(
+                            texto_abertura,
+                            "Abertura de caixa",
+                            permitir_vazio=True,
+                            default=0.0,
+                            minimo=0,
+                        )
+                    )
+                else:
+                    total_inicial = total_denominacoes
 
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
@@ -252,8 +371,12 @@ class ModuloPDV(ctk.CTkToplevel):
                 self.modal_abertura.destroy()
                 self.modal_abertura = None
                 total_fmt = self._formatar_moeda_br(total_inicial)
-                self._set_status(f"Caixa aberto com {total_fmt}", "#2ecc71")
+                # O status compacto NÃO exibe o valor do saldo inicial: o
+                # saldo pertence ao caixa (persistido em caixa_operacao e
+                # registrado no log de auditoria logo abaixo).
+                self._set_status(f"Caixa {self.caixa_id} aberto. PDV pronto para operação.", "#2ecc71")
                 registrar_log(None, "Abertura de Caixa", "Sucesso", f"Caixa {self.caixa_id} aberto com {total_fmt}")
+                self._atualizar_indicadores_caixa(True)
                 self._safe_focus(self.ent_quantidade)
             except Exception as e:
                 self._set_status(f"Erro ao abrir caixa: {e}", "#ff6666")
@@ -276,12 +399,103 @@ class ModuloPDV(ctk.CTkToplevel):
                 pass
 
         def _on_close_modal_abertura():
-            # Não permite seguir no PDV sem abertura de caixa.
-            self._set_status("Abertura de caixa é obrigatória para operar o PDV.", "#ff6666")
-            _focar_modal_abertura()
+            # X cancela a abertura (sem confirmação extra): NENHUM caixa é
+            # criado, ``self.caixa_id`` permanece None e o indicador segue
+            # em 🔴 CAIXA FECHADO. O caixa só nasce no CONFIRMAR ABERTURA.
+            try:
+                self.modal_abertura.grab_release()
+            except Exception:
+                pass
+            try:
+                self.modal_abertura.destroy()
+            except Exception:
+                pass
+            self.modal_abertura = None
+            self.caixa_id = None
+            self._atualizar_indicadores_caixa(False)
+            self._set_status("Abertura de caixa cancelada. Caixa permanece fechado.", "#f1c40f")
 
         self.modal_abertura.protocol("WM_DELETE_WINDOW", _on_close_modal_abertura)
         self.after(10, _focar_modal_abertura)
+
+    def _carregar_logo_mercado(self):
+        """Localiza o logo do mercado (logo_mercado_mario.<ext>) somente para leitura.
+
+        Procura na pasta Assets do projeto (e, em build empacotado, na pasta do
+        executável), preservando a extensão existente do arquivo. Não grava
+        nada em disco e não depende de banco de dados.
+        """
+        import sys
+
+        nome_base = "logo_mercado_mario"
+        extensoes_imagem = (".jpeg", ".jpg", ".png", ".bmp", ".gif", ".webp")
+        diretorios = []
+        try:
+            diretorios.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets"))
+        except Exception:
+            pass
+        try:
+            diretorios.append(os.path.join(os.getcwd(), "assets"))
+        except Exception:
+            pass
+        if getattr(sys, "frozen", False):
+            try:
+                diretorios.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "assets"))
+            except Exception:
+                pass
+        for diretorio in diretorios:
+            try:
+                if not os.path.isdir(diretorio):
+                    continue
+                for nome in os.listdir(diretorio):
+                    base, ext = os.path.splitext(nome)
+                    if base == nome_base and ext.lower() in extensoes_imagem:
+                        caminho = os.path.join(diretorio, nome)
+                        try:
+                            return Image.open(caminho)
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+        return None
+
+    def _posicionar_logo_fundo(self):
+        """Exibe o logo do mercado como fundo centralizado do PDV.
+
+        O logo é posicionado atrás dos widgets (lower), centralizado e
+        proporcional, sem cobrir campos, botões ou lista de produtos, e
+        sem interferir no foco do teclado ou no scanner.
+        """
+        if not getattr(self, "main_pdv", None):
+            return
+        pil_img = self._carregar_logo_mercado()
+        if pil_img is None:
+            return
+        try:
+            largura_area = int(self.main_pdv.winfo_width() or 0)
+            altura_area = int(self.main_pdv.winfo_height() or 0)
+            if largura_area < 50:
+                largura_area = 1100
+            if altura_area < 50:
+                altura_area = 750
+            max_w = max(int(largura_area * 0.60), 1)
+            max_h = max(int(altura_area * 0.60), 1)
+            ratio = min(max_w / float(pil_img.width), max_h / float(pil_img.height))
+            w = max(1, int(pil_img.width * ratio))
+            h = max(1, int(pil_img.height * ratio))
+            if pil_img.mode != "RGBA":
+                pil_img = pil_img.convert("RGBA")
+            logo_img = pil_img.resize((w, h), getattr(Image, "Resampling", Image).LANCZOS)
+            self._logo_ctk_image = ctk.CTkImage(
+                light_image=logo_img, dark_image=logo_img, size=(w, h)
+            )
+            self._logo_id = ctk.CTkLabel(
+                self.main_pdv, text="", image=self._logo_ctk_image, fg_color="transparent"
+            )
+            self._logo_id.place(relx=0.5, rely=0.5, anchor="center")
+            self._logo_id.lower()
+        except Exception:
+            pass
 
     def configurar_interface_pdv(self):
         for widget in self.winfo_children():
@@ -303,7 +517,8 @@ class ModuloPDV(ctk.CTkToplevel):
             command=self._alternar_menu_operacoes,
         )
         self.btn_menu_retratil.pack(side="left", padx=(12, 4), pady=8)
-        ctk.CTkLabel(self.top_bar, text="CAIXA LIVRE", font=("Roboto", 16, "bold"), text_color="#2ecc71").pack(side="left", padx=6)
+        self.lbl_estado_caixa_topo = ctk.CTkLabel(self.top_bar, text="🔴 CAIXA FECHADO", font=("Roboto", 16, "bold"), text_color="#ff6666")
+        self.lbl_estado_caixa_topo.pack(side="left", padx=6)
 
         # Menu retrátil de operações secundárias (abre/fecha pelo ícone "≡").
         self.menu_operacoes = ctk.CTkFrame(self.main_pdv, fg_color="#181818", corner_radius=0, height=0)
@@ -316,18 +531,26 @@ class ModuloPDV(ctk.CTkToplevel):
         linha_superior = ctk.CTkFrame(self.menu_operacoes_miolo, fg_color="transparent")
         linha_superior.pack(fill="x", pady=(0, 6))
         ctk.CTkLabel(linha_superior, text="OPERAÇÕES", font=("Roboto", 12, "bold"), text_color="gray").pack(side="left", padx=(0, 12))
-        ctk.CTkButton(linha_superior, text="SANGRIA", fg_color="#c0392b", width=130, command=self.modal_sangria).pack(side="left", padx=6)
+        ctk.CTkButton(linha_superior, text="SANGRIA (F7)", fg_color="#c0392b", width=140, command=self.modal_sangria).pack(side="left", padx=6)
         ctk.CTkButton(linha_superior, text="SUPRIMENTO", fg_color="#2980b9", width=150, command=self.modal_suprimento).pack(side="left", padx=6)
-        ctk.CTkButton(linha_superior, text="CANCELAR ITEM", fg_color="#d35400", width=150, command=self.cancelar_item).pack(side="left", padx=6)
+        ctk.CTkButton(linha_superior, text="CANCELAR ITEM (DEL)", fg_color="#d35400", width=170, command=self.cancelar_item).pack(side="left", padx=6)
         ctk.CTkButton(linha_superior, text="FECHAR CAIXA", fg_color="#8e44ad", width=150, command=self.processar_fechamento_inteligente).pack(side="left", padx=6)
 
         linha_orcamento = ctk.CTkFrame(self.menu_operacoes_miolo, fg_color="transparent")
         linha_orcamento.pack(fill="x", pady=(4, 0))
-        ctk.CTkLabel(linha_orcamento, text="CLIENTE (ORÇAMENTO)", font=("Roboto", 11, "bold"), text_color="gray").pack(side="left", padx=(0, 10))
-        self.combo_cliente_orcamento = ctk.CTkOptionMenu(linha_orcamento, values=["Sem clientes cadastrados"], width=210)
+        ctk.CTkLabel(linha_orcamento, text="CLIENTE (ORÇAMENTO / VALE)", font=("Roboto", 11, "bold"), text_color="gray").pack(side="left", padx=(10, 10))
+        self.combo_cliente_orcamento = ctk.CTkOptionMenu(linha_orcamento, values=[ROTULO_SEM_CLIENTE_ORCAMENTO], width=220)
         self.combo_cliente_orcamento.pack(side="left", padx=6)
-        ctk.CTkButton(linha_orcamento, text="SALVAR ORÇAMENTO", fg_color="#1565c0", width=160, command=self.salvar_orcamento_atual).pack(side="left", padx=6)
-        ctk.CTkButton(linha_orcamento, text="ABRIR ORÇAMENTOS", fg_color="#5d4037", width=160, command=self.abrir_tela_orcamentos).pack(side="left", padx=6)
+        ctk.CTkButton(linha_orcamento, text="ATUALIZAR CLIENTES", fg_color="#455a64", width=150, command=lambda: self._carregar_clientes_orcamento(preservar_selecao=True)).pack(side="left", padx=6)
+        ctk.CTkButton(linha_orcamento, text="CADASTRO RÁPIDO", fg_color="#00897b", width=150, command=self.cadastrar_cliente_rapido).pack(side="left", padx=6)
+
+        linha_documentos = ctk.CTkFrame(self.menu_operacoes_miolo, fg_color="transparent")
+        linha_documentos.pack(fill="x", pady=(4, 0))
+        ctk.CTkLabel(linha_documentos, text="DOCUMENTOS", font=("Roboto", 11, "bold"), text_color="gray").pack(side="left", padx=(10, 10))
+        ctk.CTkButton(linha_documentos, text="SALVAR ORÇAMENTO", fg_color="#1565c0", width=160, command=self.salvar_orcamento_atual).pack(side="left", padx=6)
+        ctk.CTkButton(linha_documentos, text="ABRIR ORÇAMENTO", fg_color="#5d4037", width=160, command=self.abrir_orcamento_por_numero).pack(side="left", padx=6)
+        ctk.CTkButton(linha_documentos, text="SALVAR VALE", fg_color="#ef6c00", width=140, command=self.salvar_vale_atual).pack(side="left", padx=6)
+        ctk.CTkButton(linha_documentos, text="ABRIR VALE", fg_color="#6a1b9a", width=140, command=self.abrir_vale_por_cliente).pack(side="left", padx=6)
         self._carregar_clientes_orcamento()
 
         self.centro_container = ctk.CTkFrame(self.main_pdv, fg_color="black")
@@ -344,6 +567,7 @@ class ModuloPDV(ctk.CTkToplevel):
         self.ent_quantidade.bind("<Return>", lambda _e: self._safe_focus(self.ent_cod_barras))
         self.ent_quantidade.bind("<Tab>", self._focar_produto_pelo_tab)
         aplicar_padrao_entrada_numerica(self.ent_quantidade, inteiro=True)
+        self._mascara_qtd_pdv = "UN"
         # Campo de quantidade inicia vazio; vazio assume 1 por padrão.
         self.ent_quantidade.delete(0, "end")
 
@@ -378,7 +602,18 @@ class ModuloPDV(ctk.CTkToplevel):
         self.ent_valor_pago = ctk.CTkEntry(self.scroll_operacoes, width=180, placeholder_text="0,00")
         self.ent_valor_pago.pack(padx=10, pady=(0, 8))
         self.ent_valor_pago.bind("<KeyRelease>", lambda _e: self.atualizar_troco_display())
+        self.ent_valor_pago.bind("<Return>", lambda _e: self.acrescentar_valor_pago())
         aplicar_padrao_entrada_numerica(self.ent_valor_pago, inteiro=False, casas_decimais=2)
+
+        self.btn_acrescentar_pago = ctk.CTkButton(
+            self.scroll_operacoes,
+            text="ACRESCENTAR\nPAGAMENTO",
+            fg_color="#2c3e50",
+            height=40,
+            font=("Roboto", 11, "bold"),
+            command=self.acrescentar_valor_pago,
+        )
+        self.btn_acrescentar_pago.pack(fill="x", padx=10, pady=(0, 8))
 
         ctk.CTkLabel(self.scroll_operacoes, text="PAGAMENTO RAPIDO", font=("Roboto", 12, "bold"), text_color="gray").pack(pady=(12, 10))
         ctk.CTkButton(self.scroll_operacoes, text="DINHEIRO (F1)", fg_color="#2c3e50", command=lambda: self.selecionar_forma_pagamento("DINHEIRO")).pack(fill="x", padx=10, pady=2)
@@ -389,38 +624,85 @@ class ModuloPDV(ctk.CTkToplevel):
 
         ctk.CTkButton(
             self.scroll_operacoes,
+            text="DIVERSOS (F6)",
+            fg_color="#8e44ad",
+            height=30,
+            font=("Roboto", 12, "bold"),
+            command=self.abrir_modal_diversos,
+        ).pack(fill="x", padx=10, pady=(8, 2))
+
+        ctk.CTkButton(
+            self.scroll_operacoes,
+            text="MÚLTIPLO PAGTO (F8)",
+            fg_color="#2471a3",
+            height=30,
+            font=("Roboto", 12, "bold"),
+            command=self.abrir_modal_pagamento_multiplo,
+        ).pack(fill="x", padx=10, pady=(2, 2))
+
+        ctk.CTkButton(
+            self.scroll_operacoes,
             text="FINALIZAR VENDA (F9)",
             fg_color="#27ae60",
-            height=60,
+            height=44,
             font=("Roboto", 14, "bold"),
             command=self.finalizar_venda_com_confirmacoes,
         ).pack(fill="x", padx=10, pady=(16, 8))
 
-        ctk.CTkButton(self.scroll_operacoes, text="VOLTAR AO MENU", fg_color="#4a4a4a", command=self.voltar_ao_menu).pack(fill="x", padx=10, pady=(0, 12))
+        ctk.CTkButton(
+            self.scroll_operacoes,
+            text="MINIMIZAR",
+            fg_color="#4a4a4a",
+            command=self._minimizar_pdv,
+        ).pack(fill="x", padx=10, pady=(0, 12))
 
         self.footer = ctk.CTkFrame(self.main_pdv, height=110, fg_color="#1a1a1a", corner_radius=0)
         self.footer.pack(side="bottom", fill="x")
 
         self.footer_content = ctk.CTkFrame(self.footer, fg_color="transparent")
-        self.footer_content.pack(expand=True, pady=6)
+        self.footer_content.pack(expand=True, fill="both", pady=6)
+
+        # === PAINEL GRANDE — TELA DO CLIENTE (3 áreas horizontais equivalentes) ===
+        # ESQUERDA: VALOR PAGO (amarelo) | CENTRO: TROCO (vermelho) | DIREITA: TOTAL DA VENDA (verde).
+        # Este painel é da VENDA: o status do caixa fica SÓ no indicador compacto do topo.
+        self.pago_frame = ctk.CTkFrame(self.footer_content, fg_color="transparent")
+        self.pago_frame.pack(side="left", expand=True, fill="both")
+
+        ctk.CTkLabel(self.pago_frame, text="VALOR PAGO", font=("Roboto", 12, "bold"), text_color="gray").pack(pady=(10, 0))
+        self.lbl_pago_venda = ctk.CTkLabel(
+            self.pago_frame,
+            text="R$ 0,00",
+            font=("Roboto", 40, "bold"),
+            text_color="#f1c40f",
+        )
+        self.lbl_pago_venda.pack()
+
+        self.lbl_restante_venda = ctk.CTkLabel(
+            self.pago_frame,
+            text="",
+            font=("Roboto", 12, "bold"),
+            text_color="#f39c12",
+        )
+        self.lbl_restante_venda.pack()
 
         self.troco_frame = ctk.CTkFrame(self.footer_content, fg_color="transparent")
-        self.troco_frame.pack(side="left", padx=(0, 42))
+        self.troco_frame.pack(side="left", expand=True, fill="both")
 
+        ctk.CTkLabel(self.troco_frame, text="TROCO", font=("Roboto", 12, "bold"), text_color="gray").pack(pady=(10, 0))
         self.lbl_troco_venda = ctk.CTkLabel(
             self.troco_frame,
-            text="TROCO R$ 0,00",
-            font=("Roboto", 36, "bold"),
+            text="R$ 0,00",
+            font=("Roboto", 40, "bold"),
             text_color="#e74c3c",
         )
-        self.lbl_troco_venda.pack(anchor="w", pady=(18, 8))
+        self.lbl_troco_venda.pack()
 
         self.total_frame = ctk.CTkFrame(self.footer_content, fg_color="transparent")
-        self.total_frame.pack(side="left")
+        self.total_frame.pack(side="left", expand=True, fill="both")
 
-        ctk.CTkLabel(self.total_frame, text="TOTAL DA VENDA", font=("Roboto", 12, "bold"), text_color="gray").pack(anchor="e")
-        self.lbl_total_venda = ctk.CTkLabel(self.total_frame, text="R$ 0,00", font=("Roboto", 64, "bold"), text_color="#d8ff3f")
-        self.lbl_total_venda.pack(anchor="e")
+        ctk.CTkLabel(self.total_frame, text="TOTAL DA VENDA", font=("Roboto", 12, "bold"), text_color="gray").pack(pady=(10, 0))
+        self.lbl_total_venda = ctk.CTkLabel(self.total_frame, text="R$ 0,00", font=("Roboto", 40, "bold"), text_color="#2ecc71")
+        self.lbl_total_venda.pack()
 
         self.lbl_status_operacao = ctk.CTkLabel(self.main_pdv, text="PDV pronto para operação.", font=("Arial", 11, "bold"), text_color="#2ecc71")
         self.lbl_status_operacao.pack(side="bottom", pady=(0, 4))
@@ -435,6 +717,23 @@ class ModuloPDV(ctk.CTkToplevel):
         self.lbl_aviso_limite.pack(side="bottom", pady=(0, 4))
         self.lbl_aviso_limite.pack_forget()
         self.lbl_aviso_limite.bind("<Button-1>", lambda e: self.modal_sangria(preencher_excesso=True))
+
+        # === RODAPÉ FRS Solutions (identidade, discreta) ===
+        self.lbl_rodape_frs = ctk.CTkLabel(
+            self.main_pdv,
+            text="Desenvolvido por FRS Solutions — www.frssolutions.com.br",
+            font=("Arial", 9, "normal"),
+            text_color="#7f8c8d",
+            cursor="hand2",
+        )
+        self.lbl_rodape_frs.pack(side="bottom", pady=(0, 2))
+        self.lbl_rodape_frs.bind(
+            "<Button-1>",
+            lambda e: webbrowser.open("https://www.frssolutions.com.br/"),
+        )
+
+        # Posiciona o logo do mercado como fundo (após widgets principais)
+        self._safe_after(100, self._posicionar_logo_fundo)
 
         self._safe_focus(self.ent_quantidade)
         self._safe_after(300, self._processar_fila_delivery)
@@ -454,7 +753,24 @@ class ModuloPDV(ctk.CTkToplevel):
         except Exception:
             pass
 
+    def _avanco_tab_para_valor_pago(self):
+        """TAB → VALOR PAGO somente com a venda pronta em DINHEIRO (regra 4).
+
+        Demais formas (PIX/DÉBITO/CRÉDITO/VOUCHER/DIVERSOS/MÚLTIPLO)
+        mantêm exatamente o comportamento de TAB anterior.
+        """
+        try:
+            return (
+                str(self.forma_pagamento_selecionada or "").strip().upper() == "DINHEIRO"
+                and bool(self.itens_carrinho)
+            )
+        except Exception:
+            return False
+
     def _focar_produto_pelo_tab(self, _event=None):
+        if self._avanco_tab_para_valor_pago():
+            self._safe_focus(self.ent_valor_pago)
+            return "break"
         self._safe_focus(self.ent_cod_barras)
         return "break"
 
@@ -561,7 +877,53 @@ class ModuloPDV(ctk.CTkToplevel):
         except Exception:
             pass
 
-    def _carregar_clientes_orcamento(self):
+    def _selecionar_cliente_orcamento(self, cliente_id):
+        if cliente_id is None:
+            self.combo_cliente_orcamento.set(ROTULO_SEM_CLIENTE_ORCAMENTO)
+            return
+        self._carregar_clientes_orcamento(preservar_selecao=False)
+        for label, mapped_id in self.clientes_orcamento_map.items():
+            if mapped_id == int(cliente_id):
+                self.combo_cliente_orcamento.set(label)
+                return
+
+    def cadastrar_cliente_rapido(self):
+        nome = ctk.CTkInputDialog(
+            text="Informe somente o NOME do cliente:",
+            title="Cadastro rápido de cliente",
+        ).get_input()
+        nome = str(nome or "").strip()
+        if not nome:
+            return None
+        try:
+            with get_db_connection() as conn:
+                existente = conn.execute(
+                    "SELECT id FROM clientes WHERE nome = ? COLLATE NOCASE LIMIT 1",
+                    (nome,),
+                ).fetchone()
+                if existente:
+                    cliente_id = int(existente[0])
+                else:
+                    cursor = conn.execute("INSERT INTO clientes (nome) VALUES (?)", (nome,))
+                    cliente_id = int(cursor.lastrowid)
+            self._carregar_clientes_orcamento(preservar_selecao=False)
+            self._selecionar_cliente_orcamento(cliente_id)
+            registrar_log(None, "PDV Cliente", "Sucesso", f"Cadastro rápido: cliente {cliente_id} - {nome}")
+            self._set_status(f"Cliente cadastrado e selecionado: {nome}", "#2ecc71")
+            return cliente_id
+        except Exception as e:
+            self._set_status(f"Falha no cadastro rápido: {e}", "#ff6666")
+            registrar_log(None, "PDV Cliente", "Falha", f"Erro: {e}")
+            return None
+
+    def _carregar_clientes_orcamento(self, preservar_selecao=False):
+        selecao_anterior = None
+        if preservar_selecao:
+            try:
+                selecao_anterior = self.combo_cliente_orcamento.get()
+            except Exception:
+                selecao_anterior = None
+
         try:
             with get_db_connection() as conn:
                 clientes = conn.execute(
@@ -570,29 +932,121 @@ class ModuloPDV(ctk.CTkToplevel):
         except Exception:
             clientes = []
 
-        self.clientes_orcamento_map = {}
-        labels = []
+        self.clientes_orcamento_map = {ROTULO_SEM_CLIENTE_ORCAMENTO: None}
+        labels = [ROTULO_SEM_CLIENTE_ORCAMENTO]
         for cliente_id, nome in clientes:
             label = f"{cliente_id} - {nome}"
             self.clientes_orcamento_map[label] = int(cliente_id)
             labels.append(label)
 
-        if not labels:
-            labels = ["Sem clientes cadastrados"]
-
         self.combo_cliente_orcamento.configure(values=labels)
-        self.combo_cliente_orcamento.set(labels[0])
+        self.combo_cliente_orcamento.set(
+            selecao_anterior if selecao_anterior in labels else ROTULO_SEM_CLIENTE_ORCAMENTO
+        )
+
+    def _cliente_selecionado_id(self):
+        if not hasattr(self, "combo_cliente_orcamento"):
+            return None
+        return self.clientes_orcamento_map.get(self.combo_cliente_orcamento.get())
+
+    def _preparar_carrinho_documental(self, itens, cliente_id, documento_tipo, vales_ids=None, orcamento_id=None):
+        if self.itens_carrinho and not messagebox.askyesno(
+            "Carregar documento",
+            "O carrinho atual possui itens. Substituí-lo pelo documento selecionado?",
+            parent=self,
+        ):
+            return False
+        self.itens_carrinho = list(itens)
+        self.item_selecionado_idx = None
+        self._vales_para_quitar = list(vales_ids or [])
+        self._operacao_documento_tipo = documento_tipo
+        self._orcamento_para_vender_id = int(orcamento_id) if documento_tipo == "ORCAMENTO" and orcamento_id else None
+        self._operacao_vale_cliente_id = int(cliente_id) if documento_tipo == "VALE" and cliente_id else None
+        self._selecionar_cliente_orcamento(cliente_id)
+        if hasattr(self, "ent_valor_pago"):
+            self.ent_valor_pago.delete(0, "end")
+        if hasattr(self, "lbl_troco_venda"):
+            self.lbl_troco_venda.configure(text="R$ 0,00")
+        if hasattr(self, "limpar_pagamentos_recebidos"):
+            self.limpar_pagamentos_recebidos()
+        self._renderizar_carrinho()
+        self.atualizar_total_display()
+        if getattr(self, "_menu_operacoes_aberto", False):
+            self._alternar_menu_operacoes()
+        if hasattr(self, "_safe_focus"):
+            self._safe_focus(getattr(self, "ent_cod_barras", None))
+        return True
+
+    def abrir_orcamento_por_numero(self, numero_orcamento=None):
+        if numero_orcamento is None:
+            entrada = ctk.CTkInputDialog(
+                text="NÚMERO DO ORÇAMENTO:",
+                title="ABRIR ORÇAMENTO",
+            ).get_input()
+        else:
+            entrada = numero_orcamento
+        try:
+            orcamento_id = int(str(entrada or "").strip())
+        except (TypeError, ValueError):
+            self._set_status("Número de orçamento inválido.", "#ff6666")
+            return
+        try:
+            with get_db_connection() as conn:
+                cabecalho = conn.execute(
+                    "SELECT id, cliente_id, status FROM orcamentos WHERE id = ?",
+                    (orcamento_id,),
+                ).fetchone()
+                if not cabecalho:
+                    messagebox.showwarning("Abrir orçamento", "Orçamento não encontrado.", parent=self)
+                    return
+                if str(cabecalho[2]) != "ORCAMENTO":
+                    messagebox.showinfo("Abrir orçamento", "Este orçamento já foi convertido em venda.", parent=self)
+                    return
+                itens = conn.execute(
+                    """
+                    SELECT produto_id, codigo_barras, descricao_produto, ncm,
+                           quantidade, unidade, valor_unitario, subtotal
+                    FROM orcamento_itens
+                    WHERE orcamento_id = ?
+                    ORDER BY id
+                    """,
+                    (orcamento_id,),
+                ).fetchall()
+            if not itens:
+                messagebox.showwarning("Abrir orçamento", "Orçamento sem itens.", parent=self)
+                return
+            itens_carrinho = [
+                {
+                    "id": item[0], "barcode": item[1] or "", "nome": item[2],
+                    "ncm": item[3] or "", "quantidade": float(item[4] or 0.0),
+                    "unidade": str(item[5] or "UN").upper(),
+                    "preco": float(item[6] or 0.0), "total": float(item[7] or 0.0),
+                    "origem": "ORCAMENTO",
+                }
+                for item in itens
+            ]
+            if self._preparar_carrinho_documental(
+                itens_carrinho, cabecalho[1], "ORCAMENTO", orcamento_id=orcamento_id
+            ):
+                self._set_status(f"Orçamento #{orcamento_id} carregado no PDV.", "#2ecc71")
+        except Exception as e:
+            self._set_status(f"Falha ao abrir orçamento: {e}", "#ff6666")
+            registrar_log(None, "PDV Orçamento", "Falha", f"Erro ao abrir: {e}")
 
     def salvar_orcamento_atual(self):
         if not self.itens_carrinho:
             self._set_status("Adicione itens antes de salvar orçamento.", "#ff6666")
             return
 
-        cliente_label = self.combo_cliente_orcamento.get() if hasattr(self, "combo_cliente_orcamento") else ""
+        # Recarrega a lista no ato do salvamento para não manter um cache antigo
+        # de clientes cadastrados em outra tela.
+        self._carregar_clientes_orcamento(preservar_selecao=True)
+
+        cliente_label = self.combo_cliente_orcamento.get() if hasattr(self, "combo_cliente_orcamento") else ROTULO_SEM_CLIENTE_ORCAMENTO
+        if cliente_label not in self.clientes_orcamento_map:
+            self._carregar_clientes_orcamento(preservar_selecao=False)
+            cliente_label = ROTULO_SEM_CLIENTE_ORCAMENTO
         cliente_id = self.clientes_orcamento_map.get(cliente_label)
-        if not cliente_id:
-            self._set_status("Selecione um cliente válido para o orçamento.", "#ff6666")
-            return
 
         valor_total = round(sum(float(i.get("total", 0.0)) for i in self.itens_carrinho), 2)
         valor_impostos = 0.0
@@ -607,15 +1061,23 @@ class ModuloPDV(ctk.CTkToplevel):
         if valor_liquido < 0:
             valor_liquido = 0.0
 
+        from modulo_orcamento import OBSERVACOES_PADRAO_ORCAMENTO, solicitar_observacoes_orcamento
+
+        observacao = solicitar_observacoes_orcamento(self, OBSERVACOES_PADRAO_ORCAMENTO)
+        if observacao is None:
+            return
+
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    INSERT INTO orcamentos (cliente_id, status, valor_total, valor_impostos_retidos, valor_liquido)
-                    VALUES (?, 'ORCAMENTO', ?, ?, ?)
+                    INSERT INTO orcamentos (
+                        cliente_id, status, valor_total,
+                        valor_impostos_retidos, valor_liquido, observacao
+                    ) VALUES (?, 'ORCAMENTO', ?, ?, ?, ?)
                     """,
-                    (cliente_id, valor_total, valor_impostos, valor_liquido),
+                    (cliente_id, valor_total, valor_impostos, valor_liquido, observacao),
                 )
                 orcamento_id = cursor.lastrowid
 
@@ -630,9 +1092,9 @@ class ModuloPDV(ctk.CTkToplevel):
                         """
                         INSERT INTO orcamento_itens (
                             orcamento_id, produto_id, codigo_barras, descricao_produto, ncm,
-                            quantidade, valor_unitario, subtotal
+                            quantidade, unidade, valor_unitario, subtotal
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             orcamento_id,
@@ -640,7 +1102,8 @@ class ModuloPDV(ctk.CTkToplevel):
                             str(item.get("barcode", "") or ""),
                             str(item.get("nome", "Item")),
                             str(item.get("ncm", "") or ""),
-                            int(item.get("quantidade", 0) or 0),
+                            round(float(item.get("quantidade", 0) or 0), 3),
+                            str(item.get("unidade", "UN") or "UN").upper(),
                             float(item.get("preco", 0.0) or 0.0),
                             float(item.get("total", 0.0) or 0.0),
                         ),
@@ -650,15 +1113,114 @@ class ModuloPDV(ctk.CTkToplevel):
                 f"Orçamento #{orcamento_id} salvo | Total: {self._formatar_moeda_br(valor_total)}",
                 "#4aa3ff",
             )
-            registrar_log(None, "PDV Orçamento", "Sucesso", f"Orçamento {orcamento_id} salvo para cliente {cliente_id}")
+            registrar_log(None, "PDV Orçamento", "Sucesso", f"Orçamento {orcamento_id} salvo para cliente {cliente_id or 'sem cliente'}")
+            from modulo_orcamento import gerar_pdf_orcamento
+
+            try:
+                caminho_pdf = gerar_pdf_orcamento(
+                    orcamento_id,
+                    config=self.config,
+                    parent=self,
+                    notificar=False,
+                )
+                if caminho_pdf:
+                    registrar_log(None, "PDV Orçamento", "Sucesso", f"PDF salvo: {caminho_pdf}")
+                    self._set_status(
+                        f"Orçamento #{orcamento_id} salvo | PDF: {caminho_pdf}",
+                        "#4aa3ff",
+                    )
+                else:
+                    self._set_status(
+                        f"Orçamento #{orcamento_id} salvo; geração de PDF cancelada.",
+                        "#f1c40f",
+                    )
+            except Exception as e:
+                registrar_log(None, "PDV Orçamento", "Aviso", f"Orçamento {orcamento_id} salvo, mas PDF falhou: {e}")
+                self._set_status(f"Orçamento #{orcamento_id} salvo; PDF não gerado: {e}", "#f1c40f")
+            self._limpar_contexto_documental()
             self.itens_carrinho = []
             self._renderizar_carrinho()
             self.atualizar_total_display()
             self.ent_valor_pago.delete(0, "end")
-            self.lbl_troco_venda.configure(text="TROCO R$ 0,00")
+            self.lbl_troco_venda.configure(text="R$ 0,00")
+            self.limpar_pagamentos_recebidos()
         except Exception as e:
             self._set_status(f"Falha ao salvar orçamento: {e}", "#ff6666")
             registrar_log(None, "PDV Orçamento", "Falha", f"Erro ao salvar orçamento: {e}")
+
+    def _limpar_contexto_documental(self):
+        self._vales_para_quitar = []
+        self._operacao_documento_tipo = None
+        self._orcamento_para_vender_id = None
+        self._operacao_vale_cliente_id = None
+
+    def _garantir_cliente_para_vale(self):
+        if hasattr(self, "combo_cliente_orcamento") and hasattr(self, "clientes_orcamento_map"):
+            self._carregar_clientes_orcamento(preservar_selecao=True)
+        cliente_id = self._cliente_selecionado_id()
+        if cliente_id:
+            return cliente_id
+        self._set_status("Selecione um cliente ou use CADASTRO RÁPIDO.", "#f1c40f")
+        return self.cadastrar_cliente_rapido()
+
+    def salvar_vale_atual(self):
+        if not self.itens_carrinho:
+            self._set_status("Adicione itens antes de salvar o Vale.", "#ff6666")
+            return None
+        cliente_id = self._garantir_cliente_para_vale()
+        if not cliente_id:
+            return None
+        total = round(sum(float(item.get("total", 0.0) or 0.0) for item in self.itens_carrinho), 2)
+        try:
+            with get_db_connection() as conn:
+                numero = int(conn.execute("SELECT COALESCE(MAX(numero), 0) + 1 FROM vales").fetchone()[0])
+                cursor = conn.execute(
+                    "INSERT INTO vales (numero, cliente_id, status, total) VALUES (?, ?, 'PENDENTE', ?)",
+                    (numero, int(cliente_id), total),
+                )
+                vale_id = int(cursor.lastrowid)
+                for item in self.itens_carrinho:
+                    try:
+                        produto_id = int(item.get("id"))
+                    except (TypeError, ValueError):
+                        produto_id = None
+                    conn.execute(
+                        """
+                        INSERT INTO vale_itens (
+                            vale_id, produto_id, codigo_barras, descricao_produto, ncm,
+                            quantidade, unidade, preco_unitario, subtotal
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            vale_id, produto_id, str(item.get("barcode", "") or ""),
+                            str(item.get("nome", "Item")), str(item.get("ncm", "") or ""),
+                            round(float(item.get("quantidade", 0.0) or 0.0), 3),
+                            str(item.get("unidade", "UN") or "UN").upper(),
+                            float(item.get("preco", 0.0) or 0.0),
+                            float(item.get("total", 0.0) or 0.0),
+                        ),
+                    )
+            self._limpar_contexto_documental()
+            self.itens_carrinho = []
+            self._renderizar_carrinho()
+            self.atualizar_total_display()
+            if hasattr(self, "ent_valor_pago"):
+                self.ent_valor_pago.delete(0, "end")
+            if hasattr(self, "lbl_troco_venda"):
+                self.lbl_troco_venda.configure(text="R$ 0,00")
+            if hasattr(self, "limpar_pagamentos_recebidos"):
+                self.limpar_pagamentos_recebidos()
+            try:
+                self.imprimir_cupom_vale(vale_id)
+            except Exception as e:
+                registrar_log(None, "PDV Vale", "Aviso", f"Vale {numero} salvo, impressão falhou: {e}")
+            registrar_log(None, "PDV Vale", "Sucesso", f"Vale {numero} salvo como PENDENTE para cliente {cliente_id}")
+            self._set_status(f"Vale #{numero} salvo como PENDENTE.", "#2ecc71")
+            return vale_id
+        except Exception as e:
+            self._set_status(f"Falha ao salvar Vale: {e}", "#ff6666")
+            registrar_log(None, "PDV Vale", "Falha", f"Erro ao salvar: {e}")
+            return None
 
     def abrir_tela_orcamentos(self):
         try:
@@ -863,6 +1425,15 @@ class ModuloPDV(ctk.CTkToplevel):
             else:
                 entrada = parte_produto
         elif entrada.isdigit() and len(entrada) <= 3:
+            # Primeiro tenta localizar um produto com este código de barras curto
+            produto_curto = self.buscar_produto_por_ean(entrada)
+            if produto_curto:
+                # Produto encontrado → adiciona ao carrinho respeitando a
+                # quantidade digitada no campo Qtd (ou o multiplicador atual).
+                qtd_item_curto = qtd_digitada if qtd_especificada else self.multiplicador_atual
+                self._adicionar_item_produto(produto_curto, qtd_item_curto)
+                return
+            # Caso não exista, mantém o comportamento original de definir multiplicador
             self.multiplicador_atual = int(entrada)
             self.ent_cod_barras.delete(0, "end")
             self.ent_cod_barras.configure(placeholder_text=f"Qtd: {self.multiplicador_atual} x ...")
@@ -878,6 +1449,25 @@ class ModuloPDV(ctk.CTkToplevel):
 
         if entrada.isdigit():
             produto = self.buscar_produto_por_ean(entrada)
+            if produto:
+                self._adicionar_item_produto(produto, qtd_item)
+                return
+            # Etiqueta de balança Filizola (2|PPPPP|VVVVVV|DV): somente após a
+            # busca exata falhar, para não alterar o fluxo normal de EAN.
+            # PLU exato de 5 dígitos (sem normalizar zeros, sem fallback, sem LIKE).
+            etiqueta = parse_etiqueta_balanca_filizola(entrada)
+            if etiqueta is not None:
+                produto_plu = self.buscar_produto_por_ean(etiqueta["plu"])
+                if produto_plu:
+                    self._adicionar_item_balanca(produto_plu, etiqueta["valor"])
+                    return
+                self._set_status(
+                    f"Produto PLU {etiqueta['plu']} não cadastrado.",
+                    "#ff6666",
+                )
+                self.multiplicador_atual = 1
+                self.ent_cod_barras.configure(placeholder_text="Código ou Nome do Produto (Enter para adicionar)")
+                return
             if not produto:
                 produtos = self.buscar_produtos_para_selecao(entrada)
                 if not produtos:
@@ -900,31 +1490,153 @@ class ModuloPDV(ctk.CTkToplevel):
         self._abrir_modal_selecao_produtos(entrada, produtos, qtd_item)
 
     def _processar_entrada_produto_tab(self, _event=None):
+        # Venda pronta em DINHEIRO + campo vazio: TAB só navega para o
+        # campo VALOR PAGO. Com texto digitado, o processamento de entrada
+        # (produtos) acontece exatamente como antes.
+        entrada = ""
+        try:
+            entrada = str(self.ent_cod_barras.get() or "").strip()
+        except Exception:
+            entrada = ""
+        if not entrada and self._avanco_tab_para_valor_pago():
+            self._safe_focus(self.ent_valor_pago)
+            return "break"
         self.processar_entrada_produto()
         return "break"
 
+    def _unidade_do_produto(self, produto):
+        """Unidade canônica do produto (UN/KG) com fallback legado."""
+        try:
+            if isinstance(produto, (tuple, list)) and len(produto) > 10:
+                uni = str(produto[10] or "").strip().upper()
+                if uni in ("UN", "KG"):
+                    return uni
+        except Exception:
+            pass
+        try:
+            variacao = produto[8] if isinstance(produto, (tuple, list)) and len(produto) > 8 else ""
+            categoria = produto[9] if isinstance(produto, (tuple, list)) and len(produto) > 9 else ""
+            nome = produto[2] if isinstance(produto, (tuple, list)) and len(produto) > 2 else ""
+        except Exception:
+            return "UN"
+        try:
+            from modulo_estoque import produto_e_vendido_por_kg
+            if produto_e_vendido_por_kg(nome, variacao, categoria):
+                return "KG"
+        except Exception:
+            pass
+        return "UN"
+
+    def _reconfigurar_mascara_qtd_pdv(self, unidade):
+        """Máscara do campo Qtd do PDV coerente com a unidade (FASE 1 UN/KG).
+
+        UN: inteiro (comportamento histórico — multiplicador 12* inclusive).
+        KG: decimal até 3 casas (1,250).
+
+        Só reaplica os bindings quando o modo MUDA: evita acumular
+        <KeyRelease>/<FocusOut> a cada bipagem.
+        """
+        if not hasattr(self, "ent_quantidade"):
+            return
+        desejado = "KG" if str(unidade).strip().upper() == "KG" else "UN"
+        if getattr(self, "_mascara_qtd_pdv", None) == desejado:
+            return
+        self._mascara_qtd_pdv = desejado
+        try:
+            self.ent_quantidade.unbind("<KeyRelease>")
+            self.ent_quantidade.unbind("<FocusOut>")
+        except Exception:
+            pass
+        try:
+            if desejado == "KG":
+                aplicar_padrao_entrada_numerica(self.ent_quantidade, inteiro=False, casas_decimais=3)
+                try:
+                    self.ent_quantidade.configure(placeholder_text="Qtd/Peso (KG)")
+                except Exception:
+                    pass
+            else:
+                aplicar_padrao_entrada_numerica(self.ent_quantidade, inteiro=True)
+                try:
+                    self.ent_quantidade.configure(placeholder_text="Qtd")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _adicionar_item_produto(self, produto, qtd_item):
+        unidade = self._unidade_do_produto(produto)
+        # Normaliza o produto para tupla: busca_venda retorna tuplas; algumas
+        # caminhos mais antigos podem passar (id, barcode, nome[, preco..., ...]).
+        produto = produto if isinstance(produto, (tuple, list)) else tuple(produto)
+        # 0=id,1=barcode,2=nome,3=preco_venda,7=ncm,8=variacao,9=categoria,10=unidade
+        if len(produto) == 8:
+            produto = produto + ("", "", "", "")
+        elif len(produto) == 9:
+            produto = produto + ("", "", "")
+        elif len(produto) == 10:
+            produto = produto + ("", "")
+
         try:
             preco_unitario = parse_numero(produto[3], "Preço", permitir_vazio=True, default=0.0, minimo=0)
         except ValueError:
             self._set_status(f"Preço inválido para o produto {produto[2]}.", "#ff6666")
             return
+        preco_unitario = round(float(preco_unitario), 2)
 
-        item = {
-            "id": produto[0],
-            "barcode": produto[1] or "",
-            "nome": produto[2],
-            "preco": preco_unitario,
-            "quantidade": qtd_item,
-            "total": preco_unitario * qtd_item,
-            "ncm": produto[7] if len(produto) > 7 else "",
-            "origem": "BALCAO",
-        }
+        if unidade == "KG":
+            # FASE 1 — produto vendido por KG: a quantidade é o PESO (kg),
+            # decimal até 3 casas. Se o operador digitou um peso válido no
+            # campo Qtd (diferente de 1, padrão vazio do PDV), reaproveita-o;
+            # caso contrário pergunta o peso — nunca assume 1 KG silenciosamente.
+            peso = None
+            try:
+                qtd_numerica = float(qtd_item) if qtd_item is not None else None
+            except (TypeError, ValueError):
+                qtd_numerica = None
+            if qtd_numerica is not None and qtd_numerica > 0 and qtd_numerica != 1:
+                peso = qtd_numerica
+            if peso is None:
+                peso = self._obter_peso_kg(produto)
+                if peso is None:
+                    return
+            peso = round(float(peso), 3)
+            if peso <= 0:
+                self._set_status("Peso KG inválido. Informe um peso maior que zero.", "#ff6666")
+                return
+            item = {
+                "id": produto[0],
+                "barcode": produto[1] or "",
+                "nome": produto[2],
+                "preco": preco_unitario,
+                "quantidade": peso,
+                "total": round(peso * preco_unitario, 2),
+                "ncm": produto[7] if len(produto) > 7 else "",
+                "unidade": "KG",
+                "origem": "BALCAO",
+            }
+        else:
+            # FASE 1 — UN (preserva comportamento atual): qtd_item inteira,
+            # multiplicador 12* intacto.
+            item = {
+                "id": produto[0],
+                "barcode": produto[1] or "",
+                "nome": produto[2],
+                "preco": preco_unitario,
+                "quantidade": qtd_item,
+                "total": preco_unitario * qtd_item,
+                "ncm": produto[7] if len(produto) > 7 else "",
+                "unidade": "UN",
+                "origem": "BALCAO",
+            }
+
         self.itens_carrinho.append(item)
         self._renderizar_carrinho()
         self.atualizar_total_display()
-        self._set_status(f"Item adicionado: {item['nome']}", "#2ecc71")
-
+        if unidade == "KG":
+            self._set_status(f"Item adicionado: {item['nome']} ({peso:g} KG)", "#2ecc71")
+        else:
+            self._set_status(f"Item adicionado: {item['nome']}", "#2ecc71")
+        self._reconfigurar_mascara_qtd_pdv(unidade)
         self.multiplicador_atual = 1
         self.ent_cod_barras.configure(placeholder_text="Código ou Nome do Produto (Enter para adicionar)")
         self.ent_cod_barras.delete(0, "end")
@@ -933,11 +1645,54 @@ class ModuloPDV(ctk.CTkToplevel):
         # no campo de quantidade (causa de busca genérica indevida).
         self._safe_focus(self.ent_cod_barras)
 
+    def _adicionar_item_balanca(self, produto, valor_etiqueta):
+        """Adiciona item de etiqueta de balança: qtd=1, preço = total da etiqueta.
+
+        Não abre o diálogo de preço do KG e não reconstrói peso: a balança já
+        calculou o total. Não cadastra o EAN completo da etiqueta no banco.
+        """
+        produto = produto if isinstance(produto, (tuple, list)) else tuple(produto)
+        if len(produto) == 8:
+            produto = produto + ("", "")
+        try:
+            preco_unitario = round(float(valor_etiqueta), 2)
+        except (TypeError, ValueError):
+            self._set_status("Valor da etiqueta de balança inválido.", "#ff6666")
+            return
+        if preco_unitario <= 0:
+            self._set_status("Valor da etiqueta de balança inválido.", "#ff6666")
+            return
+        item = {
+            "id": produto[0],
+            "barcode": produto[1] or "",
+            "nome": produto[2],
+            "preco": preco_unitario,
+            "quantidade": 1,
+            "total": preco_unitario,
+            "ncm": produto[7] if len(produto) > 7 else "",
+            "unidade": "UN",
+            "origem": "BALCAO",
+        }
+        self.itens_carrinho.append(item)
+        self._renderizar_carrinho()
+        self.atualizar_total_display()
+        self._set_status(f"Item adicionado: {item['nome']}", "#2ecc71")
+        self._reconfigurar_mascara_qtd_pdv("UN")
+        self.multiplicador_atual = 1
+        self.ent_cod_barras.configure(placeholder_text="Código ou Nome do Produto (Enter para adicionar)")
+        self.ent_cod_barras.delete(0, "end")
+        self.ent_quantidade.delete(0, "end")
+        self._safe_focus(self.ent_cod_barras)
+
     def _abrir_modal_selecao_produtos(self, termo, produtos, qtd_item):
         modal = ctk.CTkToplevel(self)
         modal.title("Selecionar Produto")
         modal.geometry("780x520")
-        modal.grab_set()
+        try:
+            modal.grab_set()
+        except Exception:
+            # Janela ainda não visível: grab/foco são garantidos após renderização.
+            pass
 
         ctk.CTkLabel(
             modal,
@@ -1029,14 +1784,41 @@ class ModuloPDV(ctk.CTkToplevel):
         modal.bind("<Escape>", lambda _e: fechar_modal())
         modal.bind("<Return>", selecionar_produto_teclado)
         modal.protocol("WM_DELETE_WINDOW", fechar_modal)
-        arvore.focus_set()
+
+        def _preparar_foco_modal():
+            """Garante grab+foco no Treeview APÓS a janela ficar visível.
+
+            Sem isto, no Windows o foco pode permanecer no campo de código do
+            PDV: ↑/↓ não navegam e ENTER reprocessa a busca (abrindo outro
+            modal) em vez de confirmar o produto selecionado.
+            """
+            try:
+                if not modal.winfo_exists():
+                    return
+                try:
+                    modal.grab_set()
+                except Exception:
+                    pass
+                try:
+                    filhos = arvore.get_children()
+                    if filhos and not arvore.selection():
+                        arvore.selection_set(filhos[0])
+                        arvore.focus(filhos[0])
+                    arvore.focus_force()
+                    arvore.focus_set()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        modal.after(120, _preparar_foco_modal)
 
     def _renderizar_carrinho(self):
         """Renderização otimizada com cache e batch update."""
         # Debounce: agenda refresh único se múltiplas adições rápidas ocorrerem
         if getattr(self, '_grid_pending_refresh', False):
             return
-        
+
         self._grid_pending_refresh = True
         self._safe_after(50, self._executar_renderizacao_carrinho)
 
@@ -1100,8 +1882,11 @@ class ModuloPDV(ctk.CTkToplevel):
 
         # Cria labels
         lbl_id = ctk.CTkLabel(row, text=str(item["id"]), width=130)
-        lbl_nome = ctk.CTkLabel(row, text=f"[{origem}] {item['nome']}", width=540, anchor="w")
-        lbl_qtd = ctk.CTkLabel(row, text=str(item["quantidade"]), width=90)
+        # Prefixo de origem só quando relevante (delivery/diversos);
+        # itens de balcão não exibem "[BALCAO]" (apenas apresentação).
+        prefixo = f"[{origem}] " if origem not in ("BALCAO", "LOJA_FISICA") else ""
+        lbl_nome = ctk.CTkLabel(row, text=f"{prefixo}{item['nome']}", width=540, anchor="w")
+        lbl_qtd = ctk.CTkLabel(row, text=self._formatar_quantidade_cupom(item.get("quantidade"), item.get("unidade")), width=90)
         lbl_total = ctk.CTkLabel(row, text=self._formatar_moeda_br(item["total"]), width=140, font=("Roboto", 12, "bold"))
         
         for w in (lbl_id, lbl_nome, lbl_qtd, lbl_total):
@@ -1143,9 +1928,10 @@ class ModuloPDV(ctk.CTkToplevel):
         barcode = item.get("barcode", "default")
         caminho_img = self.buscar_imagem_produto(barcode)
 
+        prefixo_otimizado = f"[{origem}] " if origem not in ("BALCAO", "LOJA_FISICA") else ""
         widgets = [
             ctk.CTkLabel(row, text=str(item["id"]), width=130),
-            ctk.CTkLabel(row, text=f"[{origem}] {item['nome']}", width=540, anchor="w"),
+            ctk.CTkLabel(row, text=f"{prefixo_otimizado}{item['nome']}", width=540, anchor="w"),
             ctk.CTkLabel(row, text=str(item["quantidade"]), width=90),
             ctk.CTkLabel(row, text=self._formatar_moeda_br(item["total"]), width=140, font=("Roboto", 12, "bold")),
         ]
@@ -1191,14 +1977,419 @@ class ModuloPDV(ctk.CTkToplevel):
             return
 
         total = sum(i["total"] for i in self.itens_carrinho)
-        valor_pago = self._ler_valor_pago_digitado()
 
-        if valor_pago is None or valor_pago <= total:
-            troco = 0.0
+        valor_digitado = self._ler_valor_pago_digitado()
+        if valor_digitado is None:
+            valor_digitado = 0.0
+
+        # Total efetivamente recebido: acumulado + valor ainda digitado no campo.
+        valor_pago = round(self.valor_pago_acumulado + valor_digitado, 2)
+
+        troco = max(0.0, round(valor_pago - total, 2))
+        # Tela do cliente: só o valor. O título da coluna ("TROCO" /
+        # "VALOR PAGO") já identifica cada informação do painel grande.
+        self.lbl_troco_venda.configure(text=self._formatar_moeda_br(troco))
+
+        if hasattr(self, "lbl_pago_venda"):
+            self.lbl_pago_venda.configure(text=self._formatar_moeda_br(valor_pago))
+        if hasattr(self, "lbl_restante_venda"):
+            restante = max(0.0, round(total - valor_pago, 2))
+            if restante > 0:
+                self.lbl_restante_venda.configure(text=f"RESTANTE {self._formatar_moeda_br(restante)}")
+            else:
+                self.lbl_restante_venda.configure(text="")
+
+    def acrescentar_valor_pago(self):
+        """Acumula o valor digitado no total efetivamente recebido (regras 2 e 3).
+
+        O valor digitado representa o valor recebido nesta forma de pagamento;
+        soma-se ao valor pago acumulado. Se o recebido superar o total da venda,
+        a diferença é troco e aparece no display próprio (regra 5). O total da
+        venda não é alterado (regra 1).
+        """
+        total = sum(i["total"] for i in self.itens_carrinho)
+        valor_digitado = self._ler_valor_pago_digitado()
+
+        if valor_digitado is None:
+            self._set_status("Valor pago inválido.", "#ff6666")
+            return
+
+        if valor_digitado <= 0:
+            self._set_status("Informe o valor recebido para acrescentar ao pagamento.", "#f39c12")
+            return
+
+        self.valor_pago_acumulado = round(self.valor_pago_acumulado + valor_digitado, 2)
+        self.pagamentos_parciais.append((self.forma_pagamento_selecionada, valor_digitado))
+
+        if self.valor_pago_acumulado > total:
+            troco = round(self.valor_pago_acumulado - total, 2)
+            self._set_status(
+                f"Pagamento de {self._formatar_moeda_br(valor_digitado)} registrado "
+                f"({self.forma_pagamento_selecionada}). Troco: {self._formatar_moeda_br(troco)}",
+                "#2ecc71",
+            )
+        elif self.valor_pago_acumulado == total:
+            self._set_status(
+                f"Pagamento de {self._formatar_moeda_br(valor_digitado)} registrado "
+                f"({self.forma_pagamento_selecionada}). Venda totalmente paga.",
+                "#2ecc71",
+            )
         else:
-            troco = valor_pago - total
+            restante = round(total - self.valor_pago_acumulado, 2)
+            self._set_status(
+                f"Pagamento de {self._formatar_moeda_br(valor_digitado)} registrado "
+                f"({self.forma_pagamento_selecionada}). Restante: {self._formatar_moeda_br(restante)}",
+                "#2ecc71",
+            )
 
-        self.lbl_troco_venda.configure(text=f"TROCO {self._formatar_moeda_br(troco)}")
+        self.ent_valor_pago.delete(0, "end")
+        self.atualizar_troco_display()
+        # FLUXO DINHEIRO (usabilidade): ENTER confirmou o valor do recebido
+        # e o foco segue para ACRESCENTAR PAGAMENTO. Demais formas de
+        # pagamento: comportamento inalterado.
+        if str(self.forma_pagamento_selecionada or "").strip().upper() == "DINHEIRO":
+            self._safe_focus(self.btn_acrescentar_pago)
+
+    def limpar_pagamentos_recebidos(self):
+        """Zera o total pago acumulado ao encerrar a venda atual (regra 2)."""
+        self.valor_pago_acumulado = 0.0
+        self.pagamentos_parciais = []
+        if hasattr(self, "ent_valor_pago"):
+            self.ent_valor_pago.delete(0, "end")
+        self.atualizar_troco_display()
+
+    def _validar_divisao_pagamento(self, detalhes, total):
+        """Valida a divisão do total entre formas no Múltiplo Pagamento.
+
+        ``detalhes`` é [(forma, valor)] com valores já parseados (> 0).
+        Reutiliza as regras existentes de pagamento: nenhuma regra de troco
+        paralela é criada — excesso acima do total só é aceito quando há
+        DINHEIRO na divisão (troco segue o fluxo existente, regra 5).
+
+        Retorna (ok: bool, mensagem: str, soma: float).
+        """
+        total = round(float(total or 0.0), 2)
+        if not detalhes:
+            return False, "Informe o valor de pelo menos uma forma de pagamento.", 0.0
+
+        soma = round(sum(v for _f, v in detalhes), 2)
+        tem_dinheiro = any(str(f).strip().upper() == "DINHEIRO" for f, _v in detalhes)
+
+        if soma < total - 0.0049:
+            restante = round(total - soma, 2)
+            return (
+                False,
+                f"Soma {self._formatar_moeda_br(soma)} menor que o total "
+                f"{self._formatar_moeda_br(total)}. Restante: {self._formatar_moeda_br(restante)}.",
+                soma,
+            )
+
+        if soma > total + 0.0049 and not tem_dinheiro:
+            excesso = round(soma - total, 2)
+            return (
+                False,
+                f"Soma {self._formatar_moeda_br(soma)} excede o total "
+                f"{self._formatar_moeda_br(total)} (excesso {self._formatar_moeda_br(excesso)}) "
+                "e não há DINHEIRO na divisão para gerar troco.",
+                soma,
+            )
+
+        return True, "", soma
+
+    def abrir_modal_pagamento_multiplo(self):
+        """Popup de MÚLTIPLO PAGAMENTO (F8).
+
+        Reaproveita integralmente a estrutura existente de pagamentos:
+        ``pagamentos_parciais`` e ``valor_pago_acumulado`` são repovoados
+        atomicamente com a divisão confirmada (nenhum segundo sistema é
+        criado) e a finalização passa pelo fluxo existente
+        (``finalizar_venda_com_confirmacoes`` → ``_validar_e_obter_valor_pagamento``
+        → ``finalizar_venda_pdv`` → ``_resolver_forma_pagamento_registro``,
+        que registra "MISTO" quando há mais de uma forma).
+
+        - restante recalculado dinamicamente;
+        - PIX/DÉBITO/CRÉDITO/VOUCHER sugerem o restante ao serem escolhidos;
+        - DINHEIRO mantém entrada manual do valor recebido;
+        - não confirma abaixo do total; excesso só com DINHEIRO (troco).
+        """
+        if not self.itens_carrinho:
+            self._set_status("Adicione itens antes de abrir o Múltiplo Pagamento.", "#ff6666")
+            return
+
+        total = round(sum(i["total"] for i in self.itens_carrinho), 2)
+        FORMAS = ["DINHEIRO", "PIX", "DEBITO", "CREDITO", "VOUCHER"]
+
+        modal = ctk.CTkToplevel(self)
+        modal.title("MÚLTIPLO PAGAMENTO")
+        modal.geometry("520x520")
+        modal.resizable(False, False)
+        try:
+            modal.transient(self)
+            modal.grab_set()
+        except Exception:
+            pass
+
+        ctk.CTkLabel(
+            modal,
+            text=f"TOTAL DA VENDA: {self._formatar_moeda_br(total)}",
+            font=("Roboto", 16, "bold"),
+        ).pack(pady=(14, 2))
+
+        lbl_restante = ctk.CTkLabel(modal, text="", font=("Roboto", 14, "bold"))
+        lbl_restante.pack(pady=(0, 6))
+
+        area_formas = ctk.CTkFrame(modal, fg_color="transparent")
+        area_formas.pack(fill="both", expand=True, padx=10, pady=(2, 2))
+
+        pagamentos = []  # [{"forma": str, "ent": CTkEntry}]
+
+        def _parse_campo(txt):
+            try:
+                return parse_numero(txt, "Valor", permitir_vazio=True, default=0.0, minimo=0)
+            except ValueError:
+                return None
+
+        def _soma():
+            soma = 0.0
+            for est in pagamentos:
+                v = _parse_campo(est["ent"].get())
+                if v is not None:
+                    soma += v
+            return round(soma, 2)
+
+        def _atualizar_display():
+            soma = _soma()
+            restante = round(total - soma, 2)
+            if abs(restante) <= 0.0049:
+                lbl_restante.configure(
+                    text=f"RESTANTE: {self._formatar_moeda_br(0.0)}",
+                    text_color="#2ecc71",
+                )
+            elif restante > 0:
+                lbl_restante.configure(
+                    text=f"RESTANTE: {self._formatar_moeda_br(restante)}",
+                    text_color="#f39c12",
+                )
+            else:
+                lbl_restante.configure(
+                    text=f"EXCESSO (TROCO): {self._formatar_moeda_br(-restante)}",
+                    text_color="#3498db",
+                )
+
+        def _adicionar_linha(forma_inicial="DINHEIRO", valor_inicial=""):
+            if len(pagamentos) >= len(FORMAS):
+                return
+            linha = ctk.CTkFrame(area_formas, fg_color="transparent")
+            linha.pack(fill="x", padx=8, pady=3)
+
+            estado = {"forma": forma_inicial}
+            ent_valor = ctk.CTkEntry(linha, width=130, placeholder_text="0,00")
+            if valor_inicial:
+                ent_valor.insert(0, valor_inicial)
+
+            def _trocar_forma(escolha):
+                estado["forma"] = escolha
+                # Sugestão automática: formas não monetárias preenchem o
+                # restante (quitação integral sem digitação). DINHEIRO
+                # preserva entrada manual do valor recebido.
+                if escolha != "DINHEIRO" and not ent_valor.get().strip():
+                    restante = round(total - _soma(), 2)
+                    if restante > 0:
+                        ent_valor.insert(0, f"{restante:.2f}".replace(".", ","))
+                _atualizar_display()
+
+            menu = ctk.CTkOptionMenu(linha, values=FORMAS, width=170, command=_trocar_forma)
+            menu.set(forma_inicial)
+            menu.pack(side="left", padx=(6, 4))
+            ent_valor.pack(side="left", padx=4)
+            ent_valor.bind("<KeyRelease>", lambda _e: _atualizar_display())
+
+            estado["ent"] = ent_valor
+            estado["menu"] = menu
+            pagamentos.append(estado)
+
+        def _remover_ultima():
+            if not pagamentos:
+                return
+            est = pagamentos.pop()
+            try:
+                est["menu"].destroy()
+                est["ent"].destroy()
+            except Exception:
+                pass
+            _atualizar_display()
+
+        # Pré-carrega pagamentos já acumulados no fluxo normal (F1-F5 +
+        # ACRESCENTAR PAGAMENTO), preservando-os na divisão.
+        iniciais = [
+            (str(f or "").strip().upper(), v)
+            for f, v in (getattr(self, "pagamentos_parciais", None) or [])
+        ]
+        if iniciais:
+            for forma, valor in iniciais:
+                _adicionar_linha(
+                    forma if forma in FORMAS else "DINHEIRO",
+                    f"{float(valor):.2f}".replace(".", ","),
+                )
+        else:
+            _adicionar_linha("DINHEIRO", "")
+
+        botoes = ctk.CTkFrame(modal, fg_color="transparent")
+        botoes.pack(fill="x", padx=10, pady=(2, 4))
+
+        ctk.CTkButton(
+            botoes,
+            text="+ ADICIONAR FORMA",
+            width=160,
+            fg_color="#2c3e50",
+            command=lambda: (_adicionar_linha("PIX", ""), _atualizar_display()),
+        ).pack(side="left", padx=4, pady=4)
+
+        ctk.CTkButton(
+            botoes,
+            text="REMOVER ÚLTIMA",
+            width=140,
+            fg_color="#7f8c8d",
+            command=_remover_ultima,
+        ).pack(side="left", padx=4, pady=4)
+
+        def _confirmar():
+            detalhes = []
+            for est in pagamentos:
+                v = _parse_campo(est["ent"].get())
+                if v is None:
+                    self._set_status(f"Valor inválido na forma {est['forma']}.", "#ff6666")
+                    try:
+                        est["ent"].focus_set()
+                    except Exception:
+                        pass
+                    return
+                if v > 0:
+                    detalhes.append((est["forma"], round(v, 2)))
+
+            ok, msg, soma = self._validar_divisao_pagamento(detalhes, total)
+            if not ok:
+                self._set_status(msg, "#ff6666")
+                return
+
+            # Repõe ATOMICAMENTE as estruturas existentes de pagamento —
+            # nenhum sistema paralelo é criado; a forma gravada continua
+            # sendo resolvida por _resolver_forma_pagamento_registro ("MISTO").
+            self.limpar_pagamentos_recebidos()
+            for forma, valor in detalhes:
+                self.pagamentos_parciais.append((forma, valor))
+            self.valor_pago_acumulado = soma
+            if hasattr(self, "ent_valor_pago"):
+                self.ent_valor_pago.delete(0, "end")  # evita dupla contagem
+            self.atualizar_troco_display()
+
+            try:
+                modal.grab_release()
+            except Exception:
+                pass
+            modal.destroy()
+            self.finalizar_venda_com_confirmacoes()
+
+        def _cancelar(_e=None):
+            try:
+                modal.grab_release()
+            except Exception:
+                pass
+            modal.destroy()
+
+        ctk.CTkButton(
+            botoes,
+            text="CONFIRMAR",
+            width=180,
+            fg_color="#27ae60",
+            height=34,
+            font=("Roboto", 13, "bold"),
+            command=_confirmar,
+        ).pack(side="right", padx=4, pady=4)
+
+        ctk.CTkButton(
+            botoes,
+            text="CANCELAR",
+            width=110,
+            fg_color="#4a4a4a",
+            command=_cancelar,
+        ).pack(side="right", padx=4, pady=4)
+
+        modal.bind("<Escape>", _cancelar)
+        _atualizar_display()
+
+    def abrir_modal_diversos(self):
+        """Cobrança avulsa (DIVERSOS): soma ao TOTAL DA VENDA (não é pagamento)."""
+        modal = ctk.CTkToplevel(self)
+        modal.title("DIVERSOS - Item avulso")
+        modal.geometry("380x270")
+        modal.resizable(False, False)
+        try:
+            modal.transient(self)
+            modal.grab_set()
+        except Exception:
+            pass
+
+        # Pré-preenchimento (somente leitura): reaproveita o Qtd do PDV se válido.
+        # Não consome e não limpa ent_quantidade nesta versão.
+        qtd_inicial = "1"
+        try:
+            if hasattr(self, "ent_quantidade") and self.ent_quantidade.winfo_exists():
+                txt_qtd = self.ent_quantidade.get().strip()
+                if txt_qtd:
+                    qtd_pre = parse_numero(txt_qtd, "Quantidade", inteiro=True, minimo=1)
+                    qtd_inicial = str(qtd_pre)
+        except Exception:
+            qtd_inicial = "1"
+
+        ctk.CTkLabel(modal, text="QUANTIDADE", font=("Roboto", 12, "bold")).pack(pady=(14, 2))
+        ent_qtd = ctk.CTkEntry(modal, width=150, placeholder_text="1")
+        ent_qtd.pack(padx=14, pady=(0, 8))
+        aplicar_padrao_entrada_numerica(ent_qtd, inteiro=True)
+        ent_qtd.delete(0, "end")
+        ent_qtd.insert(0, qtd_inicial)
+
+        ctk.CTkLabel(modal, text="VALOR (R$) UNITÁRIO", font=("Roboto", 12, "bold")).pack(pady=(0, 2))
+        ent_valor = ctk.CTkEntry(modal, width=150, placeholder_text="0,00")
+        ent_valor.pack(padx=14, pady=(0, 10))
+        aplicar_padrao_entrada_numerica(ent_valor, inteiro=False, casas_decimais=2)
+
+        def confirmar(_event=None):
+            try:
+                qtd = parse_numero(ent_qtd.get(), "Quantidade DIVERSOS", inteiro=True, minimo=1)
+            except ValueError:
+                self._set_status("Quantidade DIVERSOS inválida. Informe número inteiro maior que zero.", "#ff6666")
+                return
+            try:
+                valor = parse_numero(ent_valor.get(), "Valor DIVERSOS", permitir_vazio=False, minimo=0.01)
+            except ValueError:
+                self._set_status("Valor DIVERSOS inválido. Informe um valor maior que zero.", "#ff6666")
+                return
+            preco_unitario = round(valor, 2)
+            total_item = round(qtd * preco_unitario, 2)
+            self.itens_carrinho.append(
+                {
+                    "id": "DIVERSOS",
+                    "barcode": "",
+                    "nome": "DIVERSOS",
+                    "preco": preco_unitario,
+                    "quantidade": qtd,
+                    "total": total_item,
+                    "ncm": "",
+                    "unidade": "UN",
+                    "origem": "DIVERSOS",
+                }
+            )
+            self._renderizar_carrinho()
+            self.atualizar_total_display()
+            self._set_status(f"DIVERSOS adicionado: {qtd} x {self._formatar_moeda_br(preco_unitario)}", "#2ecc71")
+            modal.destroy()
+            self._safe_focus(self.ent_cod_barras)
+
+        ctk.CTkButton(modal, text="CONFIRMAR (Enter)", fg_color="#8e44ad", command=confirmar).pack(pady=(4, 10), padx=14, fill="x")
+        ent_qtd.bind("<Return>", confirmar)
+        ent_valor.bind("<Return>", confirmar)
+        self._safe_focus(ent_qtd)
 
     def buscar_produto_venda(self, codigo_barras):
         hoje = datetime.now().strftime("%Y-%m-%d")
@@ -1207,7 +2398,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao, ncm
+                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao, ncm, variacao, categoria, unidade
                     FROM produtos WHERE codigo_barras = ?
                     """,
                     (codigo_barras,),
@@ -1219,7 +2410,7 @@ class ModuloPDV(ctk.CTkToplevel):
             return None
 
         if p and p[5] and p[6] and p[5] <= hoje <= p[6]:
-            registrar_log(None, "PDV", "Info", f"Preço promocional aplicado: {p[2]}")
+                        registrar_log(None, "PDV", "Info", f"Preço promocional aplicado: {p[2]}")
         return p
 
     def buscar_produto_por_ean(self, codigo_ean):
@@ -1229,10 +2420,84 @@ class ModuloPDV(ctk.CTkToplevel):
             return None
         return self.buscar_produto_venda(ean)
 
+    def _unidade_do_produto(self, produto):
+        """Lê a unidade do produto retornado por buscar_produto_venda/buscar_produto_por_ean.
+
+        SELECT atual: (id, codigo_barras, nome, preco_venda, preco_base,
+        inicio_promocao, fim_promocao, ncm, variacao, categoria, unidade)
+        unidade é o índice 10; com fallback legado (produto_e_vendido_por_kg)
+        para bancos antigos sem a coluna preenchida.
+        """
+        if not produto:
+            return "UN"
+        try:
+            unidade = str(produto[10] or "UN").strip().upper() or "UN"
+        except IndexError:
+            unidade = "UN"
+        if unidade in ("UN", "KG"):
+            return unidade
+        # Fallback legado para produtos cadastrados antes da coluna unidade.
+        try:
+            nome = str(produto[2] or "")
+            variacao = str(produto[8] or "")
+            categoria = str(produto[9] or "")
+        except IndexError:
+            return "UN"
+        return "KG" if produto_e_vendido_por_kg(nome, variacao, categoria) else "UN"
+
+    def _reconfigurar_mascara_qtd_pdv(self, unidade):
+        """Máscara do campo Qtd do PDV coerente com a unidade (FASE 1 UN/KG).
+
+        UN: inteiro (comportamento histórico — multiplicador 12* inclusive).
+        KG: decimal até 3 casas (1,250).
+
+        Só reaplica os bindings quando o modo MUDA: evita acumular
+        <KeyRelease>/<FocusOut> a cada bipagem.
+        """
+        if not hasattr(self, "ent_quantidade"):
+            return
+        desejado = "KG" if str(unidade).strip().upper() == "KG" else "UN"
+        if getattr(self, "_mascara_qtd_pdv", None) == desejado:
+            return
+        self._mascara_qtd_pdv = desejado
+        try:
+            self.ent_quantidade.unbind("<KeyRelease>")
+            self.ent_quantidade.unbind("<FocusOut>")
+        except Exception:
+            pass
+        if desejado == "KG":
+            aplicar_padrao_entrada_numerica(self.ent_quantidade, inteiro=False, casas_decimais=3)
+            try:
+                self.ent_quantidade.configure(placeholder_text="Qtd/Peso (KG)")
+            except Exception:
+                pass
+        else:
+            aplicar_padrao_entrada_numerica(self.ent_quantidade, inteiro=True)
+            try:
+                self.ent_quantidade.configure(placeholder_text="Qtd")
+            except Exception:
+                pass
+
     def buscar_imagem_produto(self, ean):
+        """Localiza a imagem do produto por EAN (DB → assets locais).
+
+        Correção 1.0.16: este corpo estava definido erroneamente como
+        '_adicionar_item_produto' (def duplicada), o que sobrescrevia o
+        verdadeiro método de adição ao carrinho (linha ~1189) e fazia NADA ser
+        adicionado ao carrinho (bipagem e busca manual quebradas), além de
+        deixar 'buscar_imagem_produto' inexistente (chamado na renderização).
+        """
         ean_txt = str(ean or "").strip()
         if not ean_txt:
             return None
+
+        with get_db_connection() as conn:
+            produto = conn.execute(
+                "SELECT imagem_path FROM produtos WHERE codigo_barras = ?",
+                (ean_txt,),
+            ).fetchone()
+        if produto and produto[0] and os.path.isfile(produto[0]):
+            return produto[0]
 
         pastas = [
             os.path.join(os.getcwd(), "assets", "produtos"),
@@ -1491,20 +2756,27 @@ class ModuloPDV(ctk.CTkToplevel):
                 ncm = entry_ncm.get().strip()
                 imagem_final = self._salvar_imagem_produto_por_ean(img_state.get("path", ""), ean_salvar)
 
+                # Unidade explícita também no cadastro rápido (FASE 1 UN/KG).
+                # A origem é o XML quando disponível; default UN.
+                unidade_cadastro = str(dados_xml.get("unidade") or "UN").strip().upper()
+                if unidade_cadastro not in ("UN", "KG"):
+                    unidade_cadastro = "UN"
+
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
                     cursor.execute(
                         """
                         INSERT INTO produtos (
-                            codigo_barras, nome, variacao, ncm, preco_custo, margem_lucro, preco_venda,
+                            codigo_barras, nome, variacao, unidade, ncm, preco_custo, margem_lucro, preco_venda,
                             quantidade_atual, quantidade_minima, validade, imagem_path
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ean_salvar,
                             nome,
                             str(dados_xml.get("unidade") or "UN"),
+                            unidade_cadastro,
                             ncm,
                             float(preco_custo),
                             float(margem),
@@ -1560,7 +2832,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao, ncm
+                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao, ncm, variacao, categoria, unidade
                     FROM produtos
                     WHERE UPPER(nome) LIKE UPPER(?)
                     ORDER BY nome ASC
@@ -1580,7 +2852,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao, ncm
+                    SELECT id, codigo_barras, nome, preco_venda, preco_base, inicio_promocao, fim_promocao, ncm, variacao, categoria, unidade
                     FROM produtos
                     WHERE codigo_barras LIKE ? OR UPPER(nome) LIKE UPPER(?)
                     ORDER BY nome ASC
@@ -1595,8 +2867,30 @@ class ModuloPDV(ctk.CTkToplevel):
             return []
 
     def selecionar_forma_pagamento(self, forma_pgto):
+        total = sum(i["total"] for i in self.itens_carrinho)
+        restante = round(total - self.valor_pago_acumulado, 2)
+        if forma_pgto == "DINHEIRO" and restante <= 0 and total > 0:
+            # Total já recebido: valor excedente em dinheiro é troco (regra 5).
+            self._set_status(
+                f"Total da venda já recebido ({self._formatar_moeda_br(self.valor_pago_acumulado)}). "
+                f"Pagamento em dinheiro refere-se ao troco.",
+                "#f39c12",
+            )
         self.forma_pagamento_selecionada = forma_pgto
         self._set_status(f"Forma de pagamento selecionada: {forma_pgto}", "#4aa3ff")
+
+    def _resolver_forma_pagamento_registro(self):
+        """Define a forma de pagamento a ser gravada na venda.
+
+        Pagamentos acumulados em formas distintas são registrados como 'MISTO'
+        (conforme alinhado); caso contrário, a forma efetivamente usada.
+        """
+        formas = {str(f).upper() for f, _ in self.pagamentos_parciais if f}
+        if len(formas) > 1:
+            return "MISTO"
+        if len(formas) == 1:
+            return next(iter(formas))
+        return self.forma_pagamento_selecionada or "DINHEIRO"
 
     def _validar_e_obter_valor_pagamento(self, forma_pgto):
         if not self.itens_carrinho:
@@ -1604,18 +2898,38 @@ class ModuloPDV(ctk.CTkToplevel):
             return None
 
         valor_total = sum(i["quantidade"] * i["preco"] for i in self.itens_carrinho)
-        valor_pago = valor_total
+        valor_pago = self.valor_pago_acumulado
+
+        # Correção de regressão: para formas de pagamento instantâneas e sensíveis
+        # a taxa (PIX, DÉBITO, CRÉDITO, VOUCHER), quando não há pagamento parcial/misto
+        # nem digitação, assume-se automaticamente o valor total da venda como pago,
+        # sem exigir que o operador informe o valor pago ou clique em
+        # "ACRESCENTAR PAGAMENTO".
+        #
+        # A lógica de DINHEIRO, DIVERSOS, troco, pagamento misto e acumulador não é
+        # alterada; a correção se restringe ao cálculo de valor_pago neste ponto.
+        if forma_pgto in ("PIX", "DEBITO", "CREDITO", "VOUCHER") and not self.pagamentos_parciais:
+            valor_pago = round(float(valor_total), 2)
+
         valor_pago_lido = self._ler_valor_pago_digitado()
         if valor_pago_lido is None:
             self._set_status("Valor pago inválido.", "#ff6666")
             return None
         if valor_pago_lido > 0:
-            valor_pago = valor_pago_lido
+            valor_pago = round(self.valor_pago_acumulado + valor_pago_lido, 2)
 
-        if forma_pgto == "DINHEIRO":
-            if valor_pago < valor_total:
-                self._set_status("Valor pago menor que o total da venda.", "#ff6666")
-                return None
+        restante = round(valor_total - valor_pago, 2)
+        if valor_pago < valor_total:
+            self._set_status(
+                f"Valor pago ({self._formatar_moeda_br(valor_pago)}) menor que o total da venda "
+                f"({self._formatar_moeda_br(valor_total)}). Acrescente o restante de "
+                f"{self._formatar_moeda_br(restante)}.",
+                "#ff6666",
+            )
+            return None
+
+        if valor_pago_lido > 0:
+            self.pagamentos_parciais.append((forma_pgto, valor_pago_lido))
 
         self.atualizar_troco_display()
         return valor_pago
@@ -1630,12 +2944,147 @@ class ModuloPDV(ctk.CTkToplevel):
         if valor_pago is None:
             return
 
-        imprimir = messagebox.askyesno("Finalizar Venda", "Deseja imprimir o cupom? (Sim/Não)", parent=self)
+        escolha = self._perguntar_tipo_impressao()
 
-        self.finalizar_venda_pdv(forma_pgto, valor_pago, imprimir_cupom=imprimir)
+        emitir_nfce = escolha == "NFCE"
+        self.finalizar_venda_pdv(
+            forma_pgto,
+            valor_pago,
+            imprimir_cupom=(escolha == "CUPOM"),
+            emitir_nfce=emitir_nfce,
+        )
+
+    def _perguntar_tipo_impressao(self):
+        """Janela modal com 3 opções de documento ao finalizar a venda.
+
+        Atalhos locais (válidos somente com o popup aberto):
+        F10 = Cupom | F11 = NFC-e | F12 = Não imprimir.
+        Retorna "CUPOM", "NFCE" ou "NAO". Fechar a janela sem escolher equivale
+        a "NÃO IMPRIMIR" (mesma semântica do antigo Sim/Não de cupom).
+        """
+        resultado = {"escolha": "NAO"}
+
+        janela = ctk.CTkToplevel(self)
+        janela.title("Documento da Venda")
+        janela.geometry("440x310")
+        janela.resizable(False, False)
+        try:
+            janela.transient(self)
+            janela.grab_set()
+        except Exception:
+            pass
+
+        def _escolher(valor):
+            resultado["escolha"] = valor
+            try:
+                janela.grab_release()
+            except Exception:
+                pass
+            janela.destroy()
+
+        def _escolher_cupom(_evento=None):
+            _escolher("CUPOM")
+            return "break"
+
+        def _tentar_nfce(_evento=None):
+            # Emissão fiscal desativada: informa claramente e não emite NFC-e
+            # (sem conversão silenciosa para cupom).
+            if not self._fiscal_habilitado():
+                try:
+                    messagebox.showwarning(
+                        "Emissão Fiscal",
+                        "A emissão fiscal (NFC-e) NÃO está disponível.\n"
+                        "'ACBrMonitor (Emissão Fiscal) Ativo' está desativado nas configurações.\n\n"
+                        "Escolha outra opção de documento.",
+                        parent=janela,
+                    )
+                except Exception:
+                    pass
+                return "break"
+            _escolher("NFCE")
+            return "break"
+
+        def _escolher_nao_imprimir(_evento=None):
+            _escolher("NAO")
+            return "break"
+
+        ctk.CTkLabel(
+            janela,
+            text="Como deseja emitir o documento desta venda?",
+            font=("Roboto", 15, "bold"),
+        ).pack(padx=16, pady=(20, 14))
+
+        ctk.CTkButton(
+            janela,
+            text="IMPRIMIR CUPOM NÃO FISCAL (F10)",
+            fg_color="#27ae60",
+            hover_color="#219150",
+            height=48,
+            font=("Roboto", 13, "bold"),
+            command=_escolher_cupom,
+        ).pack(fill="x", padx=24, pady=6)
+
+        ctk.CTkButton(
+            janela,
+            text="IMPRIMIR NOTA FISCAL (NFC-e) (F11)",
+            fg_color="#2980b9",
+            hover_color="#21688f",
+            height=48,
+            font=("Roboto", 13, "bold"),
+            command=_tentar_nfce,
+        ).pack(fill="x", padx=24, pady=6)
+
+        ctk.CTkButton(
+            janela,
+            text="NÃO IMPRIMIR (F12)",
+            fg_color="#7f8c8d",
+            hover_color="#666666",
+            height=48,
+            font=("Roboto", 13, "bold"),
+            command=_escolher_nao_imprimir,
+        ).pack(fill="x", padx=24, pady=6)
+
+        # Atalhos LOCAIS ao popup: F10=Cupom, F11=NFC-e, F12=Não imprimir.
+        # Válidos somente enquanto o popup está aberto (grab_set redireciona as
+        # teclas para este Toplevel e "break" impede propagação); fora dele,
+        # F10/F11/F12 mantêm o comportamento global existente do PDV.
+        janela.bind("<F10>", _escolher_cupom)
+        janela.bind("<F11>", _tentar_nfce)
+        janela.bind("<F12>", _escolher_nao_imprimir)
+        try:
+            janela.focus_set()
+        except Exception:
+            pass
+
+        janela.protocol("WM_DELETE_WINDOW", lambda: _escolher("NAO"))
+        janela.wait_window()
+        return resultado["escolha"]
 
     def iniciar_pagamento(self, modo):
         self.processar_pagamento(modo)
+
+    def _ao_pressionar_delete_cancelar_item(self, event=None):
+        """Atalho DELETE -> cancelar_item() somente fora de campos de edição."""
+        try:
+            foco = self.focus_get()
+        except Exception:
+            foco = None
+        # Foco em campo de edição: preserva o DELETE nativo do widget.
+        try:
+            if foco is not None:
+                classe = type(foco).__name__.lower()
+                if "entry" in classe or "text" in classe or "spinbox" in classe or "combobox" in classe:
+                    return None
+        except Exception:
+            return None
+        # Sem item selecionado: sem efeito, sem interferir no evento.
+        if self.item_selecionado_idx is None:
+            return None
+        try:
+            self.cancelar_item()
+        except Exception:
+            return None
+        return "break"
 
     def cancelar_item(self):
         if self.item_selecionado_idx is None:
@@ -1689,13 +3138,33 @@ class ModuloPDV(ctk.CTkToplevel):
             partes.append(restante)
         return partes
 
-    def _formatar_linha_item_cupom(self, nome, qtd, total, largura):
+    def _formatar_quantidade_cupom(self, qtd, unidade="UN"):
+        """Quantidade para o cupom: inteiro em UN, decimal + unidade em KG.
+
+        UN mantém exatamente o formato anterior (int(qtd) → "3").
+        KG preserva as 3 casas (1,250 KG) — sem truncamento int().
+        """
+        unidade_txt = str(unidade or "UN").strip().upper() or "UN"
+        try:
+            valor = float(qtd)
+        except (TypeError, ValueError):
+            return f"{qtd} {unidade_txt}".strip()
+        if unidade_txt == "KG":
+            return f"{valor:.3f}".replace(".", ",") + " KG"
+        if valor.is_integer():
+            return str(int(valor))
+        return str(valor)
+
+    def _formatar_linha_item_cupom(self, nome, qtd, total, largura, unidade="UN"):
         col_qtd = 4
         col_total = 10
+        texto_qtd = self._formatar_quantidade_cupom(qtd, unidade)
+        if len(texto_qtd) > col_qtd:
+            col_qtd = len(texto_qtd)
         col_nome = max(8, largura - (col_qtd + col_total + 2))
 
         linhas_nome = self._split_texto_largura(nome, col_nome)
-        primeira_linha = f"{linhas_nome[0]:<{col_nome}} {int(qtd):>{col_qtd}} {float(total):>{col_total}.2f}"
+        primeira_linha = f"{linhas_nome[0]:<{col_nome}} {texto_qtd:>{col_qtd}} {float(total):>{col_total}.2f}"
         linhas = [primeira_linha]
         for trecho in linhas_nome[1:]:
             linhas.append(f"{trecho:<{col_nome}} {'':>{col_qtd}} {'':>{col_total}}")
@@ -1796,54 +3265,344 @@ class ModuloPDV(ctk.CTkToplevel):
             registrar_log(None, "PDV Gaveta", "Falha", f"Erro ao abrir gaveta: {e}")
             return False
 
+    def _obter_peso_kg(self, produto):
+        """Solicita o PESO em KG (decimal, até 3 casas) de produto vendido por KG.
+
+        Fluxo FASE 1: o preço unitário continua sendo o preço cadastrado por KG
+        (produtos.preco_venda) e o total da linha é calculado como
+        peso × preço/KG. Diferente do fluxo legado (_obter_preco_kg, mantido
+        apenas como referência), aqui NÃO se pergunta o valor total: pergunta-se
+        o peso, permitindo 1,250 KG. A conversão usa o parser numérico único do
+        projeto (validacao_numerica.parse_numero), aceitando vírgula decimal.
+
+        Retorna float (peso em kg) ou None se o operador cancelar.
+        """
+        nome_produto = produto[2] if isinstance(produto, (tuple, list)) and len(produto) > 2 else "KG"
+        try:
+            preco_kg = float(produto[3] or 0.0)
+        except (TypeError, ValueError):
+            preco_kg = 0.0
+        dialog = ctk.CTkInputDialog(
+            text=(
+                f"Informe o PESO (KG) para:\n{nome_produto}\n"
+                f"Preço: {self._formatar_moeda_br(preco_kg)}/KG\n"
+                "Ex.: 1,250"
+            ),
+            title="Produto KG – Peso (KG)",
+        )
+        texto = dialog.get_input()
+        if not texto or not str(texto).strip():
+            self._set_status("Peso KG não informado. Item não adicionado.", "#ff6666")
+            return None
+        try:
+            peso = parse_numero(texto, "Peso (KG)", permitir_vazio=False, minimo=0, maximo=9999)
+        except ValueError:
+            self._set_status("Peso KG inválido. Informe o peso em kg (ex: 1,250).", "#ff6666")
+            return None
+        peso = round(float(peso), 3)
+        if peso <= 0:
+            self._set_status("Peso KG deve ser maior que zero. Item não adicionado.", "#ff6666")
+            return None
+        return peso
+
+    def _obter_preco_kg(self, produto):
+        """
+        Exibe um dialog para que o operador informe o preço total
+        da mercadoria pesada externamente (balança não integrada).
+
+        ATENÇÃO: O FRS não possui balança integrada. O operador informa
+        diretamente o valor final cobrado (ex.: R$ 8,75).
+        Esse valor é o preço efetivo da venda — NÃO é um peso em kg.
+        Nenhum peso é calculado ou gravado.
+
+        Retorna float (preço informado) ou None se o operador cancelar.
+        """
+        nome_produto = produto[2] if len(produto) > 2 else "KG"
+        dialog = ctk.CTkInputDialog(
+            text=f"Informe o PREÇO TOTAL (R$) para:\n{nome_produto}",
+            title="Produto KG – Preço Final",
+        )
+        valor_str = dialog.get_input()
+        if not valor_str or not valor_str.strip():
+            self._set_status("Preço KG não informado. Item não adicionado.", "#ff6666")
+            return None
+        try:
+            valor = float(valor_str.strip().replace(",", "."))
+        except ValueError:
+            self._set_status("Preço KG inválido. Informe apenas números (ex: 8,75).", "#ff6666")
+            return None
+        if valor != valor or valor in (float("inf"), float("-inf")):
+            self._set_status("Preço KG inválido. Informe um número finito (ex: 8,75).", "#ff6666")
+            return None
+        if valor <= 0:
+            self._set_status("Preço KG deve ser maior que zero. Item não adicionado.", "#ff6666")
+            return None
+        return valor
+
+    def imprimir_cupom_orcamento(self, orcamento_id, segunda_via=False):
+        """Compatibilidade: orçamento comercial é PDF A4, nunca cupom térmico."""
+        from modulo_orcamento import gerar_pdf_orcamento
+        return gerar_pdf_orcamento(orcamento_id, config=self.config, parent=self, notificar=False)
+
+    def abrir_vale_por_cliente(self):
+        self._carregar_clientes_orcamento(preservar_selecao=False)
+        labels = [label for label, mapped_id in self.clientes_orcamento_map.items() if mapped_id is not None]
+        if not labels:
+            messagebox.showwarning("Abrir Vale", "Cadastre um cliente antes de abrir um Vale.", parent=self)
+            return
+        modal = ctk.CTkToplevel(self)
+        modal.title("ABRIR VALE")
+        modal.geometry("440x220")
+        modal.transient(self)
+        modal.grab_set()
+        ctk.CTkLabel(modal, text="CLIENTE:", font=("Roboto", 12, "bold")).pack(pady=(24, 8))
+        combo = ctk.CTkOptionMenu(modal, values=labels, width=340)
+        combo.set(labels[0])
+        combo.pack(padx=20)
+        resultado = {"carregar": False}
+
+        def carregar():
+            cliente_id = self.clientes_orcamento_map.get(combo.get())
+            if not cliente_id:
+                return
+            with get_db_connection() as conn:
+                vales = conn.execute(
+                    "SELECT id, numero FROM vales WHERE cliente_id = ? AND status = 'PENDENTE' ORDER BY id",
+                    (int(cliente_id),),
+                ).fetchall()
+                if not vales:
+                    messagebox.showinfo("Abrir Vale", "Este cliente não possui vales pendentes.", parent=modal)
+                    return
+                itens = []
+                for vale_id, numero in vales:
+                    linhas = conn.execute(
+                        """
+                        SELECT produto_id, codigo_barras, descricao_produto, ncm,
+                               quantidade, unidade, preco_unitario, subtotal
+                        FROM vale_itens WHERE vale_id = ? ORDER BY id
+                        """,
+                        (int(vale_id),),
+                    ).fetchall()
+                    for linha in linhas:
+                        itens.append({
+                            "id": linha[0], "barcode": linha[1] or "", "nome": linha[2],
+                            "ncm": linha[3] or "", "quantidade": float(linha[4] or 0.0),
+                            "unidade": str(linha[5] or "UN").upper(),
+                            "preco": float(linha[6] or 0.0), "total": float(linha[7] or 0.0),
+                            "origem": "VALE", "vale_id": int(vale_id), "numero_vale": numero,
+                        })
+            if not itens:
+                messagebox.showwarning("Abrir Vale", "Os vales pendentes não possuem itens.", parent=modal)
+                return
+            resultado.update({
+                "cliente_id": int(cliente_id), "itens": itens,
+                "vales_ids": [int(vale_id) for vale_id, _numero in vales], "carregar": True,
+            })
+            modal.grab_release()
+            modal.destroy()
+
+        botoes = ctk.CTkFrame(modal, fg_color="transparent")
+        botoes.pack(pady=22)
+        ctk.CTkButton(botoes, text="CARREGAR", width=130, command=carregar).pack(side="left", padx=6)
+        ctk.CTkButton(botoes, text="CANCELAR", width=130, fg_color="#666666", command=modal.destroy).pack(side="left", padx=6)
+        modal.protocol("WM_DELETE_WINDOW", modal.destroy)
+        modal.wait_window()
+        if resultado.get("carregar") and self._preparar_carrinho_documental(
+            resultado["itens"], resultado["cliente_id"], "VALE", resultado["vales_ids"]
+        ):
+            self._set_status(
+                f"{len(resultado['vales_ids'])} Vale(s) pendente(s) carregado(s) no PDV.",
+                "#2ecc71",
+            )
+
+    def imprimir_cupom_vale(self, vale_id):
+        """Imprime o documento do Vale usando o mesmo transporte térmico existente."""
+        with get_db_connection() as conn:
+            cabecalho = conn.execute(
+                """
+                SELECT v.id, v.numero, v.data_criacao, v.status, v.total, c.nome
+                FROM vales v JOIN clientes c ON c.id = v.cliente_id
+                WHERE v.id = ?
+                """,
+                (int(vale_id),),
+            ).fetchone()
+            if not cabecalho:
+                raise ValueError("Vale não encontrado.")
+            itens = conn.execute(
+                """
+                SELECT descricao_produto, quantidade, unidade, preco_unitario, subtotal
+                FROM vale_itens WHERE vale_id = ? ORDER BY id
+                """,
+                (int(vale_id),),
+            ).fetchall()
+        if not itens:
+            raise ValueError("Vale sem itens.")
+        dados = {
+            "documento_tipo": "VALE",
+            "numero_documento": cabecalho[1],
+            "data_documento": str(cabecalho[2] or ""),
+            "cliente_nome": cabecalho[5] or "CLIENTE",
+            "status_documento": cabecalho[3],
+            "itens": [
+                {
+                    "nome": item[0], "quantidade": float(item[1] or 0.0),
+                    "unidade": str(item[2] or "UN").upper(),
+                    "preco_unitario": float(item[3] or 0.0), "subtotal": float(item[4] or 0.0),
+                    "total": float(item[4] or 0.0),
+                } for item in itens
+            ],
+            "total": float(cabecalho[4] or 0.0),
+            "forma_pagamento": "PENDENTE",
+        }
+        self.imprimir_cupom(dados)
+
     def imprimir_cupom(self, dados_venda):
         """Imprime cupom não fiscal em impressora térmica (58mm/80mm) via ESC/POS."""
         itens = list(dados_venda.get("itens") or [])
         total = float(dados_venda.get("total") or 0.0)
         forma_pgto = str(dados_venda.get("forma_pagamento") or "N/A")
+        tipo_documento = str(dados_venda.get("documento_tipo") or "").strip().upper()
+        eh_orcamento = tipo_documento == "ORCAMENTO"
+        eh_vale = tipo_documento == "VALE"
+        eh_documento = eh_orcamento or eh_vale
+        numero_documento = dados_venda.get("numero_documento")
+        data_documento = str(dados_venda.get("data_documento") or "")
+        cliente_nome = str(dados_venda.get("cliente_nome") or "").strip()
+        segunda_via = bool(dados_venda.get("segunda_via"))
         if not itens:
             raise ValueError("Cupom não impresso: venda sem itens.")
 
         largura = self._largura_cupom_chars()
         separador = "-" * largura
-        nome_estabelecimento = str(
-            self.config.get("nome_estabelecimento")
+        # Identidade do estabelecimento: Nome Fantasia (config) — sem hardcode
+        # de cliente e sem "MERCADO FRS" como identidade impressa.
+        nome_fantasia = str(
+            self.config.get("nome_fantasia")
+            or self.config.get("nome_estabelecimento")
             or self.config.get("razao_social")
-            or "MERCADO FRS"
+            or ""
         ).strip().upper()
-        rodape = str(self.config.get("mensagem_rodape_cupom", "OBRIGADO PELA PREFERENCIA!")).strip()
+        cnpj_cupom = str(self.config.get("cnpj") or "").strip()
+        logradouro = str(self.config.get("logradouro") or "").strip()
+        numero = str(self.config.get("numero") or "").strip()
+        complemento = str(self.config.get("complemento") or "").strip()
+        bairro = str(self.config.get("bairro") or "").strip()
+        cidade = str(self.config.get("cidade") or "").strip()
+        uf = str(self.config.get("uf") or "").strip().upper()
+        cep = str(self.config.get("cep") or "").strip()
+        rodape = str(self.config.get("mensagem_rodape_cupom", "Obrigado pela preferência!")).strip()
 
-        linhas = [
-            "CUPOM NAO FISCAL".center(largura),
-            datetime.now().strftime("%d/%m/%Y %H:%M:%S").center(largura),
-            separador,
-            "ITEM".ljust(largura - 15) + "QTD".rjust(4) + "TOTAL".rjust(11),
-            separador,
-        ]
+        linhas = []
+        if nome_fantasia:
+            linhas.append(nome_fantasia.center(largura))
+        if cnpj_cupom:
+            linhas.append(f"CNPJ: {cnpj_cupom}".center(largura))
+        linha_log = ", ".join(p for p in (f"{logradouro}, {numero}" if logradouro and numero else (logradouro or numero),) if p)
+        if linha_log:
+            linhas.append(linha_log.center(largura))
+        if complemento:
+            linhas.append(complemento.center(largura))
+        if bairro:
+            linhas.append(bairro.center(largura))
+        linha_cidade_uf = " / ".join(p for p in (f"{cidade}/{uf}" if cidade and uf else (cidade or uf),) if p)
+        if linha_cidade_uf:
+            linhas.append(linha_cidade_uf.center(largura))
+        if cep:
+            linhas.append(f"CEP: {cep}".center(largura))
+        if nome_fantasia or cnpj_cupom or linha_log or complemento or bairro or linha_cidade_uf or cep:
+            linhas.append(separador)
+        if eh_documento:
+            status_documento = str(dados_venda.get("status_documento") or "PENDENTE").upper()
+            titulo_documento = "ORCAMENTO - NAO FISCAL" if eh_orcamento else f"VALE - {status_documento}"
+            rotulo_documento = "ORCAMENTO" if eh_orcamento else "VALE"
+            linhas.extend(
+                [
+                    titulo_documento.center(largura),
+                    f"{rotulo_documento}: {numero_documento}".center(largura),
+                    (data_documento or datetime.now().strftime("%d/%m/%Y %H:%M:%S")).center(largura),
+                    f"ESTABELECIMENTO: {nome_fantasia or 'NAO CONFIGURADO'}",
+                    f"CLIENTE: {cliente_nome or 'SEM CLIENTE CADASTRADO'}",
+                    *(([f"STATUS: {str(dados_venda.get('status_documento') or 'PENDENTE').upper()}"] if eh_vale else [])),
+                    separador,
+                    "ITEM".ljust(largura - 15) + "QTD".rjust(4) + "TOTAL".rjust(11),
+                    separador,
+                ]
+            )
+            if segunda_via:
+                linhas.append("SEGUNDA VIA".center(largura))
+                linhas.append(separador)
+        else:
+            linhas.extend(
+                [
+                    "CUPOM NAO FISCAL".center(largura),
+                    datetime.now().strftime("%d/%m/%Y %H:%M:%S").center(largura),
+                    separador,
+                    "ITEM".ljust(largura - 15) + "QTD".rjust(4) + "TOTAL".rjust(11),
+                    separador,
+                ]
+            )
 
         for item in itens:
             nome = item.get("nome", "ITEM")
             qtd = item.get("quantidade", 1)
             total_item = item.get("total", 0.0)
-            for linha in self._formatar_linha_item_cupom(nome, qtd, total_item, largura):
+            for linha in self._formatar_linha_item_cupom(nome, qtd, total_item, largura, item.get("unidade")):
                 linhas.append(linha)
+            if eh_documento:
+                unitario = self._formatar_moeda_br(item.get("preco_unitario", item.get("preco", 0.0)))
+                subtotal = self._formatar_moeda_br(item.get("subtotal", total_item))
+                linhas.append(f"  VALOR UNITARIO: {unitario}")
+                linhas.append(f"  SUBTOTAL: {subtotal}")
 
-        linhas.extend(
-            [
-                separador,
-                f"FORMA PGTO: {forma_pgto}",
-                f"TOTAL: {self._formatar_moeda_br(total)}",
-                separador,
-            ]
-        )
+        if eh_documento:
+            rotulo_total = "TOTAL ORCAMENTO" if eh_orcamento else "TOTAL VALE"
+            linhas.extend([separador, f"{rotulo_total}: {self._formatar_moeda_br(total)}"])
+        else:
+            linhas.extend(
+                [
+                    separador,
+                    f"FORMA DE PAGAMENTO: {forma_pgto}",
+                    f"TOTAL: {self._formatar_moeda_br(total)}",
+                ]
+            )
+
+        # PARTE C (BLOCO 2) — recebido/troco: usa os valores reais do fluxo.
+        # Não se aplica a orçamento: cupom não fiscal de orçamento não tem
+        # pagamento, recebimento ou troco associado.
+        try:
+            if not eh_documento:
+                parciais = list(dados_venda.get("pagamentos") or dados_venda.get("pagamentos_parciais") or [])
+                if str(forma_pgto or "").strip().upper() == "MISTO" and parciais:
+                    for forma_p, valor_p in parciais:
+                        try:
+                            linhas.append(f"  {str(forma_p).upper()}: {self._formatar_moeda_br(float(valor_p))}")
+                        except Exception:
+                            continue
+                recebido = dados_venda.get("valor_recebido", None)
+                if recebido is None:
+                    recebido = dados_venda.get("valor_pago", None)
+                if recebido is not None:
+                    recebido_f = round(float(recebido), 2)
+                    troco_f = round(recebido_f - round(total, 2), 2)
+                    linhas.append(f"VALOR RECEBIDO: {self._formatar_moeda_br(recebido_f)}")
+                    if troco_f > 0.0049:
+                        linhas.append(f"TROCO: {self._formatar_moeda_br(troco_f)}")
+        except Exception:
+            pass
+
+        linhas.append(separador)
 
         corpo_principal = "\n".join(linhas).encode("cp850", errors="replace")
         # Cabeçalho em destaque: centralizado, negrito e tamanho ampliado.
+        # Usa o Nome Fantasia configurado; sem fallback impresso "MERCADO FRS".
+        nome_destaque = nome_fantasia or (
+            "ORCAMENTO - NAO FISCAL" if eh_orcamento else "VALE - PENDENTE" if eh_vale else "CUPOM NAO FISCAL"
+        )
         cabecalho_destaque = (
             b"\x1ba\x01" +          # ESC a 1 -> alinhamento central
             b"\x1d!\x11" +          # GS ! 0x11 -> largura/altura dobradas
             b"\x1bE\x01" +          # ESC E 1 -> negrito on
-            f"{nome_estabelecimento}\n".encode("cp850", errors="replace") +
+            f"{nome_destaque}\n".encode("cp850", errors="replace") +
             b"\x1bE\x00" +          # ESC E 0 -> negrito off
             b"\x1d!\x00" +          # GS ! 0x00 -> tamanho normal
             b"\x1ba\x00"            # ESC a 0 -> alinhamento à esquerda
@@ -1854,7 +3613,7 @@ class ModuloPDV(ctk.CTkToplevel):
         assinatura_rodape = (
             b"\x1ba\x01" +
             b"\x1bM\x01" +          # ESC M 1 -> fonte B (menor)
-            b"Desenvolvido por FRS Mercado\n" +
+            b"Desenvolvido por FRS Solutions\n" +
             b"\x1bM\x00" +
             b"\x1ba\x00"
         )
@@ -1867,7 +3626,8 @@ class ModuloPDV(ctk.CTkToplevel):
         registrar_log(None, "PDV Impressão", "Sucesso", "Cupom não fiscal enviado para impressora térmica.")
 
     def _executar_automacao_pos_venda(self, dados_cupom):
-        """Dispara impressão e abertura da gaveta em sequência obrigatória pós-venda."""
+        """Dispara a impressão do cupom pós-venda e a abertura da gaveta
+        SOMENTE quando a forma de pagamento é DINHEIRO/ESPÉCIE."""
         erro_impressao = None
         erro_gaveta = None
 
@@ -1877,15 +3637,47 @@ class ModuloPDV(ctk.CTkToplevel):
             registrar_log(None, "PDV Impressão", "Falha", f"Erro impressão cupom: {e}")
             erro_impressao = e
 
-        try:
-            self.abrir_gaveta()
-            registrar_log(None, "PDV Gaveta", "Sucesso", "Comando de abertura de gaveta enviado.")
-        except Exception as e:
-            registrar_log(None, "PDV Gaveta", "Falha", f"Erro ao abrir gaveta: {e}")
-            erro_gaveta = e
+        forma_normalizada = str(dados_cupom.get("forma_pagamento") or "").strip().lower()
+        gaveta_permitida = forma_normalizada in ("dinheiro", "espécie", "especie")
+
+        # MISTO (múltiplo pagamento): abre a gaveta SOMENTE quando há dinheiro
+        # entre os pagamentos parciais registrados na venda. Misto sem dinheiro
+        # (ex.: PIX + Débito) NÃO aciona a gaveta.
+        if not gaveta_permitida and forma_normalizada == "misto":
+            formas_recebidas = {
+                str(f or "").strip().upper()
+                for f, _v in (getattr(self, "pagamentos_parciais", None) or [])
+            }
+            gaveta_permitida = bool(formas_recebidas & {"DINHEIRO", "ESPECIE", "ESPÉCIE"})
+
+        if gaveta_permitida:
+            try:
+                # Pass the real payment method to the drawer routine.
+                # No caso MISTO com dinheiro, repassa "DINHEIRO" para o guard
+                # interno da rotina de gaveta (somente a DECISÃO de abrir é
+                # tratada aqui; nenhum comando ESC/POS foi alterado).
+                forma_para_gaveta = (
+                    dados_cupom.get("forma_pagamento")
+                    if forma_normalizada in ("dinheiro", "espécie", "especie")
+                    else "DINHEIRO"
+                )
+                abertura_realizada = self.abrir_gaveta(forma_para_gaveta)
+                if abertura_realizada:
+                    registrar_log(None, "PDV Gaveta", "Sucesso", "Comando de abertura de gaveta enviado.")
+                else:
+                    erro_gaveta = "Abertura bloqueada pela forma de pagamento ou não realizada."
+                    registrar_log(None, "PDV Gaveta", "Falha", erro_gaveta)
+            except Exception as e:
+                registrar_log(None, "PDV Gaveta", "Falha", f"Erro ao abrir gaveta: {e}")
+                erro_gaveta = e
 
         if erro_impressao is None and erro_gaveta is None:
-            self._set_status("Cupom não fiscal impresso e gaveta acionada.", "#2ecc71")
+            self._set_status(
+                "Cupom não fiscal impresso e gaveta acionada."
+                if gaveta_permitida
+                else "Cupom não fiscal impresso.",
+                "#2ecc71",
+            )
             return
 
         if erro_impressao is not None and erro_gaveta is not None:
@@ -1893,7 +3685,10 @@ class ModuloPDV(ctk.CTkToplevel):
             return
 
         if erro_impressao is not None:
-            self._set_status(f"Cupom não impresso: {erro_impressao}. Gaveta acionada.", "#ff6666")
+            if gaveta_permitida:
+                self._set_status(f"Cupom não impresso: {erro_impressao}. Gaveta acionada.", "#ff6666")
+            else:
+                self._set_status(f"Cupom não impresso: {erro_impressao}.", "#ff6666")
             return
 
         self._set_status(f"Cupom impresso, mas falha ao abrir gaveta: {erro_gaveta}", "#ff6666")
@@ -1993,12 +3788,18 @@ class ModuloPDV(ctk.CTkToplevel):
         forma_pgto,
         valor_pago=None,
         imprimir_cupom=False,
+        emitir_nfce=None,
         origem_venda="LOJA_FISICA",
         status_pedido="APROVADO",
         status_pagamento="PAGO",
     ):
         if not self.itens_carrinho:
             return
+
+        # Forma efetivamente usada na venda (agrega pagamentos parciais).
+        # Compatível com stubs de teste que não possuem os novos atributos.
+        if hasattr(self, "_resolver_forma_pagamento_registro"):
+            forma_pgto = self._resolver_forma_pagamento_registro()
 
         valor_bruto = sum(i["quantidade"] * i["preco"] for i in self.itens_carrinho)
         valor_impostos = 0.0
@@ -2058,64 +3859,151 @@ class ModuloPDV(ctk.CTkToplevel):
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT INTO vendas (
-                        valor_total, valor_impostos_retidos, valor_liquido,
-                        origem, status_pedido, status_pagamento, forma_pagamento,
-                        valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
+                cols_v = {r[1] for r in cursor.execute("PRAGMA table_info(vendas)").fetchall()}
+                cols_d = {r[1] for r in cursor.execute("PRAGMA table_info(vendas_dia)").fetchall()}
+                cols_fin = {r[1] for r in cursor.execute("PRAGMA table_info(financeiro)").fetchall()}
+                cx_id = getattr(self, "caixa_id", None)
+                vales_para_quitar = list(dict.fromkeys(
+                    int(vale_id) for vale_id in (getattr(self, "_vales_para_quitar", None) or [])
+                ))
+                if vales_para_quitar:
+                    if not cx_id:
+                        raise RuntimeError("Não há caixa aberto para quitar os vales carregados.")
+                    caixa_vale = cursor.execute(
+                        "SELECT status, data_abertura FROM caixa_operacao WHERE id = ?",
+                        (cx_id,),
+                    ).fetchone()
+                    if not caixa_vale or str(caixa_vale[0] or "").upper() != "ABERTO":
+                        raise RuntimeError("O caixa do Vale não está aberto para a operação atual.")
+                if "caixa_operacao_id" in cols_v:
+                    cursor.execute(
+                        """
+                        INSERT INTO vendas (
+                            valor_total, valor_impostos_retidos, valor_liquido,
+                            origem, status_pedido, status_pagamento, forma_pagamento,
+                            valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs,
+                            caixa_operacao_id
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            valor_bruto,
+                            valor_impostos,
+                            valor_liquido,
+                            str(origem_venda or "LOJA_FISICA").upper(),
+                            str(status_pedido or "APROVADO").upper(),
+                            str(status_pagamento or "PAGO").upper(),
+                            forma_pgto,
+                            total_icms,
+                            total_pis,
+                            total_cofins,
+                            total_ibs,
+                            total_cbs,
+                            cx_id,
+                        ),
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        valor_bruto,
-                        valor_impostos,
-                        valor_liquido,
-                        str(origem_venda or "LOJA_FISICA").upper(),
-                        str(status_pedido or "APROVADO").upper(),
-                        str(status_pagamento or "PAGO").upper(),
-                        forma_pgto,
-                        total_icms,
-                        total_pis,
-                        total_cofins,
-                        total_ibs,
-                        total_cbs,
-                    ),
-                )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO vendas (
+                            valor_total, valor_impostos_retidos, valor_liquido,
+                            origem, status_pedido, status_pagamento, forma_pagamento,
+                            valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            valor_bruto,
+                            valor_impostos,
+                            valor_liquido,
+                            str(origem_venda or "LOJA_FISICA").upper(),
+                            str(status_pedido or "APROVADO").upper(),
+                            str(status_pagamento or "PAGO").upper(),
+                            forma_pgto,
+                            total_icms,
+                            total_pis,
+                            total_cofins,
+                            total_ibs,
+                            total_cbs,
+                        ),
+                    )
                 venda_id = cursor.lastrowid
-                cursor.execute(
-                    """
-                    INSERT INTO vendas_dia (
-                        valor_total, valor_impostos_retidos, valor_liquido,
-                        origem, status_pedido, status_pagamento, forma_pagamento,
-                        valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
+                if "caixa_operacao_id" in cols_d:
+                    cursor.execute(
+                        """
+                        INSERT INTO vendas_dia (
+                            valor_total, valor_impostos_retidos, valor_liquido,
+                            origem, status_pedido, status_pagamento, forma_pagamento,
+                            valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs,
+                            caixa_operacao_id
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            valor_bruto,
+                            valor_impostos,
+                            valor_liquido,
+                            str(origem_venda or "LOJA_FISICA").upper(),
+                            str(status_pedido or "APROVADO").upper(),
+                            str(status_pagamento or "PAGO").upper(),
+                            forma_pgto,
+                            total_icms,
+                            total_pis,
+                            total_cofins,
+                            total_ibs,
+                            total_cbs,
+                            cx_id,
+                        ),
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        valor_bruto,
-                        valor_impostos,
-                        valor_liquido,
-                        str(origem_venda or "LOJA_FISICA").upper(),
-                        str(status_pedido or "APROVADO").upper(),
-                        str(status_pagamento or "PAGO").upper(),
-                        forma_pgto,
-                        total_icms,
-                        total_pis,
-                        total_cofins,
-                        total_ibs,
-                        total_cbs,
-                    ),
-                )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO vendas_dia (
+                            valor_total, valor_impostos_retidos, valor_liquido,
+                            origem, status_pedido, status_pagamento, forma_pagamento,
+                            valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            valor_bruto,
+                            valor_impostos,
+                            valor_liquido,
+                            str(origem_venda or "LOJA_FISICA").upper(),
+                            str(status_pedido or "APROVADO").upper(),
+                            str(status_pagamento or "PAGO").upper(),
+                            forma_pgto,
+                            total_icms,
+                            total_pis,
+                            total_cofins,
+                            total_ibs,
+                            total_cbs,
+                        ),
+                    )
 
                 desc = f"Venda PDV #{venda_id} ({forma_pgto}) [{str(origem_venda or 'LOJA_FISICA').upper()}]"
-                cursor.execute(
-                    """
-                    INSERT INTO financeiro (valor, tipo, valor_bruto, valor_impostos_retidos, taxa_aplicada, descricao)
-                    VALUES (?, 'Entrada', ?, ?, ?, ?)
-                    """,
-                    (valor_liquido, valor_bruto, valor_impostos, taxa_aplicada, desc),
-                )
+                if "caixa_operacao_id" in cols_fin:
+                    cursor.execute(
+                        """
+                        INSERT INTO financeiro (
+                            valor, tipo, valor_bruto, valor_impostos_retidos,
+                            taxa_aplicada, descricao, caixa_operacao_id
+                        )
+                        VALUES (?, 'Entrada', ?, ?, ?, ?, ?)
+                        """,
+                        (valor_liquido, valor_bruto, valor_impostos, taxa_aplicada, desc, cx_id),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO financeiro (
+                            valor, tipo, valor_bruto, valor_impostos_retidos,
+                            taxa_aplicada, descricao
+                        )
+                        VALUES (?, 'Entrada', ?, ?, ?, ?)
+                        """,
+                        (valor_liquido, valor_bruto, valor_impostos, taxa_aplicada, desc),
+                    )
                 cursor.execute(
                     """
                     UPDATE financeiro
@@ -2126,76 +4014,221 @@ class ModuloPDV(ctk.CTkToplevel):
                 )
 
                 for item in self.itens_carrinho:
+                    unidade_item = str(item.get("unidade") or "UN").strip().upper() or "UN"
                     try:
                         produto_id = int(item.get("id"))
-                        quantidade_vendida = int(item.get("quantidade", 0))
+                        if unidade_item == "KG":
+                            # KG: quantidade é PESO decimal (até 3 casas) — nunca int().
+                            quantidade_vendida = round(float(item.get("quantidade", 0) or 0), 3)
+                        else:
+                            quantidade_vendida = int(item.get("quantidade", 0))
                     except (TypeError, ValueError):
                         continue
 
                     if quantidade_vendida <= 0:
                         continue
 
+                    # Baixa FEFO: 1 linha em itens_venda por lote consumido,
+                    # com rateio proporcional de subtotal/impostos (a última
+                    # parcela fecha o total do item). Sem lotes: caminho legado.
+                    lotes_dist = aplicar_baixa_fefo(cursor, produto_id, quantidade_vendida)
+                    if lotes_dist:
+                        subtotal_item = float(item.get("total", 0.0))
+                        valores_item = {
+                            k: float(item.get("valores_impostos", {}).get(k, 0.0) or 0.0)
+                            for k in ("icms", "pis", "cofins", "ibs", "cbs")
+                        }
+                        restante_subtotal = subtotal_item
+                        restantes_valores = dict(valores_item)
+                        for idx, (lote_id, qtd_parcela) in enumerate(lotes_dist):
+                            if idx == len(lotes_dist) - 1:
+                                sub_parcela = round(restante_subtotal, 2)
+                                val_parcela = {k: round(v, 2) for k, v in restantes_valores.items()}
+                            else:
+                                fator = qtd_parcela / quantidade_vendida
+                                sub_parcela = round(subtotal_item * fator, 2)
+                                val_parcela = {k: round(v * fator, 2) for k, v in valores_item.items()}
+                                restante_subtotal -= sub_parcela
+                                for k in restantes_valores:
+                                    restantes_valores[k] -= val_parcela[k]
+                            cursor.execute(
+                                """
+                                INSERT INTO itens_venda (
+                                    venda_id, produto_id, quantidade, subtotal,
+                                    regime_tributario,
+                                    aliquota_icms, aliquota_pis, aliquota_cofins, aliquota_ibs, aliquota_cbs,
+                                    valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs,
+                                    lote_id, quantidade_lote
+                                )
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    venda_id,
+                                    produto_id,
+                                    qtd_parcela,
+                                    sub_parcela,
+                                    str(item.get("regime_tributario", regime_venda)),
+                                    float(item.get("aliquotas", {}).get("icms", 0.0) or 0.0),
+                                    float(item.get("aliquotas", {}).get("pis", 0.0) or 0.0),
+                                    float(item.get("aliquotas", {}).get("cofins", 0.0) or 0.0),
+                                    float(item.get("aliquotas", {}).get("ibs", 0.0) or 0.0),
+                                    float(item.get("aliquotas", {}).get("cbs", 0.0) or 0.0),
+                                    val_parcela["icms"], val_parcela["pis"], val_parcela["cofins"],
+                                    val_parcela["ibs"], val_parcela["cbs"],
+                                    lote_id,
+                                    float(qtd_parcela),
+                                ),
+                            )
+                    else:
+                        cursor.execute(
+                            """
+                            INSERT INTO itens_venda (
+                                venda_id, produto_id, quantidade, subtotal,
+                                regime_tributario,
+                                aliquota_icms, aliquota_pis, aliquota_cofins, aliquota_ibs, aliquota_cbs,
+                                valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                venda_id,
+                                produto_id,
+                                quantidade_vendida,
+                                float(item.get("total", 0.0)),
+                                str(item.get("regime_tributario", regime_venda)),
+                                float(item.get("aliquotas", {}).get("icms", 0.0) or 0.0),
+                                float(item.get("aliquotas", {}).get("pis", 0.0) or 0.0),
+                                float(item.get("aliquotas", {}).get("cofins", 0.0) or 0.0),
+                                float(item.get("aliquotas", {}).get("ibs", 0.0) or 0.0),
+                                float(item.get("aliquotas", {}).get("cbs", 0.0) or 0.0),
+                                float(item.get("valores_impostos", {}).get("icms", 0.0) or 0.0),
+                                float(item.get("valores_impostos", {}).get("pis", 0.0) or 0.0),
+                                float(item.get("valores_impostos", {}).get("cofins", 0.0) or 0.0),
+                                float(item.get("valores_impostos", {}).get("ibs", 0.0) or 0.0),
+                                float(item.get("valores_impostos", {}).get("cbs", 0.0) or 0.0),
+                            ),
+                        )
+
+                        cursor.execute(
+                            """
+                            UPDATE produtos
+                            SET quantidade_atual = CASE
+                                WHEN quantidade_atual - ? < 0 THEN 0
+                                ELSE quantidade_atual - ?
+                            END
+                            WHERE id = ?
+                            """,
+                            (quantidade_vendida, quantidade_vendida, produto_id),
+                        )
+
+                # Orçamento aberto no PDV: apenas o vínculo documental é
+                # atualizado junto da venda normal; pagamento/caixa não mudam.
+                orcamento_para_vender_id = getattr(self, "_orcamento_para_vender_id", None)
+                if orcamento_para_vender_id:
                     cursor.execute(
                         """
-                        INSERT INTO itens_venda (
-                            venda_id, produto_id, quantidade, subtotal,
-                            regime_tributario,
-                            aliquota_icms, aliquota_pis, aliquota_cofins, aliquota_ibs, aliquota_cbs,
-                            valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        UPDATE orcamentos
+                        SET status = 'VENDA', forma_pagamento = ?, convertido_venda_id = ?,
+                            valor_impostos_retidos = ?, valor_liquido = ?
+                        WHERE id = ? AND status = 'ORCAMENTO'
                         """,
                         (
+                            forma_pgto,
                             venda_id,
-                            produto_id,
-                            quantidade_vendida,
-                            float(item.get("total", 0.0)),
-                            str(item.get("regime_tributario", regime_venda)),
-                            float(item.get("aliquotas", {}).get("icms", 0.0) or 0.0),
-                            float(item.get("aliquotas", {}).get("pis", 0.0) or 0.0),
-                            float(item.get("aliquotas", {}).get("cofins", 0.0) or 0.0),
-                            float(item.get("aliquotas", {}).get("ibs", 0.0) or 0.0),
-                            float(item.get("aliquotas", {}).get("cbs", 0.0) or 0.0),
-                            float(item.get("valores_impostos", {}).get("icms", 0.0) or 0.0),
-                            float(item.get("valores_impostos", {}).get("pis", 0.0) or 0.0),
-                            float(item.get("valores_impostos", {}).get("cofins", 0.0) or 0.0),
-                            float(item.get("valores_impostos", {}).get("ibs", 0.0) or 0.0),
-                            float(item.get("valores_impostos", {}).get("cbs", 0.0) or 0.0),
+                            valor_impostos,
+                            valor_liquido,
+                            int(orcamento_para_vender_id),
                         ),
                     )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("Orçamento não pôde ser vinculado à venda; operação cancelada.")
 
+                # Quitação de Vale ocorre na mesma transação da venda normal.
+                # Não há pagamento, caixa ou cupom paralelo: apenas atualiza
+                # os documentos que já estavam carregados no PDV.
+                vales_para_quitar = list(dict.fromkeys(
+                    int(vale_id) for vale_id in (getattr(self, "_vales_para_quitar", None) or [])
+                ))
+                if vales_para_quitar:
+                    marcadores = ",".join("?" for _ in vales_para_quitar)
                     cursor.execute(
-                        """
-                        UPDATE produtos
-                        SET quantidade_atual = CASE
-                            WHEN quantidade_atual - ? < 0 THEN 0
-                            ELSE quantidade_atual - ?
-                        END
-                        WHERE id = ?
+                        f"""
+                        UPDATE vales
+                        SET status = 'QUITADO', data_quitacao = CURRENT_TIMESTAMP,
+                            venda_id = ?, caixa_operacao_id = ?, forma_pagamento = ?
+                        WHERE id IN ({marcadores}) AND status = 'PENDENTE'
                         """,
-                        (quantidade_vendida, quantidade_vendida, produto_id),
+                        [venda_id, cx_id, str(forma_pgto or "").upper(), *vales_para_quitar],
                     )
+                    if cursor.rowcount != len(vales_para_quitar):
+                        raise RuntimeError("Não foi possível quitar todos os vales carregados; venda cancelada.")
+                    try:
+                        registrar_log(
+                            None,
+                            "PDV Vale",
+                            "Sucesso",
+                            f"Vales {vales_para_quitar} quitados pela venda {venda_id} ({forma_pgto})",
+                            conn=conn,
+                        )
+                    except Exception:
+                        # A rastreabilidade principal está no UPDATE de `vales`;
+                        # log auxiliar não deve desfazer uma venda já persistida.
+                        pass
         except Exception as e:
             self._set_status(f"Falha ao registrar venda: {e}", "#ff6666")
             registrar_log(None, "PDV", "Falha", f"Erro ao registrar venda: {e}")
             return
 
         sucesso = True
-        if self._fiscal_habilitado():
-            sucesso, _caminho = self.fiscal.exportar_venda(venda_id, self.itens_carrinho, forma_pgto, valor_bruto)
-
-            dados_json = {
-                "id": venda_id,
-                "total": valor_bruto,
-                "impostos_retidos": valor_impostos,
-                "liquido": valor_liquido,
-                "pagamento": forma_pgto,
-                "itens": self.itens_carrinho,
-            }
-            self.exportar_venda_fiscal(dados_json)
-            self._enviar_comando_nfce(venda_id, forma_pgto, self.itens_carrinho)
+        if emitir_nfce is False:
+            # Escolha manual do operador (Cupom ou Não Imprimir): sem emissão
+            # fiscal/NFC-e e sem artefatos do fluxo ACBr para esta venda.
+            registrar_log(
+                None,
+                "PDV Fiscal",
+                "Info",
+                f"Venda {venda_id} finalizada SEM emissão de NFC-e (escolha do operador).",
+            )
         else:
-            registrar_log(None, "PDV Fiscal", "Info", f"Venda {venda_id} finalizada sem integração fiscal (modo opcional).")
+            fiscal_disponivel = self._fiscal_habilitado()
+            if emitir_nfce is True and not fiscal_disponivel:
+                # NFC-e solicitada, mas emissão fiscal desativada: informa
+                # claramente, NÃO emite e NÃO converte para cupom.
+                try:
+                    messagebox.showwarning(
+                        "Emissão Fiscal",
+                        "A emissão fiscal (NFC-e) NÃO está disponível.\n"
+                        "'ACBrMonitor (Emissão Fiscal) Ativo' está desativado nas configurações.\n"
+                        "A venda foi registrada SEM nota fiscal e SEM cupom não fiscal.",
+                        parent=self,
+                    )
+                except Exception:
+                    pass
+                self._set_status(
+                    "Emissão fiscal indisponível (fiscal_ativo desativado). Venda registrada sem NFC-e.",
+                    "#ff6666",
+                )
+                registrar_log(
+                    None,
+                    "PDV Fiscal",
+                    "Aviso",
+                    f"Venda {venda_id}: NFC-e solicitada, mas emissão fiscal desativada. Venda registrada sem NFC-e.",
+                )
+            elif fiscal_disponivel:
+                sucesso, _caminho = self.fiscal.exportar_venda(venda_id, self.itens_carrinho, forma_pgto, valor_bruto)
+
+                dados_json = {
+                    "id": venda_id,
+                    "total": valor_bruto,
+                    "impostos_retidos": valor_impostos,
+                    "liquido": valor_liquido,
+                    "pagamento": forma_pgto,
+                    "itens": self.itens_carrinho,
+                }
+                self.exportar_venda_fiscal(dados_json)
+                self._enviar_comando_nfce(venda_id, forma_pgto, self.itens_carrinho)
+            else:
+                registrar_log(None, "PDV Fiscal", "Info", f"Venda {venda_id} finalizada sem integração fiscal (modo opcional).")
         if imprimir_cupom:
             self._executar_automacao_pos_venda(
                 {
@@ -2205,25 +4238,48 @@ class ModuloPDV(ctk.CTkToplevel):
                     "impostos_retidos": valor_impostos,
                     "liquido": valor_liquido,
                     "forma_pagamento": forma_pgto,
+                    # PARTE C (BLOCO 2): valor efetivamente recebido — permite ao
+                    # cupom apresentar RECEBIDO/TROCO (reutiliza cálculo existente).
+                    "valor_recebido": valor_pago,
+                    # MISTO: parciais reais (forma, valor) para detalhe no cupom.
+                    "pagamentos": list(getattr(self, "pagamentos_parciais", None) or []),
                 }
             )
 
+        # RESÍDUO VISUAL PÓS-VENDA REMOVIDO (regra de exibição): a faixa
+        # intermediária NÃO mostra mais o antigo resumo da venda — nem a
+        # linha de conclusão e nem os valores de Bruto, Impostos, Líquido
+        # ou Recebido — tampouco qualquer outro resumo pós-venda. A faixa
+        # é limpa no bloco final desta finalização e permanece somente
+        # "Desenvolvido por FRS Solutions".
+        # Lógica da venda/pagamentos/gaveta/cupom/fechamento: NÃO alterada.
         if sucesso:
-            recebido_txt = f" | Recebido: {self._formatar_moeda_br(valor_pago)}" if valor_pago is not None else ""
-            self._set_status(
-                f"Venda {forma_pgto} concluída | Bruto: {self._formatar_moeda_br(valor_bruto)} | Impostos: {self._formatar_moeda_br(valor_impostos)} | Líquido: {self._formatar_moeda_br(valor_liquido)}{recebido_txt}",
-                "#2ecc71",
-            )
             registrar_log(None, "PDV", "Sucesso", f"Venda {venda_id} ({forma_pgto}) exportada.")
-        else:
-            self._set_status("Venda registrada sem exportação fiscal confirmada.", "#f1c40f")
 
+        if hasattr(self, "_limpar_contexto_documental"):
+            self._limpar_contexto_documental()
+        else:
+            self._vales_para_quitar = []
+            self._operacao_documento_tipo = None
+            self._orcamento_para_vender_id = None
+            self._operacao_vale_cliente_id = None
         self.itens_carrinho = []
         self._renderizar_carrinho()
         self.atualizar_total_display()
         self.ent_valor_pago.delete(0, "end")
-        self.lbl_troco_venda.configure(text="TROCO R$ 0,00")
+        self.lbl_troco_venda.configure(text="R$ 0,00")
+        if hasattr(self, "limpar_pagamentos_recebidos"):
+            self.limpar_pagamentos_recebidos()
+        else:
+            self.valor_pago_acumulado = 0.0
+            self.pagamentos_parciais = []
         self._avaliar_limite_caixa()
+        # LIMPEZA FINAL DA FAIXA INTERMEDIÁRIA (somente exibição): venda
+        # finalizada, sem resíduo de resumo/automação/status na tela.
+        # Ao final permanece SOMENTE "Desenvolvido por FRS Solutions".
+        # O painel grande inferior (VALOR PAGO | TROCO | TOTAL DA VENDA)
+        # NÃO é tocado aqui — tamanho, posição e cores inalterados.
+        self._set_status("")
         self._safe_focus(self.ent_quantidade)
 
     def _retornar_foco_pdv(self):
@@ -2237,37 +4293,21 @@ class ModuloPDV(ctk.CTkToplevel):
             return 0.0
 
         with get_db_connection() as conn:
+            import modulo_financeiro as _fin
             saldo_row = conn.execute("SELECT saldo_inicial FROM caixa_operacao WHERE id = ?", (self.caixa_id,)).fetchone()
             saldo_inicial = float(saldo_row[0] or 0.0) if saldo_row else 0.0
-
-            vendas_dinheiro_row = conn.execute(
-                """
-                SELECT SUM(
-                    CASE
-                        WHEN COALESCE(valor_liquido, 0) = 0 AND COALESCE(valor_impostos_retidos, 0) = 0
-                            THEN valor_total
-                        ELSE valor_liquido
-                    END
-                )
-                FROM vendas_dia
-                WHERE forma_pagamento = 'DINHEIRO'
-                """
-            ).fetchone()
-            vendas_dinheiro = float(vendas_dinheiro_row[0] or 0.0) if vendas_dinheiro_row else 0.0
-
-            try:
-                sangria_row = conn.execute(
-                    "SELECT SUM(valor) FROM sangrias WHERE caixa_operacao_id = ?",
-                    (self.caixa_id,),
-                ).fetchone()
-            except sqlite3.OperationalError:
-                sangria_row = conn.execute("SELECT SUM(valor) FROM sangrias").fetchone()
-            total_sangrias = float(sangria_row[0] or 0.0) if sangria_row else 0.0
-
-            suprimento_row = conn.execute(
-                "SELECT SUM(valor) FROM financeiro WHERE tipo = 'Entrada' AND descricao LIKE 'Suprimento:%'"
-            ).fetchone()
-            total_suprimentos = float(suprimento_row[0] or 0.0) if suprimento_row else 0.0
+            abertura, fechamento = _fin._janela_caixa(conn, self.caixa_id)
+            vend = _fin._vendas_por_forma_tabela_caixa(conn, "vendas", self.caixa_id, abertura, fechamento)
+            tem_v = any(float(t or 0.0) > 0 for _, t in vend)
+            if not tem_v:
+                vend = list(vend) + list(_fin._vendas_por_forma_tabela_caixa(conn, "vendas_dia", self.caixa_id, abertura, fechamento))
+            vendas_dinheiro = 0.0
+            for forma, tot in vend:
+                if str(forma or "").strip().upper() == "DINHEIRO":
+                    vendas_dinheiro += float(tot or 0.0)
+            movs = _fin._movs_caixa(conn, self.caixa_id, abertura, fechamento)
+            total_sangrias = float(movs.get("total_sangrias", 0.0) or 0.0)
+            total_suprimentos = float(movs.get("total_reforcos", 0.0) or 0.0)
 
         return (saldo_inicial + vendas_dinheiro + total_suprimentos) - total_sangrias
 
@@ -2331,6 +4371,8 @@ class ModuloPDV(ctk.CTkToplevel):
 
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
+                    cols_fin = {r[1] for r in cursor.execute("PRAGMA table_info(financeiro)").fetchall()}
+                    cx_mov = self.caixa_id
                     if tipo == "SANGRIA":
                         descricao_fin = f"Sangria: {obs}"
                         if obs == "Sangria Preventiva - Excesso de Caixa":
@@ -2339,15 +4381,27 @@ class ModuloPDV(ctk.CTkToplevel):
                             "INSERT INTO sangrias (valor, justificativa, caixa_operacao_id) VALUES (?, ?, ?)",
                             (valor, obs, self.caixa_id),
                         )
-                        cursor.execute(
-                            "INSERT INTO financeiro (valor, tipo, descricao) VALUES (?, ?, ?)",
-                            (valor, "Saída", descricao_fin),
-                        )
+                        if "caixa_operacao_id" in cols_fin:
+                            cursor.execute(
+                                "INSERT INTO financeiro (valor, tipo, descricao, caixa_operacao_id) VALUES (?, ?, ?, ?)",
+                                (valor, "Saída", descricao_fin, cx_mov),
+                            )
+                        else:
+                            cursor.execute(
+                                "INSERT INTO financeiro (valor, tipo, descricao) VALUES (?, ?, ?)",
+                                (valor, "Saída", descricao_fin),
+                            )
                     else:
-                        cursor.execute(
-                            "INSERT INTO financeiro (valor, tipo, descricao) VALUES (?, ?, ?)",
-                            (valor, "Entrada", f"Suprimento: {obs}"),
-                        )
+                        if "caixa_operacao_id" in cols_fin:
+                            cursor.execute(
+                                "INSERT INTO financeiro (valor, tipo, descricao, caixa_operacao_id) VALUES (?, ?, ?, ?)",
+                                (valor, "Entrada", f"Suprimento: {obs}", cx_mov),
+                            )
+                        else:
+                            cursor.execute(
+                                "INSERT INTO financeiro (valor, tipo, descricao) VALUES (?, ?, ?)",
+                                (valor, "Entrada", f"Suprimento: {obs}"),
+                            )
 
                 valor_fmt = self._formatar_moeda_br(valor)
                 self._set_status(f"{tipo.title()} registrada: {valor_fmt}", "#2ecc71")
@@ -2387,15 +4441,18 @@ class ModuloPDV(ctk.CTkToplevel):
     MODALIDADES_FECHAMENTO = ("DINHEIRO", "DEBITO", "CREDITO", "VOUCHER", "PIX")
 
     def _abrir_modal_conferencia_fechamento(self, esperado):
-        """Modal de conferência analítica: Informado x Sistema x Diferença por modalidade.
+        """Modal de conferência cega: somente o valor contado (informado).
+
+        Por segurança, NÃO exibe total do sistema, diferenças ou valores
+        esperados durante a digitação — o operador informa apenas quanto
+        efetivamente contou por modalidade. Sistema/Diferença aparecem
+        somente no resumo pós-fechamento.
 
         Retorna {modalidade: valor_informado} ao confirmar ou None ao cancelar.
-        Cada linha calcula a diferença de forma independente — jamais há
-        compensação automática entre modalidades distintas.
         """
         modal = ctk.CTkToplevel(self)
-        modal.title("Conferência Analítica de Fechamento")
-        modal.geometry("680x440")
+        modal.title("Conferência de Fechamento")
+        modal.geometry("460x440")
         modal.transient(self)
         modal.grab_set()
         modal.resizable(False, False)
@@ -2405,13 +4462,13 @@ class ModuloPDV(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             modal,
-            text="CONFERÊNCIA POR MODALIDADE (sem compensação cruzada)",
+            text="CONFERÊNCIA DE FECHAMENTO",
             font=("Roboto", 15, "bold"),
             text_color="#f1c40f",
         ).pack(pady=(14, 4))
         ctk.CTkLabel(
             modal,
-            text="Informe o valor contado de cada modalidade. Faltas e sobras permanecem individuais.",
+            text="Informe o valor contado de cada modalidade.",
             font=("Roboto", 11),
             text_color="#9aa0a6",
         ).pack(pady=(0, 10))
@@ -2419,70 +4476,27 @@ class ModuloPDV(ctk.CTkToplevel):
         grid = ctk.CTkFrame(modal, fg_color="#202020")
         grid.pack(fill="both", expand=True, padx=16)
 
-        for col, titulo in enumerate(("MODALIDADE", "SISTEMA (R$)", "INFORMADO (R$)", "DIFERENÇA (R$)")):
+        for col, titulo in enumerate(("MODALIDADE", "VALOR CONTADO (R$)")):
             ctk.CTkLabel(grid, text=titulo, font=("Roboto", 12, "bold"), text_color="#4aa3ff").grid(
                 row=0, column=col, padx=10, pady=(10, 6), sticky="w"
             )
 
-        def _fmt_br(valor):
-            return f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
         entradas = {}
-        labels_diferenca = {}
 
         for linha, modalidade in enumerate(self.MODALIDADES_FECHAMENTO, start=1):
             ctk.CTkLabel(grid, text=modalidade, font=("Roboto", 12, "bold")).grid(
                 row=linha, column=0, padx=10, pady=4, sticky="w"
             )
-            ctk.CTkLabel(grid, text=_fmt_br(esperado.get(modalidade, 0.0)), font=("Roboto", 12)).grid(
-                row=linha, column=1, padx=10, pady=4, sticky="w"
-            )
-            entrada = ctk.CTkEntry(grid, width=130, justify="center", font=("Roboto", 12))
-            entrada.insert(0, _fmt_br(esperado.get(modalidade, 0.0)))
-            entrada.grid(row=linha, column=2, padx=10, pady=4)
+            entrada = ctk.CTkEntry(grid, width=150, justify="center", font=("Roboto", 12))
+            entrada.grid(row=linha, column=1, padx=10, pady=4)
             aplicar_padrao_entrada_numerica(entrada, inteiro=False, casas_decimais=2)
-            label_dif = ctk.CTkLabel(grid, text="0,00", font=("Roboto", 12, "bold"), text_color="#2ecc71")
-            label_dif.grid(row=linha, column=3, padx=10, pady=4, sticky="w")
             entradas[modalidade] = entrada
-            labels_diferenca[modalidade] = label_dif
 
         def _parse_valor(txt):
             try:
                 return float(str(txt).strip().replace("R$", "").replace(".", "").replace(",", ".") or "0")
             except ValueError:
                 return 0.0
-
-        def _atualizar_diferencas(_event=None):
-            total_inf = 0.0
-            total_sis = 0.0
-            for mod in self.MODALIDADES_FECHAMENTO:
-                sis = float(esperado.get(mod, 0.0))
-                inf = _parse_valor(entradas[mod].get())
-                dif = inf - sis
-                total_inf += inf
-                total_sis += sis
-                cor = "#2ecc71" if abs(dif) < 0.005 else ("#ff6666" if dif < 0 else "#f1c40f")
-                labels_diferenca[mod].configure(text=_fmt_br(dif), text_color=cor)
-            lbl_tot_inf.configure(text=_fmt_br(total_inf))
-            lbl_tot_sis.configure(text=_fmt_br(total_sis))
-            dif_geral = total_inf - total_sis
-            cor_geral = "#2ecc71" if abs(dif_geral) < 0.005 else "#ff6666"
-            lbl_tot_dif.configure(
-                text=_fmt_br(dif_geral) + " (individual por modalidade)",
-                text_color=cor_geral,
-            )
-
-        # Totais gerais — divergências individuais permanecem visíveis acima.
-        linha_totais = len(self.MODALIDADES_FECHAMENTO) + 1
-        ctk.CTkLabel(grid, text="TOTAL GERAL", font=("Roboto", 13, "bold"), text_color="#f1c40f").grid(
-            row=linha_totais, column=0, padx=10, pady=(10, 8), sticky="w"
-        )
-        lbl_tot_sis = ctk.CTkLabel(grid, text="0,00", font=("Roboto", 13, "bold"))
-        lbl_tot_sis.grid(row=linha_totais, column=1, padx=10, pady=(10, 8), sticky="w")
-        lbl_tot_inf = ctk.CTkLabel(grid, text="0,00", font=("Roboto", 13, "bold"))
-        lbl_tot_inf.grid(row=linha_totais, column=2, padx=10, pady=(10, 8), sticky="w")
-        lbl_tot_dif = ctk.CTkLabel(grid, text="0,00", font=("Roboto", 13, "bold"))
-        lbl_tot_dif.grid(row=linha_totais, column=3, padx=10, pady=(10, 8), sticky="w")
 
         botoes = ctk.CTkFrame(modal, fg_color="transparent")
         botoes.pack(fill="x", padx=16, pady=(6, 14))
@@ -2502,10 +4516,6 @@ class ModuloPDV(ctk.CTkToplevel):
             botoes, text="CONFIRMAR FECHAMENTO", fg_color="#27ae60", width=220,
             command=_confirmar,
         ).pack(side="right", padx=6)
-
-        for mod in self.MODALIDADES_FECHAMENTO:
-            entradas[mod].bind("<KeyRelease>", _atualizar_diferencas, add="+")
-        _atualizar_diferencas()
 
         modal.protocol("WM_DELETE_WINDOW", lambda: (resultado.__setitem__("informado", None), modal.destroy()))
         modal.wait_window()
@@ -2530,23 +4540,19 @@ class ModuloPDV(ctk.CTkToplevel):
                 cursor.execute("SELECT saldo_inicial FROM caixa_operacao WHERE id = ?", (self.caixa_id,))
                 linha_saldo = cursor.fetchone()
                 saldo_inicial = float(linha_saldo[0] or 0.0) if linha_saldo else 0.0
-                try:
-                    cursor.execute(
-                        "SELECT COALESCE(SUM(valor), 0.0) FROM sangrias WHERE caixa_operacao_id = ?",
-                        (self.caixa_id,),
-                    )
-                except sqlite3.OperationalError:
-                    cursor.execute(
-                        "SELECT COALESCE(SUM(valor), 0.0) FROM sangrias WHERE data_sangria >= (SELECT data_abertura FROM caixa_operacao WHERE id = ?)",
-                        (self.caixa_id,),
-                    )
-                total_sangrias = float(cursor.fetchone()[0] or 0.0)
+                movs = modulo_financeiro.obter_movimentacoes_caixa(self.caixa_id)
+                total_sangrias = float(movs.get("total_sangrias", 0.0) or 0.0)
+                total_reforcos = float(movs.get("total_reforcos", 0.0) or 0.0)
+                lista_sangrias = list(movs.get("sangrias", []) or [])
+                lista_reforcos = list(movs.get("reforcos", []) or [])
 
-            vendas_por_forma = modulo_financeiro.obter_vendas_dia_por_forma()
+            vendas_por_forma = modulo_financeiro.obter_vendas_dia_por_forma(caixa_id=self.caixa_id)
             esperado = {}
             for modalidade in MODALIDADES:
                 if modalidade == "DINHEIRO":
-                    esperado[modalidade] = round(saldo_inicial + vendas_por_forma.get("DINHEIRO", 0.0) - total_sangrias, 2)
+                    esperado[modalidade] = round(
+                        saldo_inicial + vendas_por_forma.get("DINHEIRO", 0.0) + total_reforcos - total_sangrias, 2
+                    )
                 else:
                     esperado[modalidade] = round(vendas_por_forma.get(modalidade, 0.0), 2)
 
@@ -2579,20 +4585,64 @@ class ModuloPDV(ctk.CTkToplevel):
                     (self.caixa_id,),
                 )
 
-            sucesso, msg_fechamento = modulo_financeiro.fechar_caixa()
+            sucesso, msg_fechamento = modulo_financeiro.fechar_caixa(caixa_id=self.caixa_id)
             total_sistema = round(sum(esperado.values()), 2)
             total_informado = round(sum(informado.values()), 2)
             diferenca_geral = round(total_informado - total_sistema, 2)
+            caixa_fechado_id = self.caixa_id
             if sucesso:
                 self._set_status("Caixa fechado com sucesso.", "#2ecc71")
+                # Indicador compacto volta ao estado real (🔴 CAIXA FECHADO).
+                self._atualizar_indicadores_caixa(False)
                 divergencias = ", ".join(f"{m} {informado[m] - esperado[m]:+.2f}" for m in MODALIDADES)
                 registrar_log(
                     None,
                     "Fechamento de Caixa",
                     "Sucesso",
-                    f"Caixa {self.caixa_id} fechado. Sistema {total_sistema:.2f} | Informado {total_informado:.2f} "
+                    f"Caixa {caixa_fechado_id} fechado. Sistema {total_sistema:.2f} | Informado {total_informado:.2f} "
                     f"| Diferença geral {diferenca_geral:+.2f} | Divergências: {divergencias}",
                 )
+                # PARTES A/B (BLOCO 2) — pergunta de impressão e resumo visual.
+                # Reutiliza os dados já calculados/persistidos (esperado, informado,
+                # totais, caixa encerrado). O resumo aparece nos dois casos (SIM/NÃO).
+                dados_resumo = {
+                    "caixa_id": caixa_fechado_id,
+                    "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                    "operador": getattr(getattr(self.master, "usuario_atual", None), "get", lambda _k, _d=None: None)("nome", None)
+                    if getattr(self, "master", None) is not None and getattr(self.master, "usuario_atual", None)
+                    else None,
+                    "modalidades": [
+                        {
+                            "modalidade": m,
+                            "calculado": round(esperado[m], 2),
+                            "informado": round(informado[m], 2),
+                            "diferenca": round(informado[m] - esperado[m], 2),
+                        }
+                        for m in MODALIDADES
+                    ],
+                    "total_calculado": total_sistema,
+                    "total_informado": total_informado,
+                    "diferenca_geral": diferenca_geral,
+                    "saldo_abertura": saldo_inicial,
+                    "total_sangrias": round(total_sangrias, 2),
+                    "total_reforcos": round(total_reforcos, 2),
+                    "sangrias": [{"hora": h, "valor": v} for h, v in lista_sangrias],
+                    "reforcos": [{"hora": h, "valor": v} for h, v in lista_reforcos],
+                }
+                try:
+                    imprimir_resumo = self._perguntar_impressao_fechamento()
+                except Exception:
+                    imprimir_resumo = False
+                if imprimir_resumo:
+                    try:
+                        self._imprimir_resumo_fechamento(dados_resumo)
+                    except Exception as e_imp:
+                        registrar_log(None, "Fechamento de Caixa", "Falha", f"Erro impressão resumo: {e_imp}")
+                try:
+                    self._exibir_resumo_fechamento(dados_resumo, ao_concluir=self._perguntar_abertura_novo_caixa)
+                except Exception as e_res:
+                    registrar_log(None, "Fechamento de Caixa", "Aviso", f"Resumo visual indisponível ({e_res}).")
+                    self._perguntar_abertura_novo_caixa()
             else:
                 self._set_status(msg_fechamento, "#ff6666")
                 registrar_log(None, "Fechamento de Caixa", "Falha", msg_fechamento)
@@ -2600,32 +4650,311 @@ class ModuloPDV(ctk.CTkToplevel):
             self._set_status(f"Falha no fechamento: {e}", "#ff6666")
             registrar_log(None, "Fechamento de Caixa", "Falha", f"Erro: {e}")
 
-    def voltar_ao_menu(self):
-        # Restaura o dashboard que permaneceu minimizado em segundo plano durante o PDV.
+    def _perguntar_impressao_fechamento(self):
+        """Pergunta SIM/NÃO sobre imprimir o resumo do fechamento (BLOCO 2, Parte B).
+
+        Retorna True (IMPRIMIR) ou False (NÃO IMPRIMIR). Em ambiente sem UI
+        (checklist/testes), retorna False — nunca bloqueia o fluxo.
+        """
+        from tkinter import messagebox
+
         try:
-            master = self.master
-            if master is not None and master.winfo_exists():
-                master.deiconify()
-                master.lift()
+            return bool(
+                messagebox.askyesno(
+                    "Imprimir fechamento",
+                    "Deseja imprimir o resumo do fechamento de caixa?",
+                    parent=self,
+                )
+            )
+        except Exception:
+            return False
+
+    def _montar_texto_resumo_fechamento(self, dados):
+        """Monta o texto do resumo do fechamento (reutilizado na tela e na impressão)."""
+        largura = 42
+        sep = "-" * largura
+        linhas = [
+            "FECHAMENTO DE CAIXA",
+            sep,
+            f"Data/Hora: {dados.get('data_hora', '')}",
+            f"Caixa: {dados.get('caixa_id', '')}",
+        ]
+        operador = dados.get("operador")
+        if operador:
+            linhas.append(f"Operador: {operador}")
+        linhas.append(sep)
+        linhas.append(f"{'MODALIDADE':<12} {'SISTEMA':>9} {'INFORM.':>9} {'DIFER.':>9}")
+        def _fmt_dif_col(_v):
+            # Visual apenas: sem "+" em zero; "+" somente em diferenca positiva.
+            try:
+                _v = round(float(_v or 0.0), 2)
+            except Exception:
+                _v = 0.0
+            if _v > 0.0004:
+                return f"{_v:+>9.2f}"
+            return f"{_v:>9.2f}"
+        for item in dados.get("modalidades", []):
+            linhas.append(
+                f"{str(item.get('modalidade', '')):<12} "
+                f"{float(item.get('calculado', 0.0)):>9.2f} "
+                f"{float(item.get('informado', 0.0)):>9.2f} "
+                f"{_fmt_dif_col(item.get('diferenca', 0.0))}"
+            )
+        linhas.append(sep)
+        _abertura = float(dados.get("saldo_abertura", 0.0) or 0.0)
+        _total_sis = float(dados.get("total_calculado", 0.0) or 0.0)
+        _total_inf = float(dados.get("total_informado", 0.0) or 0.0)
+        _dif = float(dados.get("diferenca_geral", 0.0) or 0.0)
+        _mods = {str(i.get("modalidade", "")).upper(): i for i in dados.get("modalidades", [])}
+        _din = _mods.get("DINHEIRO", {})
+        _din_sis = float(_din.get("calculado", 0.0) or 0.0) - _abertura
+        _din_inf = float(_din.get("informado", 0.0) or 0.0) - _abertura
+        _din_dif = round(_din_inf - _din_sis, 2)
+        linhas.append(f"VALOR DE ABERTURA DO CAIXA: R$ {_abertura:>9.2f}")
+        linhas.append(sep)
+        linhas.append(f"DINHEIRO:                  R$ {_din_sis:>9.2f}")
+        for _m in ("DEBITO", "CREDITO", "VOUCHER", "PIX"):
+            _v = float((_mods.get(_m) or {}).get("calculado", 0.0) or 0.0)
+            linhas.append(f"{_m:<12}                  R$ {_v:>9.2f}")
+        linhas.append(sep)
+        _sang = list(dados.get("sangrias", []) or [])
+        _ref = list(dados.get("reforcos", []) or [])
+        if _sang:
+            linhas.append("SANGRIAS")
+            for _s in _sang:
+                try:
+                    _sv = float(_s.get("valor", 0.0) or 0.0)
+                except Exception:
+                    _sv = 0.0
+                linhas.append(f"{str(_s.get('hora', '--:--'))} - R$ {_sv:>8.2f}")
+        if _ref:
+            linhas.append("REFORCOS")
+            for _r in _ref:
+                try:
+                    _rv = float(_r.get("valor", 0.0) or 0.0)
+                except Exception:
+                    _rv = 0.0
+                linhas.append(f"{str(_r.get('hora', '--:--'))} - R$ {_rv:>8.2f}")
+        if _sang or _ref:
+            linhas.append(sep)
+        _dif_fmt = _fmt_dif_col(_dif)
+        if _dif_fmt.strip().startswith("+"):
+            _dif_linha = f"DIFERENCA:                   +R$ {_dif:>8.2f}"
+        elif _dif < -0.0004:
+            _dif_linha = f"DIFERENCA:                   -R$ {abs(_dif):>8.2f}"
+        else:
+            _dif_linha = f"DIFERENCA:                    R$ {_dif:>8.2f}"
+        linhas.append(f"TOTAL DO SISTEMA:            R$ {_total_sis:>9.2f}")
+        linhas.append(f"VALOR INFORMADO:             R$ {_total_inf:>9.2f}")
+        linhas.append(_dif_linha)
+        linhas.append(sep)
+        return "\n".join(linhas)
+
+    def _imprimir_resumo_fechamento(self, dados):
+        """Imprime o resumo do fechamento via rotina ESC/POS existente (BLOCO 2, Parte B).
+
+        Reutiliza ``_enviar_raw_impressora_padrao``; não altera impressão de
+        vendas, NFC-e ou ACBr.
+        """
+        texto = self._montar_texto_resumo_fechamento(dados)
+        payload = (texto + "\n\n\n").encode("cp850", errors="replace")
+        self._enviar_raw_impressora_padrao(payload)
+        registrar_log(None, "Fechamento de Caixa", "Sucesso", "Resumo do fechamento impresso.")
+
+    def _exibir_resumo_fechamento(self, dados, ao_concluir=None):
+        """Exibe o modal de resumo visual pós-fechamento (BLOCO 2, Parte A).
+
+        Permanece visível para conferência/foto; aparece tanto no SIM quanto
+        no NÃO da impressão ("não imprimir" ≠ "não mostrar").
+        Ao fechar (botão FECHAR ou X), executa ``ao_concluir`` — pergunta
+        "ABRIR NOVO CAIXA?" e só abre a tela de contagem no SIM (no NÃO o
+        caixa permanece fechado e o programa pode ser encerrado).
+        """
+        resumo = ctk.CTkToplevel(self)
+        resumo.title("FECHAMENTO DE CAIXA — RESUMO")
+        resumo.geometry("560x620")
+        try:
+            resumo.transient(self)
+            resumo.grab_set()
         except Exception:
             pass
 
+        concluido = {"ok": False}
+
+        def _concluir_resumo():
+            if concluido["ok"]:
+                return
+            concluido["ok"] = True
+            try:
+                if hasattr(resumo, "grab_release"):
+                    resumo.grab_release()
+            except Exception:
+                pass
+            try:
+                resumo.destroy()
+            except Exception:
+                pass
+            if callable(ao_concluir):
+                try:
+                    ao_concluir()
+                except Exception as e_cb:
+                    registrar_log(None, "Fechamento de Caixa", "Aviso", f"Pós-resumo indisponível ({e_cb}).")
+
+        ctk.CTkLabel(
+            resumo,
+            text="FECHAMENTO DE CAIXA",
+            font=("Roboto", 18, "bold"),
+        ).pack(pady=(14, 2))
+        ctk.CTkLabel(
+            resumo,
+            text=f"{dados.get('data_hora', '')}   |   Caixa {dados.get('caixa_id', '')}"
+            + (f"   |   Operador: {dados.get('operador')}" if dados.get("operador") else ""),
+            font=("Roboto", 12),
+            text_color="#9aa0a6",
+        ).pack(pady=(0, 8))
+
+        texto = ctk.CTkTextbox(resumo, font=("Consolas", 12), wrap="none")
+        texto.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        texto.insert("1.0", self._montar_texto_resumo_fechamento(dados))
+        texto.configure(state="disabled")
+
+        ctk.CTkButton(
+            resumo,
+            text="FECHAR",
+            fg_color="#27ae60",
+            height=40,
+            font=("Roboto", 14, "bold"),
+            command=_concluir_resumo,
+        ).pack(padx=12, pady=(0, 14), fill="x")
+        resumo.protocol("WM_DELETE_WINDOW", _concluir_resumo)
+
+    def _perguntar_abertura_novo_caixa(self):
+        """Após o resultado final do fechamento: pergunta "ABRIR NOVO CAIXA?".
+
+        SIM → abre a tela de CONTAGEM DE ABERTURA (ciclo existente).
+        NÃO → NÃO abre a tela de contagem; o caixa permanece FECHADO
+        (``caixa_id = None``, indicador 🔴 CAIXA FECHADO) e o programa
+        pode ser encerrado normalmente. A tela de contagem NUNCA abre
+        automaticamente depois de um fechamento.
+        """
+        abrir = False
         try:
-            if self.modal_abertura is not None and self.modal_abertura.winfo_exists():
-                self.modal_abertura.grab_release()
-                self.modal_abertura.destroy()
+            abrir = bool(
+                messagebox.askyesno(
+                    "Novo caixa",
+                    "ABRIR NOVO CAIXA?",
+                    parent=self,
+                )
+            )
+        except Exception:
+            abrir = False
+
+        if abrir:
+            self._encerrar_ciclo_e_abrir_novo_caixa()
+            return
+
+        # NÃO: estado de caixa fechado preservado, sem modal de abertura.
+        self.caixa_id = None
+        self._atualizar_indicadores_caixa(False)
+        self._set_status("Caixa fechado. Nenhum novo caixa aberto.", "#f1c40f")
+
+    def _encerrar_ciclo_e_abrir_novo_caixa(self):
+        """Encerra o ciclo do caixa fechado e inicia abertura do próximo.
+
+        Executado SOMENTE após o operador dispensar a tela de resumo
+        (botão FECHAR ou X). Não fecha o programa, não destrói o PDV e
+        não volta ao menu: apenas libera ``caixa_id`` e reabre o modal
+        de abertura para o novo ciclo.
+        """
+        self.caixa_id = None
+        self._atualizar_indicadores_caixa(False)
+        self._set_status("Caixa anterior encerrado. Abra o novo caixa.", "#f1c40f")
+        try:
+            self.abrir_caixa_modal()
+        except Exception as e:
+            registrar_log(None, "Abertura de Caixa", "Falha", f"Erro ao iniciar novo ciclo: {e}")
+            self._set_status(f"Falha ao abrir novo caixa: {e}", "#ff6666")
+
+    def _minimizar_pdv(self):
+        """Minimiza somente a janela, preservando todos os estados internos."""
+        try:
+            self.iconify()
         except Exception:
             pass
-        self.modal_abertura = None
 
+    def _caixa_esta_aberto(self):
+        try:
+            with get_db_connection() as conn:
+                if self.caixa_id:
+                    row = conn.execute(
+                        "SELECT status FROM caixa_operacao WHERE id = ?",
+                        (self.caixa_id,),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT status FROM caixa_operacao WHERE status = 'ABERTO' ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                if row:
+                    return str(row[0] or "").strip().upper() == "ABERTO"
+                return self.caixa_id is not None
+        except Exception:
+            return self.caixa_id is not None
+
+    def _ao_fechar_janela(self):
+        if self._caixa_esta_aberto():
+            messagebox.showwarning(
+                "Caixa aberto",
+                "Caixa aberto. Favor fechar o caixa primeiro.",
+                parent=self,
+            )
+            return "break"
+        try:
+            self.destroy()
+        except Exception:
+            pass
+        return None
+
+    def reentrar_apos_menu(self):
+        """Reexibe o PDV e revalida o ciclo de caixa antes de operar."""
         try:
             if self._id_after_verificacao_caixa is not None:
                 self.after_cancel(self._id_after_verificacao_caixa)
+            self._id_after_verificacao_caixa = None
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+            self.verificar_caixa_aberto()
+        except Exception as e:
+            try:
+                registrar_log(None, "Reentrada do PDV", "Falha", f"Erro ao reexibir/verificar caixa: {e}")
+            except Exception:
+                pass
+            try:
+                self._set_status(f"Falha ao verificar caixa: {e}", "#ff6666")
+            except Exception:
+                pass
+
+    def _ao_reexibir_pdv(self, event=None):
+        """Ao restaurar o PDV minimizado, mantém o modal de abertura pendente."""
+        try:
+            if event is not None and str(event.widget) != str(self):
+                return None
+            modal = self.modal_abertura
+            if modal is not None and modal.winfo_exists() and modal.state() == "withdrawn":
+                self.after(30, self._restaurar_modal_abertura)
         except Exception:
             pass
-        self._id_after_verificacao_caixa = None
+        return None
 
-        self.destroy()
+    def _restaurar_modal_abertura(self):
+        try:
+            modal = self.modal_abertura
+            if modal is not None and modal.winfo_exists():
+                modal.deiconify()
+                modal.lift()
+                modal.grab_set()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

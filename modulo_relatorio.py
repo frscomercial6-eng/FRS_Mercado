@@ -17,7 +17,6 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2 import service_account
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 import pickle
 
@@ -74,6 +73,15 @@ class ModuloRelatorio(ctk.CTkToplevel):
         )
         self.btn_sped_base.pack(side="right", padx=10)
 
+        self.btn_estorno = ctk.CTkButton(
+            self.frame_filtros,
+            text="Estornar Venda (ID)",
+            fg_color="#8e2323",
+            hover_color="#a63a3a",
+            command=self.estornar_venda_dialog,
+        )
+        self.btn_estorno.pack(side="right", padx=10)
+
         # --- Dashboard de Cartões ---
         self.frame_cards = ctk.CTkFrame(self, fg_color="transparent")
         self.frame_cards.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
@@ -113,6 +121,59 @@ class ModuloRelatorio(ctk.CTkToplevel):
 
         except Exception as e:
             messagebox.showerror("Erro BI", f"Erro ao processar dados: {e}")
+
+    def estornar_venda_dialog(self):
+        """UI mínima de estorno de venda (4B-3): restaura lotes + agregado."""
+        modal = ctk.CTkToplevel(self)
+        modal.title("Estornar Venda")
+        modal.geometry("440x280")
+        modal.grab_set()
+
+        ctk.CTkLabel(modal, text="ID da venda (vendas.id):").pack(pady=(18, 4))
+        ent_id = ctk.CTkEntry(modal, width=140)
+        ent_id.pack()
+
+        ctk.CTkLabel(modal, text="Motivo (opcional):").pack(pady=(12, 4))
+        ent_motivo = ctk.CTkEntry(modal, width=300)
+        ent_motivo.pack()
+
+        def _confirmar():
+            bruto = ent_id.get().strip()
+            try:
+                venda_id = int(bruto)
+            except ValueError:
+                messagebox.showerror("Estorno", "Informe um ID numérico válido.", parent=modal)
+                return
+            if not messagebox.askyesno(
+                "Confirmar Estorno",
+                f"Estornar a venda {venda_id}?\n\n"
+                "O estoque (lotes e agregado) será restaurado conforme os lotes\n"
+                "registrados em itens_venda e a operação não poderá ser repetida.",
+                parent=modal,
+            ):
+                return
+            try:
+                from modulo_estoque import estornar_venda
+
+                restaurado = estornar_venda(venda_id, motivo=ent_motivo.get().strip())
+            except Exception as exc:
+                messagebox.showerror("Estorno", f"Falha ao estornar:\n{exc}", parent=modal)
+                return
+            modal.destroy()
+            detalhe = (
+                ", ".join(f"produto {pid}: {qtd:g}" for pid, qtd in sorted(restaurado.items()))
+                or "nada a restaurar"
+            )
+            messagebox.showinfo(
+                "Estorno concluído",
+                f"Venda {venda_id} estornada com sucesso.\nEstoque restaurado: {detalhe}",
+            )
+            self.atualizar_dados()
+
+        ctk.CTkButton(
+            modal, text="Confirmar Estorno", fg_color="#8e2323", hover_color="#a63a3a",
+            command=_confirmar,
+        ).pack(pady=18)
 
     def gerar_e_subir_pdf(self):
         """Gera o PDF profissional e envia ao Drive."""
@@ -254,6 +315,16 @@ class ModuloRelatorio(ctk.CTkToplevel):
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
+                # Dependência opcional: a importação só ocorre quando o Drive
+                # realmente precisa iniciar o fluxo OAuth e não pode afetar
+                # relatórios locais.
+                try:
+                    from google_auth_oauthlib.flow import InstalledAppFlow
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "Google Drive requer a biblioteca google-auth-oauthlib, "
+                        "que não está instalada."
+                    ) from exc
                 flow = InstalledAppFlow.from_client_secrets_file(GOOGLE_CREDS["credentials"], SCOPES)
                 creds = flow.run_local_server(port=0)
             with open(token_path, 'wb') as token:

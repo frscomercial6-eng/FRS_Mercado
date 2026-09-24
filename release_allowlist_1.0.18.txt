@@ -1,0 +1,32 @@
+# FRS Mercado 1.0.18 — allowlist pública do commit final.
+# Cada linha é relativo à raiz do repositório. Build/databases/binários privados
+# são gerados fora do Git e jamais entram no staging.
+
+CHANGELOG.md
+Contrato_FRS_Atual.md
+EULA.txt
+.gitignore
+_build_support/checklist_homologacao.md
+build_exe.py
+checklist_homologacao.md
+database.py
+database_manager.py
+deploy.py
+mobile_app/pyproject.toml
+modulo_config.py
+modulo_estoque.py
+modulo_financeiro.py
+modulo_fiscal.py
+modulo_login.py
+modulo_main.py
+modulo_orcamento.py
+modulo_pdv.py
+modulo_relatorio.py
+release_allowlist_1.0.18.txt
+release_info.py
+release_master.py
+run_tests.py
+setup_frs.iss
+system_monitor.py
+version.json
+version.txt

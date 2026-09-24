@@ -138,6 +138,7 @@ def init_db():
                 codigo_barras TEXT UNIQUE NOT NULL,
                 nome TEXT NOT NULL,
                 variacao TEXT,
+                unidade TEXT NOT NULL DEFAULT 'UN',
                 ncm TEXT,
                 aliquota_icms REAL NOT NULL DEFAULT 0.0,
                 aliquota_pis REAL NOT NULL DEFAULT 0.0,
@@ -147,8 +148,8 @@ def init_db():
                 preco_custo REAL NOT NULL,
                 margem_lucro REAL NOT NULL DEFAULT 0.0,
                 preco_venda REAL NOT NULL,
-                quantidade_atual INTEGER NOT NULL DEFAULT 0,
-                quantidade_minima INTEGER NOT NULL DEFAULT 0,
+                quantidade_atual NUMERIC NOT NULL DEFAULT 0,
+                quantidade_minima NUMERIC NOT NULL DEFAULT 0,
                 validade DATE,
                 categoria TEXT,
                 preco_base NUMERIC,
@@ -169,6 +170,17 @@ def init_db():
             cursor.execute("ALTER TABLE produtos ADD COLUMN aliquota_ibs REAL NOT NULL DEFAULT 0.0")
         if "aliquota_cbs" not in produtos_cols:
             cursor.execute("ALTER TABLE produtos ADD COLUMN aliquota_cbs REAL NOT NULL DEFAULT 0.0")
+        if "unidade" not in produtos_cols:
+            cursor.execute("ALTER TABLE produtos ADD COLUMN unidade TEXT NOT NULL DEFAULT 'UN'")
+        # Backfill legado: preenche unidade ausente sem sobrescrever valores existentes.
+        cursor.execute(
+            "UPDATE produtos SET unidade = 'KG' WHERE (unidade IS NULL OR TRIM(unidade) = '') "
+            "AND (LOWER(COALESCE(variacao,'')) = 'kg' OR LOWER(COALESCE(categoria,'')) = 'kg' "
+            "OR LOWER(TRIM(nome)) LIKE '%kg')"
+        )
+        cursor.execute(
+            "UPDATE produtos SET unidade = 'UN' WHERE unidade IS NULL OR TRIM(unidade) = ''"
+        )
 
         # Tabela de Usuários
         cursor.execute('''
@@ -192,6 +204,7 @@ def init_db():
                 fornecedor_id INTEGER,
                 quantidade INTEGER NOT NULL,
                 data_entrada DATETIME DEFAULT CURRENT_TIMESTAMP,
+                lote_id INTEGER,
                 FOREIGN KEY (produto_id) REFERENCES produtos (id)
             )
         ''')
@@ -199,6 +212,8 @@ def init_db():
         entradas_cols = [row[1] for row in cursor.fetchall()]
         if "fornecedor_id" not in entradas_cols:
             cursor.execute("ALTER TABLE entradas ADD COLUMN fornecedor_id INTEGER")
+        if "lote_id" not in entradas_cols:
+            cursor.execute("ALTER TABLE entradas ADD COLUMN lote_id INTEGER")
 
         # Tabela de Clientes
         cursor.execute('''
@@ -284,12 +299,16 @@ def init_db():
         if "diferenca" not in vendas_cols:
             cursor.execute("ALTER TABLE vendas ADD COLUMN diferenca NUMERIC NOT NULL DEFAULT 0.0")
 
+        # Garantir coluna caixa_operacao_id em vendas
+        if "caixa_operacao_id" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN caixa_operacao_id INTEGER")
+
         # Tabela de Orçamentos (Propostas Comerciais)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS orcamentos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 data_orcamento DATETIME DEFAULT CURRENT_TIMESTAMP,
-                cliente_id INTEGER NOT NULL,
+                cliente_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'ORCAMENTO',
                 valor_total NUMERIC NOT NULL DEFAULT 0.0,
                 valor_impostos_retidos NUMERIC NOT NULL DEFAULT 0.0,
@@ -311,7 +330,8 @@ def init_db():
                 codigo_barras TEXT,
                 descricao_produto TEXT NOT NULL,
                 ncm TEXT,
-                quantidade INTEGER NOT NULL,
+                quantidade NUMERIC NOT NULL,
+                unidade TEXT,
                 valor_unitario NUMERIC NOT NULL,
                 subtotal NUMERIC NOT NULL,
                 FOREIGN KEY (orcamento_id) REFERENCES orcamentos (id) ON DELETE CASCADE,
@@ -330,6 +350,44 @@ def init_db():
             )
         ''')
 
+        # Vale é um documento separado do orçamento comercial. O registro
+        # permanece PENDENTE até ser quitado por uma venda normal do PDV.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vales (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                numero INTEGER NOT NULL UNIQUE,
+                cliente_id INTEGER NOT NULL,
+                data_criacao DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                status TEXT NOT NULL DEFAULT 'PENDENTE',
+                data_quitacao DATETIME,
+                venda_id INTEGER,
+                caixa_operacao_id INTEGER,
+                forma_pagamento TEXT,
+                total NUMERIC NOT NULL DEFAULT 0.0,
+                FOREIGN KEY (cliente_id) REFERENCES clientes (id),
+                FOREIGN KEY (venda_id) REFERENCES vendas (id),
+                FOREIGN KEY (caixa_operacao_id) REFERENCES caixa_operacao (id)
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vale_itens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vale_id INTEGER NOT NULL,
+                produto_id INTEGER,
+                codigo_barras TEXT,
+                descricao_produto TEXT NOT NULL,
+                ncm TEXT,
+                quantidade NUMERIC NOT NULL,
+                unidade TEXT,
+                preco_unitario NUMERIC NOT NULL,
+                subtotal NUMERIC NOT NULL,
+                FOREIGN KEY (vale_id) REFERENCES vales (id) ON DELETE CASCADE,
+                FOREIGN KEY (produto_id) REFERENCES produtos (id)
+            )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vales_cliente_status ON vales (cliente_id, status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vale_itens_vale ON vale_itens (vale_id)")
+
         # Tabela de Sangrias (Retiradas de dinheiro)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS sangrias (
@@ -341,6 +399,7 @@ def init_db():
             )
         ''')
 
+        ############################################################
         # Conferência analítica do fechamento de caixa (uma linha por modalidade)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS caixa_conferencia (
@@ -354,6 +413,25 @@ def init_db():
                 data_registro DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Defensivo idempotente para bases legadas que chegaram sem uma ou mais
+        # dessas colunas. Omitir colunas já existentes evita "duplicate column"
+        # em reinicializações e garante que o campo reportado no erro em produção
+        # (caixa_conferencia.valor_calculado) exista em qualquer base criada antes
+        # desta versão.
+        def _garantir_colunas_caixa_conferencia(cur):
+            cur.execute("PRAGMA table_info(caixa_conferencia)")
+            cc_cols = [row[1] for row in cur.fetchall()]
+            for col, sql in {
+                "valor_calculado": "ALTER TABLE caixa_conferencia ADD COLUMN valor_calculado NUMERIC NOT NULL DEFAULT 0.0",
+                "valor_sistema":   "ALTER TABLE caixa_conferencia ADD COLUMN valor_sistema NUMERIC NOT NULL DEFAULT 0.0",
+                "valor_informado": "ALTER TABLE caixa_conferencia ADD COLUMN valor_informado NUMERIC NOT NULL DEFAULT 0.0",
+                "diferenca":       "ALTER TABLE caixa_conferencia ADD COLUMN diferenca NUMERIC NOT NULL DEFAULT 0.0",
+                "data_registro":   "ALTER TABLE caixa_conferencia ADD COLUMN data_registro DATETIME",
+            }.items():
+                if col not in cc_cols:
+                    cur.execute(sql)
+        _garantir_colunas_caixa_conferencia(cursor)
 
         # Lotes de produtos (rastro da NF-e: nLote/qLote/dFab/dVal por item)
         cursor.execute('''
@@ -370,6 +448,15 @@ def init_db():
                 data_registro DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Índices de rastreabilidade/FEFO para lotes (idempotentes)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_lotes_produto_numero_chave ON produto_lotes (produto_id, numero_lote, chave_nfe)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_lotes_produto_id ON produto_lotes (produto_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_lotes_data_validade ON produto_lotes (data_validade)")
+
+        # Triggers para assegurar que nenhum lote fique com quantidade negativa (T38)
+        cursor.execute("CREATE TRIGGER IF NOT EXISTS trg_lotes_nao_negativo_ins BEFORE INSERT ON produto_lotes FOR EACH ROW WHEN NEW.quantidade < 0 BEGIN SELECT RAISE(ABORT, 'Quantidade de lote não pode ser negativa (T38)'); END;")
+        cursor.execute("CREATE TRIGGER IF NOT EXISTS trg_lotes_nao_negativo_upd BEFORE UPDATE OF quantidade ON produto_lotes FOR EACH ROW WHEN NEW.quantidade < 0 BEGIN SELECT RAISE(ABORT, 'Quantidade de lote não pode ser negativa (T38)'); END;")
 
         # Migração defensiva para bases antigas sem vínculo de caixa nas sangrias
         cursor.execute("PRAGMA table_info(sangrias)")
@@ -424,6 +511,15 @@ def init_db():
             cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_ibs NUMERIC NOT NULL DEFAULT 0.0")
         if "valor_cbs" not in vendas_dia_cols:
             cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_cbs NUMERIC NOT NULL DEFAULT 0.0")
+        if "valor_informado" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN valor_informado REAL NOT NULL DEFAULT 0.0")
+        if "diferenca" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN diferenca REAL NOT NULL DEFAULT 0.0")
+
+        # Garantir coluna caixa_operacao_id em vendas_dia
+        if "caixa_operacao_id" not in vendas_dia_cols:
+            cursor.execute("ALTER TABLE vendas_dia ADD COLUMN caixa_operacao_id INTEGER")
+
 
         # Tabela de Licenciamento
         cursor.execute('''
@@ -472,6 +568,8 @@ def init_db():
             cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_ibs NUMERIC NOT NULL DEFAULT 0.0")
         if "valor_cbs" not in financeiro_cols:
             cursor.execute("ALTER TABLE financeiro ADD COLUMN valor_cbs NUMERIC NOT NULL DEFAULT 0.0")
+        if "caixa_operacao_id" not in financeiro_cols:
+            cursor.execute("ALTER TABLE financeiro ADD COLUMN caixa_operacao_id INTEGER")
 
         # Configuração de alíquotas de retenção por NCM (SPED/tributário)
         cursor.execute('''
@@ -526,7 +624,7 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 venda_id INTEGER NOT NULL,
                 produto_id INTEGER NOT NULL,
-                quantidade INTEGER NOT NULL,
+                quantidade NUMERIC NOT NULL,
                 subtotal NUMERIC NOT NULL,
                 regime_tributario TEXT NOT NULL DEFAULT 'ATUAL',
                 aliquota_icms REAL NOT NULL DEFAULT 0.0,
@@ -539,6 +637,8 @@ def init_db():
                 valor_cofins REAL NOT NULL DEFAULT 0.0,
                 valor_ibs REAL NOT NULL DEFAULT 0.0,
                 valor_cbs REAL NOT NULL DEFAULT 0.0,
+                lote_id INTEGER,
+                quantidade_lote REAL NOT NULL DEFAULT 0.0,
                 FOREIGN KEY (venda_id) REFERENCES vendas (id),
                 FOREIGN KEY (produto_id) REFERENCES produtos (id)
             )
@@ -567,6 +667,10 @@ def init_db():
             cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_ibs REAL NOT NULL DEFAULT 0.0")
         if "valor_cbs" not in itens_venda_cols:
             cursor.execute("ALTER TABLE itens_venda ADD COLUMN valor_cbs REAL NOT NULL DEFAULT 0.0")
+        if "lote_id" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN lote_id INTEGER")
+        if "quantidade_lote" not in itens_venda_cols:
+            cursor.execute("ALTER TABLE itens_venda ADD COLUMN quantidade_lote REAL NOT NULL DEFAULT 0.0")
 
         # Tabela de Histórico da IA Mentora
         cursor.execute('''

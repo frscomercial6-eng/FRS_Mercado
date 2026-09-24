@@ -16,7 +16,7 @@ from updater import Updater
 
 
 _USUARIO_LOGADO = None
-RENOVACAO_URL = "https://invoice.infinitepay.io/plans/frsoficinadepesca/avka57U38g"
+PLANOS_URL = "https://www.frssolutions.com.br/planos"
 
 class ModuloLogin(ctk.CTkToplevel):
     def __init__(self, parent, callback_sucesso, auto_update_repo: str | None = None):
@@ -312,17 +312,73 @@ class ModuloLogin(ctk.CTkToplevel):
 
         ctk.CTkButton(self.frame_setup, text="FINALIZAR SETUP", command=realizar_setup).pack(pady=20)
 
+    def _validar_formato_codigo(self, codigo_sem_prefixo):
+        partes = str(codigo_sem_prefixo or "").strip().split("-")
+        if len(partes) != 4:
+            return None, "Codigo invalido."
+        data_chave = "-".join(partes[:3])
+        try:
+            datetime.strptime(data_chave, "%Y-%m-%d")
+        except Exception:
+            return None, "Codigo invalido."
+        hp = str(partes[3] or "").strip().lower()
+        if len(hp) != 16 or any(c not in "0123456789abcdef" for c in hp):
+            return None, "Codigo invalido."
+        return (data_chave, hp), None
+
+    def validar_codigo_ativacao(self, client_identifier, entered_code):
+        codigo = str(entered_code or "").strip().upper()
+        if codigo.startswith("LICENCA_FRS:"):
+            codigo = codigo[len("LICENCA_FRS:"):]
+        parsed, erro = self._validar_formato_codigo(codigo)
+        if erro:
+            return None, "Codigo de ativacao em formato invalido."
+        data_chave, hash_parte = parsed
+        ident = str(client_identifier or "").strip().upper()
+        if not ident:
+            return None, "Razao Social nao configurada."
+        data_to_hash = f"{ident}-{data_chave}-{self.SECRET_SALT}"
+        expected_hash = hashlib.sha256(data_to_hash.encode()).hexdigest()
+        if expected_hash[:16] != hash_parte[:16]:
+            return None, "Codigo de ativacao invalido."
+        try:
+            exp_dt = datetime.strptime(data_chave, "%Y-%m-%d").date()
+        except Exception:
+            return None, "Codigo de ativacao em formato invalido."
+        hoje = datetime.now().date()
+        delta = (exp_dt - hoje).days
+        janelas = ((28, 31), (88, 92), (178, 183), (363, 368))
+        ok = any(lo - 2 <= delta <= hi + 2 for lo, hi in janelas)
+        if not ok:
+            return None, "Codigo de ativacao expirado ou gerado para outra data."
+        if delta <= 0:
+            try:
+                with get_db_connection() as conn:
+                    row = conn.execute("SELECT data_expiracao FROM licenca ORDER BY id DESC LIMIT 1").fetchone()
+                if not row or str(row[0]).strip() >= data_chave:
+                    return None, "Codigo de ativacao expirado ou gerado para outra data."
+            except Exception:
+                return None, "Codigo de ativacao expirado ou gerado para outra data."
+        return data_chave, None
+
     def _configurar_tela_ativacao(self, msg=None):
+        self.geometry("460x560")
         self.frame_login.pack_forget()
         self.frame_setup.pack_forget()
-        self.lbl_titulo.configure(text="LICENÇA EXPIRADA", text_color="#FF5555")
+        self.lbl_titulo.configure(text="ATIVACAO DE LICENCA", text_color="#F1C40F")
+        try:
+            self.frame_ativacao.pack_forget()
+        except Exception:
+            pass
+        for widget in self.frame_ativacao.winfo_children():
+            widget.destroy()
         self.frame_ativacao.pack(padx=30, pady=10, fill="both", expand=True)
 
         if msg:
             ctk.CTkLabel(self.frame_ativacao, text=msg, text_color="#FFCC00", font=("Arial", 11, "bold")).pack(pady=(10, 0))
 
         ctk.CTkLabel(self.frame_ativacao, text="Insira o Código de Ativação:", text_color="orange").pack(pady=20)
-        self.ent_codigo = ctk.CTkEntry(self.frame_ativacao, width=300, placeholder_text="XXXX-XXXX-XXXX")
+        self.ent_codigo = ctk.CTkEntry(self.frame_ativacao, width=300, placeholder_text="LICENCA_FRS:AAAA-MM-DD-XXXX")
         self.ent_codigo.pack(pady=10)
 
         def validar_ativacao():
@@ -342,50 +398,39 @@ class ModuloLogin(ctk.CTkToplevel):
                 registrar_log(None, "Ativação de Licença", "Falha", "Razão Social não configurada.")
                 return
 
-            # 2. Calcular a data de expiração esperada (365 dias a partir de HOJE)
-            expected_expiration_date = (datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d')
-            
-            # 3. Gerar o hash esperado com base nos dados e no salt
-            data_to_hash = f"{client_identifier}-{expected_expiration_date}-{self.SECRET_SALT}"
-            expected_hash = hashlib.sha256(data_to_hash.encode()).hexdigest()
-
-            if entered_code.startswith("LICENCA_FRS:"):
-                entered_code = entered_code[len("LICENCA_FRS:"):]
-
-            partes_codigo = entered_code.split("-")
-            if len(partes_codigo) != 4:
-                messagebox.showerror("Erro", "Código de ativação em formato inválido.")
-                registrar_log(None, "Ativação de Licença", "Falha", f"Formato inválido para {client_identifier}.")
+            data_expiracao, erro_msg = self.validar_codigo_ativacao(client_identifier, entered_code)
+            if erro_msg:
+                messagebox.showerror("Erro", erro_msg)
+                registrar_log(None, "Ativacao de Licenca", "Falha", f"{erro_msg} ({client_identifier}).")
                 return
-
-            data_chave = "-".join(partes_codigo[:3])
-            if data_chave != expected_expiration_date:
-                messagebox.showerror("Erro", "Código de ativação expirado ou gerado para outra data.")
-                registrar_log(None, "Ativação de Licença", "Falha", f"Data divergente para {client_identifier}.")
+            try:
+                with get_db_connection() as conn:
+                    try:
+                        n_lic = conn.execute("SELECT COUNT(*) FROM licenca").fetchone()[0]
+                    except Exception:
+                        n_lic = 0
+                    if n_lic and n_lic > 0:
+                        conn.execute("UPDATE licenca SET data_expiracao = ?", (data_expiracao,))
+                    else:
+                        conn.execute("INSERT INTO licenca (data_expiracao) VALUES (?)", (data_expiracao,))
+                config["license_mode"] = "licensed"
+                config["license_expiration_date"] = data_expiracao
+                salvar_configuracoes(config, exibir_alerta=False)
+            except Exception as e:
+                messagebox.showerror("Erro", "Licenca valida, porem nao foi possivel gravar no banco.")
+                print(f"[ERRO LICENCA] Falha ao atualizar licenca: {e}")
+                registrar_log(None, "Ativacao de Licenca", "Falha", "Codigo valido, mas erro ao gravar no banco.")
                 return
+            try:
+                _dias = (datetime.strptime(data_expiracao, "%Y-%m-%d").date() - datetime.now().date()).days
+            except Exception:
+                _dias = 0
+            messagebox.showinfo("Ativado", f"Licenca ativada! Nova validade: {data_expiracao} ({_dias} dias).")
+            registrar_log(None, "Ativacao de Licenca", "Sucesso", f"Licenca ativada para {client_identifier} ate {data_expiracao}.")
+            self.frame_ativacao.pack_forget()
+            self._verificar_estado_sistema()
 
-            hash_parte = partes_codigo[3].lower()
-            if expected_hash[:16] == hash_parte[:16]:
-                try:
-                    with get_db_connection() as conn:
-                        conn.execute("UPDATE licenca SET data_expiracao = ?", (expected_expiration_date,))
-                    config["license_mode"] = "licensed"
-                    config["license_expiration_date"] = expected_expiration_date
-                    salvar_configuracoes(config, exibir_alerta=False)
-                except Exception as e:
-                    messagebox.showerror("Erro", "Licença válida, porém não foi possível gravar no banco.")
-                    print(f"[ERRO LICENCA] Falha ao atualizar licença: {e}")
-                    registrar_log(None, "Ativação de Licença", "Falha", "Código válido, mas erro ao gravar no banco.")
-                    return
-                messagebox.showinfo("Ativado", f"Licença renovada por 365 dias! Nova validade: {expected_expiration_date}")
-                registrar_log(None, "Ativação de Licença", "Sucesso", f"Licença renovada para {client_identifier} até {expected_expiration_date}.")
-                self.frame_ativacao.pack_forget() # Esconde a tela de ativação
-                self._verificar_estado_sistema() # Re-verifica o estado para ir para o login
-            else:
-                messagebox.showerror("Erro", "Código de ativação inválido.")
-                registrar_log(None, "Ativação de Licença", "Falha", f"Código inválido inserido para {client_identifier}.")
-
-        ctk.CTkButton(self.frame_ativacao, text="ATIVAR SISTEMA", command=validar_ativacao).pack(pady=20)
+        ctk.CTkButton(self.frame_ativacao, text="ATIVAR LICENCA", command=validar_ativacao).pack(pady=20)
 
     def _configurar_tela_login(self, aviso_vencimento):
         self.frame_setup.pack_forget()
@@ -396,12 +441,12 @@ class ModuloLogin(ctk.CTkToplevel):
         for widget in self.frame_login.winfo_children():
             widget.destroy()
 
-        def abrir_link_renovacao():
+        def abrir_site_planos():
             try:
-                webbrowser.open(RENOVACAO_URL, new=2)
+                webbrowser.open(PLANOS_URL, new=2)
             except Exception as e:
-                messagebox.showerror("Erro", "Não foi possível abrir o link de renovação no navegador.")
-                print(f"[ERRO RENOVACAO] Falha ao abrir URL: {e}")
+                messagebox.showerror("Erro", "Não foi possível abrir o site da FRS Solutions no navegador.")
+                print(f"[ERRO PLANOS] Falha ao abrir URL: {e}")
 
         def abrir_ativacao():
             self.frame_login.pack_forget()
@@ -438,7 +483,7 @@ class ModuloLogin(ctk.CTkToplevel):
             text="COMPRAR LICENCA",
             fg_color="#1f6aa5",
             hover_color="#144870",
-            command=abrir_link_renovacao,
+            command=abrir_site_planos,
         ).pack(fill="x", pady=(0, 8))
 
         ctk.CTkButton(

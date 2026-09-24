@@ -389,10 +389,24 @@ class AppPrincipal(ctk.CTk):
         janela_existente = self._modulos_abertos.get(modulo_nome)
         try:
             if janela_existente is not None and janela_existente.winfo_exists():
-                janela_existente.deiconify()
-                janela_existente.lift()
-                janela_existente.focus_force()
-                return
+                if modulo_nome == "PDV":
+                    try:
+                        reentrar = getattr(janela_existente, "reentrar_apos_menu", None)
+                        if callable(reentrar):
+                            reentrar()
+                        else:
+                            janela_existente.deiconify()
+                            janela_existente.lift()
+                            janela_existente.focus_force()
+                    except Exception as e:
+                        # Reentrada falha: preserva a instância viva e não abre outro PDV.
+                        _log_debug("Falha ao reentrar no PDV existente", e)
+                    return
+                else:
+                    janela_existente.deiconify()
+                    janela_existente.lift()
+                    janela_existente.focus_force()
+                    return
         except Exception:
             self._modulos_abertos.pop(modulo_nome, None)
 
@@ -908,7 +922,15 @@ class AppPrincipal(ctk.CTk):
         janela = ModuloPDV(self)
         self._janela_pdv = janela
 
-        def _limpar_referencia_pdv(_event=None):
+        def _limpar_referencia_pdv(event=None):
+            # <Destroy> dispara também para widgets filhos (bindtags incluem o
+            # toplevel): só limpa a referência quando o PRÓPRIO PDV é destruído,
+            # preserva a instância viva; a minimização usa o gerenciador do Windows.
+            try:
+                if event is not None and str(event.widget) != str(janela):
+                    return
+            except Exception:
+                pass
             self._janela_pdv = None
 
         try:
@@ -1264,8 +1286,19 @@ class AppPrincipal(ctk.CTk):
         self._abrir_modulo_seguro("TAXAS", self._abrir_financeiro_impl)
 
     def _abrir_financeiro_impl(self):
-        from modulo_financeiro import JanelaConfigTajás
-        return JanelaConfigTajás(self, self.usuario_atual)
+        usuario = self.usuario_atual or {}
+        permissao = str(usuario.get("permissao") or usuario.get("permissão") or "").strip()
+        if permissao.casefold() != "administrador".casefold():
+            messagebox.showwarning(
+                "Acesso Negado",
+                "Somente administradores podem alterar as taxas.",
+                parent=self,
+            )
+            return None
+        from modulo_financeiro import JanelaConfigTaxas
+        usuario_taxas = dict(usuario)
+        usuario_taxas["permissao"] = "Administrador"
+        return JanelaConfigTaxas(self, usuario_taxas)
 
     def _resolver_apk_embutido(self) -> Path | None:
         candidatos = [

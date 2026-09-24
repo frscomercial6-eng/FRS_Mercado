@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
@@ -11,6 +12,7 @@ from release_manager import read_version
 
 
 ROOT_DIR = Path(__file__).resolve().parent
+ALLOWLIST_PATH = ROOT_DIR / "release_allowlist_1.0.18.txt"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -49,9 +51,36 @@ def _git_repo_from_remote() -> str | None:
     return None
 
 
+def _release_allowlist() -> list[str]:
+    if not ALLOWLIST_PATH.exists():
+        raise FileNotFoundError(f"Allowlist pública ausente: {ALLOWLIST_PATH}")
+    entries = []
+    for raw in ALLOWLIST_PATH.read_text(encoding="utf-8").splitlines():
+        item = raw.strip()
+        if not item or item.startswith("#"):
+            continue
+        path = (ROOT_DIR / item).resolve()
+        if ROOT_DIR not in path.parents:
+            raise RuntimeError(f"Item fora do projeto na allowlist: {item}")
+        if path.name.lower() in {"credentials.json", "google-services.json"} or path.suffix.lower() in {".db", ".wal", ".shm", ".zip", ".exe"}:
+            raise RuntimeError(f"Item privado/binário não permitido na allowlist: {item}")
+        if not path.is_file():
+            raise FileNotFoundError(f"Item da allowlist não existe: {item}")
+        entries.append(item)
+    if not entries:
+        raise RuntimeError("Allowlist pública está vazia.")
+    return entries
+
+
 def _ensure_git_commit(version: str) -> None:
-    _run(["git", "add", "-A"])
-    commit_msg = f"Release {version}"
+    allowed = _release_allowlist()
+    _run(["git", "reset"])
+    _run(["git", "add", "--", *allowed])
+    staged = [line.strip() for line in _run(["git", "diff", "--cached", "--name-only"]).stdout.splitlines() if line.strip()]
+    unexpected = sorted(set(staged) - set(allowed))
+    if unexpected:
+        raise RuntimeError(f"Staging contém arquivos fora da allowlist: {unexpected}")
+    commit_msg = f"FRS Mercado {version} — stable release"
     proc = _run(["git", "commit", "-m", commit_msg], check=False)
 
     if proc.returncode == 0:
@@ -106,6 +135,14 @@ def _github_api_request(
         return json.loads(body) if body else {}
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _create_or_get_release(repo: str, tag: str, version: str, token: str) -> dict:
     owner, name = repo.split("/", 1)
     base = f"https://api.github.com/repos/{owner}/{name}"
@@ -117,10 +154,18 @@ def _create_or_get_release(repo: str, tag: str, version: str, token: str) -> dic
         if e.code != 404:
             raise
 
+    portable = ROOT_DIR / "installer" / f"FRS_Mercado_Portable_{version}.zip"
+    exe = ROOT_DIR / "dist" / "FRS_Mercado" / "FRS_Mercado.exe"
+    if not portable.exists() or not exe.exists():
+        raise FileNotFoundError("Portable público ou EXE Nuitka ausente; release cancelada.")
     payload = {
         "tag_name": tag,
-        "name": f"Release {version}",
-        "body": f"Release automatizada {version}.",
+        "name": f"FRS Mercado {version}",
+        "body": (
+            f"Release estável FRS Mercado {version}.\n\n"
+            f"Portable SHA-256: `{_sha256(portable)}`\n"
+            f"EXE SHA-256: `{_sha256(exe)}`"
+        ),
         "draft": False,
         "prerelease": False,
     }
@@ -162,13 +207,8 @@ def _delete_asset(asset: dict, token: str) -> None:
 
 
 def _release_assets(version: str) -> list[Path]:
-    candidates = [
-        ROOT_DIR / "dist" / "FRS_Mercado.exe",
-        ROOT_DIR / "dist" / "FRS_Mercado" / "FRS_Mercado.exe",
-        ROOT_DIR / "installer" / "FRS_Mercado_Setup.exe",
-        ROOT_DIR / "installer" / f"FRS_Mercado_Portable_{version}.zip",
-    ]
-    return [p for p in candidates if p.exists()]
+    portable = ROOT_DIR / "installer" / f"FRS_Mercado_Portable_{version}.zip"
+    return [portable] if portable.exists() else []
 
 
 def main() -> None:
@@ -182,7 +222,7 @@ def main() -> None:
         if not _confirm("Executar build antes do deploy?"):
             print("Deploy cancelado: build não autorizado.")
             return
-        subprocess.run([sys.executable, "build_exe.py", "--secure-obfuscation", "--skip-deploy"], cwd=str(ROOT_DIR), check=True)
+        subprocess.run([sys.executable, "build_exe.py", "--nuitka", "--skip-deploy"], cwd=str(ROOT_DIR), check=True)
 
     _ensure_git_commit(version)
     _ensure_tag(version)
