@@ -1,6 +1,8 @@
+
 import argparse
-import os
 import importlib.util
+import json
+import os
 import sqlite3
 import sysconfig
 import stat
@@ -23,7 +25,7 @@ APP_EXE_NAME = "FRS_Mercado.exe"
 APP_DIST_DIR = ROOT_DIR / "dist" / "FRS_Mercado"
 # O Portable público recebe uma base de distribuição criada pelo schema oficial,
 # sempre sem dados operacionais ou cadastro comercial de clientes.
-PUBLIC_DELIVERY_DB_PATH = ROOT_DIR / "_build_staging" / "mercado_1.0.18_distribuicao_limpa.db"
+PUBLIC_DELIVERY_DB_PATH = ROOT_DIR / "_build_staging" / "mercado_1.0.19_distribuicao_limpa.db"
 PUBLIC_ASSET_FILES = ("logo.ico", "frsMercado.ico", "frsMercado.jpeg")
 FORBIDDEN_PUBLIC_NAMES = {
     "credentials.json",
@@ -68,41 +70,61 @@ def _read_current_file(path: Path) -> str:
 
 
 def _validate_security_files() -> None:
-    """Hard-stop build if mandatory security fixes are not present in current sources."""
-    modulo_login = ROOT_DIR / "modulo_login.py"
-    database_file = ROOT_DIR / "database.py"
+    """Hard-stop quando a infraestrutura segura obrigatória estiver ausente."""
+    required_files = {
+        "login local": ROOT_DIR / "modulo_login.py",
+        "licença assinada": ROOT_DIR / "license_manager.py",
+        "verificador": ROOT_DIR / "licensing" / "license_verifier.py",
+        "identidade de máquina": ROOT_DIR / "licensing" / "machine_identity.py",
+        "atualizador seguro": ROOT_DIR / "updater_secure.py",
+        "helper externo": ROOT_DIR / "updater_helper.py",
+        "chaves públicas de licença": ROOT_DIR / "licensing" / "trusted_keys.json",
+        "chaves públicas do updater": ROOT_DIR / "updater_public_keys.json",
+    }
+    missing_files = [str(path) for path in required_files.values() if not path.is_file()]
+    if missing_files:
+        raise RuntimeError(f"Infraestrutura de segurança ausente: {missing_files}")
 
-    if not modulo_login.exists():
-        raise FileNotFoundError(f"Arquivo de segurança ausente: {modulo_login}")
-    if not database_file.exists():
-        raise FileNotFoundError(f"Arquivo de segurança ausente: {database_file}")
-
-    login_src = _read_current_file(modulo_login)
-    db_src = _read_current_file(database_file)
-
-    required_login_markers = [
-        # Validacao por periodo: mensal/trimestral/semestral/anual via validar_codigo_ativacao.
-        "def validar_codigo_ativacao",
-        "janelas = ((28, 31), (88, 92), (178, 183), (363, 368))",
-        "ATIVAR LICENCA",
-    ]
-    missing_login = [m for m in required_login_markers if m not in login_src]
+    login_src = _read_current_file(required_files["login local"])
+    license_src = _read_current_file(required_files["licença assinada"])
+    updater_src = _read_current_file(required_files["atualizador seguro"])
+    helper_src = _read_current_file(required_files["helper externo"])
+    required_login_markers = (
+        "Autenticação é estritamente local",
+        "self.start_silent_check" if "self.start_silent_check" in login_src else "O login nunca consulta o",
+        "SELECT id, nome, permissao FROM usuarios",
+    )
+    missing_login = [marker for marker in required_login_markers if marker not in login_src]
     if missing_login:
-        raise RuntimeError(
-            "Falha na verificação de segurança em modulo_login.py. "
-            f"Trechos ausentes: {missing_login}"
-        )
+        raise RuntimeError(f"Login local não passou na validação de segurança: {missing_login}")
 
-    required_db_markers = [
-        "assinatura TEXT",
-        "ALTER TABLE licenca ADD COLUMN assinatura TEXT",
-    ]
-    missing_db = [m for m in required_db_markers if m not in db_src]
-    if missing_db:
-        raise RuntimeError(
-            "Falha na verificação de segurança em database.py. "
-            f"Trechos ausentes: {missing_db}"
-        )
+    for source, label, markers in (
+        (license_src, "licença", ("LicenseService", "invalid_signed_license", "create_challenge", "activate")),
+        (updater_src, "updater", ("FRS-MERCADO-UPDATE-MANIFEST-V1", "Ed25519PublicKey", ".part", "WAITING_FOR_EXIT", "ROLLING_BACK")),
+        (helper_src, "helper", ("--update-health-check", "PROTECTED_TOP_LEVEL", "_restore_protected_data", "_exclusive_lock")),
+    ):
+        absent = [marker for marker in markers if marker not in source]
+        if absent:
+            raise RuntimeError(f"Segurança de {label} incompleta: {absent}")
+
+    try:
+        license_keys = json.loads(required_files["chaves públicas de licença"].read_text(encoding="utf-8")).get("keys", {})
+        updater_keys = json.loads(required_files["chaves públicas do updater"].read_text(encoding="utf-8")).get("keys", {})
+    except Exception as exc:
+        raise RuntimeError("Arquivos de chaves públicas estão ausentes ou inválidos.") from exc
+    if not isinstance(license_keys, dict) or not license_keys:
+        raise RuntimeError("Configure ao menos uma chave pública oficial de licença antes do build.")
+    if not isinstance(updater_keys, dict) or not updater_keys:
+        raise RuntimeError("Configure ao menos uma chave pública oficial do updater antes do build.")
+
+    private_markers = ("BEGIN PRIVATE KEY", "BEGIN OPENSSH PRIVATE KEY", "BEGIN EC PRIVATE KEY")
+    client_files = list(required_files.values()) + [ROOT_DIR / "gerador_licenca.py"]
+    for path in client_files:
+        if path.suffix not in {".py", ".json"}:
+            continue
+        source = _read_current_file(path)
+        if any(marker in source for marker in private_markers):
+            raise RuntimeError(f"Material de chave privada não pode estar no cliente: {path.name}")
 
 
 def _resolve_entrypoint(base_dir: Path = ROOT_DIR) -> str:
@@ -240,6 +262,9 @@ def _build_pyinstaller_args(
         f"--add-data={ROOT_DIR / 'assets'};assets",
         f"--add-data={ROOT_DIR / 'version.txt'};.",
         f"--add-data={ROOT_DIR / 'EULA.txt'};.",
+        f"--add-data={ROOT_DIR / 'updater_public_keys.json'};.",
+        f"--add-data={ROOT_DIR / 'licensing' / 'trusted_keys.json'};licensing",
+        "--collect-submodules=licensing",
         "--hidden-import=hashlib",
         "--hidden-import=uuid",
         "--hidden-import=encodings",
@@ -288,6 +313,7 @@ def _build_pyinstaller_args(
         "httplib2",
         "requests",
         "bcrypt",
+        "cryptography",
         "openpyxl",
         "setuptools",
     ]
@@ -314,6 +340,40 @@ def _build_pyinstaller_args(
         args.append("--add-data=config;config")
 
     return args
+
+
+def _build_updater_helper(app_version: str) -> Path:
+    """Compila o helper externo; a aplicação nunca se substitui sozinha."""
+    helper_entry = ROOT_DIR / "updater_helper.py"
+    if not helper_entry.is_file():
+        raise FileNotFoundError(f"Helper de atualização ausente: {helper_entry}")
+    helper_dist = ROOT_DIR / "dist" / "UpdateHelper"
+    helper_work = ROOT_DIR / "build" / "UpdateHelper"
+    helper_spec = ROOT_DIR / "build" / "UpdateHelperSpec"
+    version_file = _ensure_windows_version_file(app_version)
+    cmd = [
+        str(helper_entry), "--noconfirm", "--onefile", "--console",
+        "--name=FRS_Mercado_UpdateHelper",
+        f"--distpath={helper_dist}",
+        f"--workpath={helper_work}",
+        f"--specpath={helper_spec}",
+        f"--paths={ROOT_DIR}",
+        f"--add-data={ROOT_DIR / 'updater_public_keys.json'};.",
+        f"--version-file={version_file}",
+        "--collect-submodules=licensing",
+        "--collect-all=cryptography",
+    ]
+    print("[NUITKA/HELPER] Compilando helper seguro de atualização...")
+    subprocess.run(
+        [sys.executable, "-m", "PyInstaller", *cmd],
+        cwd=str(ROOT_DIR), check=True,
+    )
+    produced = helper_dist / "FRS_Mercado_UpdateHelper.exe"
+    if not produced.is_file():
+        raise FileNotFoundError(f"Helper de atualização não foi gerado: {produced}")
+    APP_DIST_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(produced, APP_DIST_DIR / produced.name)
+    return APP_DIST_DIR / produced.name
 
 
 def _terminate_stale_app_processes() -> None:
@@ -429,13 +489,16 @@ def _build_with_nuitka_secure_fallback() -> None:
         "--windows-icon-from-ico=assets/logo.ico",
         "--company-name=FRS Solutions",
         "--product-name=FRS Mercado",
-        "--file-version=1.0.18",
-        "--product-version=1.0.18",
+        "--file-version=1.0.20",
+        "--product-version=1.0.20",
         "--include-data-files=assets/logo.ico=assets/logo.ico",
         "--include-data-files=assets/frsMercado.ico=assets/frsMercado.ico",
         "--include-data-files=assets/frsMercado.jpeg=assets/frsMercado.jpeg",
         "--include-data-file=version.txt=version.txt",
         "--include-data-file=EULA.txt=EULA.txt",
+        "--include-data-file=updater_public_keys.json=updater_public_keys.json",
+        "--include-data-file=licensing/trusted_keys.json=licensing/trusted_keys.json",
+        "--include-package=licensing",
         "--output-dir=dist",
         "--output-filename=FRS_Mercado.exe",
         "main.py",
@@ -473,6 +536,8 @@ def _es_nome_instalador_acbr(nome: str) -> bool:
     nome_low = str(nome or "").lower()
     return (
         "installer" in nome_low
+        or "instalador" in nome_low
+        or "setup" in nome_low
         or "demo" in nome_low
         or nome_low.endswith("-i.exe")
     )
@@ -535,13 +600,16 @@ def _create_portable_package(app_version: str) -> Path:
 
     for asset_name in PUBLIC_ASSET_FILES:
         _copy_if_exists(ROOT_DIR / "assets" / asset_name, portable_dir / "assets" / asset_name)
+    helper_path = APP_DIST_DIR / "FRS_Mercado_UpdateHelper.exe"
+    if not helper_path.is_file():
+        raise FileNotFoundError("Helper seguro de atualização ausente antes do empacotamento.")
     _copy_if_exists(ROOT_DIR / "version.txt", portable_dir / "version.txt")
     _copy_if_exists(ROOT_DIR / "EULA.txt", portable_dir / "EULA.txt")
     _copy_if_exists(SUPPORT_DIR, portable_dir)
     _copy_if_exists(ROOT_DIR / "version.txt", portable_dir / "version.txt")
     _copy_if_exists(ROOT_DIR / "EULA.txt", portable_dir / "EULA.txt")
     _copy_if_exists(SUPPORT_DIR, portable_dir)
-    # Banco sanitizado final do Mário: somente .db principal, sem WAL/SHM.
+    # Base pública limpa; nunca usa o banco operacional do desenvolvedor.
     _seed_delivery_db(portable_dir)
     _montar_instala_acbr_portatil(portable_dir)
 
@@ -573,11 +641,17 @@ def _validate_public_portable(zip_path: Path) -> None:
             name for name in names
             if Path(name).name.lower() in FORBIDDEN_PUBLIC_NAMES
             or "logo_mercado_mario" in name.lower()
-            or "mercado_1.0.18_mario" in name.lower()
+            or "_mario" in name.lower()
             or name.lower().endswith(("-wal", "-shm", "-journal", ".tmp", "~"))
         ]
         if forbidden:
             raise RuntimeError(f"Portable público contém artefatos privados/temporários: {forbidden[:10]}")
+        if sum(1 for name in names if Path(name).name.lower() == "frs_mercado_updatehelper.exe") != 1:
+            raise RuntimeError("Portable público deve conter FRS_Mercado_UpdateHelper.exe")
+        if sum(1 for name in names if Path(name).name.lower() == "updater_public_keys.json") != 1:
+            raise RuntimeError("Portable público deve conter updater_public_keys.json")
+        if not any(name.lower().endswith("licensing/trusted_keys.json") for name in names):
+            raise RuntimeError("Portable público deve conter licensing/trusted_keys.json")
         db_names = [name for name in names if name.lower() == "data/mercado.db"]
         if len(db_names) != 1:
             raise RuntimeError(f"Portable público deve conter exatamente um data/mercado.db: {db_names}")
@@ -731,15 +805,22 @@ def _prepare_support_payload() -> None:
                 if acbr_instalador is not None:
                     break
     if acbr_instalador is not None and acbr_instalador.exists() and acbr_instalador.is_file():
+        # Fonte única da verdade: instala/ guarda o binário oficial. O payload
+        # de suporte (_build_support/acbr) é apenas a cópia de STAGING para o
+        # instalador/portátil — nunca uma segunda fonte, para evitar divergência.
         _copy_if_exists(acbr_instalador, acbr_dir / "ACBrMonitor_Installer.exe")
-        print(f"- Instalador ACBr (solo Inno): {acbr_instalador.name} -> {acbr_dir / 'ACBrMonitor_Installer.exe'}")
+        print(f"- Instalador ACBr (task Inno + runtime portátil): {acbr_instalador.name} -> {acbr_dir / 'ACBrMonitor_Installer.exe'}")
     else:
-        print("[AVISO] Instalador del ACBr no encontrado; el task 'instalaracbr' del Inno quedará sin payload.")
+        # Failsafe: sem o instalador o cliente NÃO consegue emitir NF-e, e o
+        # task 'instalaracbr' do Inno fica sem payload. Falha explícita impede
+        # publicar um instalador público quebrado silenciosamente.
+        print("[ERRO] Instalador do ACBr (ACBrMonitorPLUS-DEMO-*-I.exe) não encontrado em "
+              "instala/. O instalador/portátil será gerado SEM o motor fiscal.")
+        print("       Para gerar um release público completo, restaure o binário oficial em "
+              "instala/ antes de rodar o build.")
 
-    # Não copie o banco local do desenvolvedor: ele pode conter licença expirada,
-    # credenciais e dados de clientes. O aplicativo cria um banco novo e o trial
-    # na primeira execução do cliente.
-    print("- Banco local não incluído no payload; cliente iniciará com banco e trial novos.")
+    # Banco público nunca é copiado do APPDATA local.
+    print("- Banco local não incluído; o Portable usa base pública limpa criada pelo schema oficial.")
 
 
 def _find_iscc() -> Path | None:
@@ -809,6 +890,9 @@ def main() -> None:
         for item in args:
             print(f"  {item}")
         PyInstaller.__main__.run(args)
+
+    helper_path = _build_updater_helper(app_version)
+    print(f"Helper seguro de atualização gerado: {helper_path}")
 
     print("Arquivos/recursos que serão empacotados:")
     print("- Entrypoint: main.py")

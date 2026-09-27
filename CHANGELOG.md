@@ -107,3 +107,20 @@
 ## 1.0.18 - 23/09/2026
 - Release automatizada gerada pelo Mestre de Release.
 
+## 1.0.19 - 24/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.19 - 25/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.20 - 26/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+- PDV: removido o botão visual "MÚLTIPLO PAGTO (F8)" do painel lateral de operações.
+- PDV: o atalho F8 foi liberado e passou a acionar a função existente de SALVAR VALE (`salvar_vale_atual`).
+- PDV: o item de menu "SALVAR VALE (F8)" foi rotulado com o novo atalho; o comando permanece inalterado.
+- PDV: o método `abrir_modal_pagamento_multiplo()` e todo o fluxo interno de múltiplos pagamentos (`pagamentos_parciais`, `valor_pago_acumulado`, divisão, restante/troco e registro "MISTO") permanecem intactos e inalterados — apenas o componente de interface foi retirado.
+- PDV: demais atalhos (F1–F7, F9, F10, F11, F12) preservados sem qualquer alteração.
+
+## 1.0.20 - 27/09/2026
+- Release automatizada gerada pelo Mestre de Release.
+

@@ -91,9 +91,11 @@ class ModuloPDV(ctk.CTkToplevel):
         self.itens_carrinho = []
         self.item_selecionado_idx = None
         self.multiplicador_atual = 1
-        # FASE 1 UN/KG: modo atual da máscara do campo Qtd do PDV.
+        # FASE 1 UN/KG: modo atual da mascara do campo Qtd do PDV.
         # "UN" = inteiro (padrao historico); "KG" = decimal ate 3 casas.
         self._mascara_qtd_pdv = "UN"
+        # Atalho <End>: ABRIR A GAVETA (somente isso — nenhum outro fluxo).
+        self._ligar_atalho_end_gaveta()
         self.limite_caixa_atual = obter_limite_sangria_preventiva()
         self.excesso_caixa_atual = 0.0
         self.fila_pedidos_delivery = queue.Queue()
@@ -128,7 +130,7 @@ class ModuloPDV(ctk.CTkToplevel):
         self.bind("<F5>", lambda e: self.selecionar_forma_pagamento("VOUCHER"))
         self.bind("<F6>", lambda e: self.abrir_modal_diversos())
         self.bind("<F7>", lambda e: self.modal_sangria())
-        self.bind("<F8>", lambda e: self.abrir_modal_pagamento_multiplo())
+        self.bind("<F8>", lambda e: self.salvar_vale_atual())
         self.bind("<F9>", lambda e: self.finalizar_venda_com_confirmacoes())
         self.bind("<F12>", lambda e: self.finalizar_venda_com_confirmacoes())
         self.bind("<Delete>", self._ao_pressionar_delete_cancelar_item)
@@ -156,6 +158,10 @@ class ModuloPDV(ctk.CTkToplevel):
         try:
             if self.winfo_exists() and widget is not None and widget.winfo_exists():
                 widget.focus_set()
+                if hasattr(widget, "icursor"):
+                    widget.icursor("end")
+                if hasattr(widget, "_entry") and hasattr(widget._entry, "icursor"):
+                    widget._entry.icursor("end")
         except Exception:
             pass
 
@@ -224,7 +230,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 registrar_log(None, "Verificação de Caixa", "Sucesso", f"Caixa {caixa_id} já aberto hoje.")
                 self._set_status(f"Caixa {caixa_id} aberto. PDV pronto para operação.", "#2ecc71")
                 self._atualizar_indicadores_caixa(True)
-                self._safe_focus(self.ent_quantidade)
+                self._retornar_foco_pdv()
                 return
 
             try:
@@ -377,7 +383,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 self._set_status(f"Caixa {self.caixa_id} aberto. PDV pronto para operação.", "#2ecc71")
                 registrar_log(None, "Abertura de Caixa", "Sucesso", f"Caixa {self.caixa_id} aberto com {total_fmt}")
                 self._atualizar_indicadores_caixa(True)
-                self._safe_focus(self.ent_quantidade)
+                self._retornar_foco_pdv()
             except Exception as e:
                 self._set_status(f"Erro ao abrir caixa: {e}", "#ff6666")
                 registrar_log(None, "Abertura de Caixa", "Falha", f"Erro: {e}")
@@ -534,6 +540,7 @@ class ModuloPDV(ctk.CTkToplevel):
         ctk.CTkButton(linha_superior, text="SANGRIA (F7)", fg_color="#c0392b", width=140, command=self.modal_sangria).pack(side="left", padx=6)
         ctk.CTkButton(linha_superior, text="SUPRIMENTO", fg_color="#2980b9", width=150, command=self.modal_suprimento).pack(side="left", padx=6)
         ctk.CTkButton(linha_superior, text="CANCELAR ITEM (DEL)", fg_color="#d35400", width=170, command=self.cancelar_item).pack(side="left", padx=6)
+        ctk.CTkButton(linha_superior, text="CANCELAR VENDA ATUAL", fg_color="#c0392b", hover_color="#962d22", width=190, command=self.cancelar_venda_atual).pack(side="left", padx=6)
         ctk.CTkButton(linha_superior, text="FECHAR CAIXA", fg_color="#8e44ad", width=150, command=self.processar_fechamento_inteligente).pack(side="left", padx=6)
 
         linha_orcamento = ctk.CTkFrame(self.menu_operacoes_miolo, fg_color="transparent")
@@ -549,7 +556,7 @@ class ModuloPDV(ctk.CTkToplevel):
         ctk.CTkLabel(linha_documentos, text="DOCUMENTOS", font=("Roboto", 11, "bold"), text_color="gray").pack(side="left", padx=(10, 10))
         ctk.CTkButton(linha_documentos, text="SALVAR ORÇAMENTO", fg_color="#1565c0", width=160, command=self.salvar_orcamento_atual).pack(side="left", padx=6)
         ctk.CTkButton(linha_documentos, text="ABRIR ORÇAMENTO", fg_color="#5d4037", width=160, command=self.abrir_orcamento_por_numero).pack(side="left", padx=6)
-        ctk.CTkButton(linha_documentos, text="SALVAR VALE", fg_color="#ef6c00", width=140, command=self.salvar_vale_atual).pack(side="left", padx=6)
+        ctk.CTkButton(linha_documentos, text="SALVAR VALE (F8)", fg_color="#ef6c00", width=140, command=self.salvar_vale_atual).pack(side="left", padx=6)
         ctk.CTkButton(linha_documentos, text="ABRIR VALE", fg_color="#6a1b9a", width=140, command=self.abrir_vale_por_cliente).pack(side="left", padx=6)
         self._carregar_clientes_orcamento()
 
@@ -562,8 +569,13 @@ class ModuloPDV(ctk.CTkToplevel):
         self.input_topo = ctk.CTkFrame(self.grid_container, fg_color="#1a1a1a", height=70)
         self.input_topo.pack(fill="x", padx=8, pady=(8, 6))
 
-        self.ent_quantidade = ctk.CTkEntry(self.input_topo, width=140, height=50, font=("Roboto", 20, "bold"), placeholder_text="Qtd")
-        self.ent_quantidade.pack(side="left", padx=(10, 8), pady=10)
+        # Campo Qtd visualmente minimo (decisao de interface 25/09/2026):
+        # APENAS geometria do widget (width/padx). O widget permanece na
+        # hierarquia e no fluxo de foco; binds, logica de quantidade, 12*,
+        # UN/KG e fluxo TAB homologado NAO foram alterados.
+        self.ent_quantidade = ctk.CTkEntry(self.input_topo, width=1, height=50, font=("Roboto", 20, "bold"), placeholder_text="", border_width=0, corner_radius=0)
+        self.ent_quantidade.pack(side="left", padx=(0, 0), pady=10)
+
         self.ent_quantidade.bind("<Return>", lambda _e: self._safe_focus(self.ent_cod_barras))
         self.ent_quantidade.bind("<Tab>", self._focar_produto_pelo_tab)
         aplicar_padrao_entrada_numerica(self.ent_quantidade, inteiro=True)
@@ -631,14 +643,13 @@ class ModuloPDV(ctk.CTkToplevel):
             command=self.abrir_modal_diversos,
         ).pack(fill="x", padx=10, pady=(8, 2))
 
-        ctk.CTkButton(
-            self.scroll_operacoes,
-            text="MÚLTIPLO PAGTO (F8)",
-            fg_color="#2471a3",
-            height=30,
-            font=("Roboto", 12, "bold"),
-            command=self.abrir_modal_pagamento_multiplo,
-        ).pack(fill="x", padx=10, pady=(2, 2))
+        # BOTÃO VISUAL "MÚLTIPLO PAGTO (F8)" REMOVIDO NESTA RODADA.
+        # Apenas o componente de interface foi retirado do painel lateral; o
+        # método abrir_modal_pagamento_multiplo() e TODO o fluxo interno de
+        # múltiplos pagamentos (pagamentos_parciais, valor_pago_acumulado,
+        # divisão, restante/troco e registro "MISTO") permanecem intactos e
+        # continuam existindo sem qualquer alteração de regra. O atalho F8,
+        # liberado, passou a acionar a função existente de SALVAR VALE.
 
         ctk.CTkButton(
             self.scroll_operacoes,
@@ -735,7 +746,7 @@ class ModuloPDV(ctk.CTkToplevel):
         # Posiciona o logo do mercado como fundo (após widgets principais)
         self._safe_after(100, self._posicionar_logo_fundo)
 
-        self._safe_focus(self.ent_quantidade)
+        self._retornar_foco_pdv()
         self._safe_after(300, self._processar_fila_delivery)
 
     def _alternar_menu_operacoes(self):
@@ -1564,7 +1575,10 @@ class ModuloPDV(ctk.CTkToplevel):
             pass
 
     def _adicionar_item_produto(self, produto, qtd_item):
-        unidade = self._unidade_do_produto(produto)
+        if hasattr(self, "_unidade_do_produto"):
+            unidade = self._unidade_do_produto(produto)
+        else:
+            unidade = ModuloPDV._unidade_do_produto(self, produto)
         # Normaliza o produto para tupla: busca_venda retorna tuplas; algumas
         # caminhos mais antigos podem passar (id, barcode, nome[, preco..., ...]).
         produto = produto if isinstance(produto, (tuple, list)) else tuple(produto)
@@ -1623,7 +1637,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 "nome": produto[2],
                 "preco": preco_unitario,
                 "quantidade": qtd_item,
-                "total": preco_unitario * qtd_item,
+                "total": round(preco_unitario * qtd_item, 2),
                 "ncm": produto[7] if len(produto) > 7 else "",
                 "unidade": "UN",
                 "origem": "BALCAO",
@@ -1636,7 +1650,8 @@ class ModuloPDV(ctk.CTkToplevel):
             self._set_status(f"Item adicionado: {item['nome']} ({peso:g} KG)", "#2ecc71")
         else:
             self._set_status(f"Item adicionado: {item['nome']}", "#2ecc71")
-        self._reconfigurar_mascara_qtd_pdv(unidade)
+        if hasattr(self, "_reconfigurar_mascara_qtd_pdv"):
+            self._reconfigurar_mascara_qtd_pdv(unidade)
         self.multiplicador_atual = 1
         self.ent_cod_barras.configure(placeholder_text="Código ou Nome do Produto (Enter para adicionar)")
         self.ent_cod_barras.delete(0, "end")
@@ -1677,7 +1692,8 @@ class ModuloPDV(ctk.CTkToplevel):
         self._renderizar_carrinho()
         self.atualizar_total_display()
         self._set_status(f"Item adicionado: {item['nome']}", "#2ecc71")
-        self._reconfigurar_mascara_qtd_pdv("UN")
+        if hasattr(self, "_reconfigurar_mascara_qtd_pdv"):
+            self._reconfigurar_mascara_qtd_pdv("UN")
         self.multiplicador_atual = 1
         self.ent_cod_barras.configure(placeholder_text="Código ou Nome do Produto (Enter para adicionar)")
         self.ent_cod_barras.delete(0, "end")
@@ -2047,7 +2063,7 @@ class ModuloPDV(ctk.CTkToplevel):
         # FLUXO DINHEIRO (usabilidade): ENTER confirmou o valor do recebido
         # e o foco segue para ACRESCENTAR PAGAMENTO. Demais formas de
         # pagamento: comportamento inalterado.
-        if str(self.forma_pagamento_selecionada or "").strip().upper() == "DINHEIRO":
+        if str(self.forma_pagamento_selecionada or "").strip().upper() == "DINHEIRO" and hasattr(self, "_safe_focus"):
             self._safe_focus(self.btn_acrescentar_pago)
 
     def limpar_pagamentos_recebidos(self):
@@ -2097,7 +2113,13 @@ class ModuloPDV(ctk.CTkToplevel):
         return True, "", soma
 
     def abrir_modal_pagamento_multiplo(self):
-        """Popup de MÚLTIPLO PAGAMENTO (F8).
+        """Popup de MÚLTIPLO PAGAMENTO.
+
+        O botão visual deste recurso e o atalho F8 foram removidos do painel
+        em 25/09/2026 por decisão de interface; o F8 passou a acionar
+        ``salvar_vale_atual``. A implementação abaixo permanece integralmente
+        intacta e continua disponível para qualquer reaproveitamento: nenhuma
+        regra de pagamento, condição ou fluxo interno foi alterado.
 
         Reaproveita integralmente a estrutura existente de pagamentos:
         ``pagamentos_parciais`` e ``valor_pago_acumulado`` são repovoados
@@ -2821,10 +2843,14 @@ class ModuloPDV(ctk.CTkToplevel):
     def _tratar_produto_nao_cadastrado(self, ean):
         self._set_status("Produto não cadastrado.", "#ff6666")
         try:
-            messagebox.showwarning("Produto não cadastrado", f"EAN {ean} não cadastrado. Abra o cadastro rápido.", parent=self)
+            messagebox.showinfo("Produto não cadastrado", "Produto não cadastrado.", parent=self)
         except Exception:
             pass
-        self._abrir_modal_cadastro_rapido_produto(ean)
+        if hasattr(self, "ent_cod_barras") and self.ent_cod_barras.winfo_exists():
+            self.ent_cod_barras.delete(0, "end")
+            self.ent_cod_barras.configure(placeholder_text="Código ou Nome do Produto (Enter para adicionar)")
+        self.multiplicador_atual = 1
+        self._retornar_foco_pdv()
 
     def buscar_produtos_por_nome(self, termo):
         try:
@@ -2897,7 +2923,10 @@ class ModuloPDV(ctk.CTkToplevel):
             self._set_status("Adicione itens antes de processar pagamento.", "#ff6666")
             return None
 
-        valor_total = sum(i["quantidade"] * i["preco"] for i in self.itens_carrinho)
+        valor_total = round(
+            sum(float(i.get("total", round(i["quantidade"] * i["preco"], 2)) or 0.0) for i in self.itens_carrinho),
+            2,
+        )
         valor_pago = self.valor_pago_acumulado
 
         # Correção de regressão: para formas de pagamento instantâneas e sensíveis
@@ -2919,7 +2948,7 @@ class ModuloPDV(ctk.CTkToplevel):
             valor_pago = round(self.valor_pago_acumulado + valor_pago_lido, 2)
 
         restante = round(valor_total - valor_pago, 2)
-        if valor_pago < valor_total:
+        if valor_pago < valor_total - 0.0049:
             self._set_status(
                 f"Valor pago ({self._formatar_moeda_br(valor_pago)}) menor que o total da venda "
                 f"({self._formatar_moeda_br(valor_total)}). Acrescente o restante de "
@@ -3101,6 +3130,75 @@ class ModuloPDV(ctk.CTkToplevel):
         self.atualizar_total_display()
         self._set_status(f"Item cancelado: {item['nome']}", "#2ecc71")
 
+    def cancelar_venda_atual(self):
+        """Mecanismo de escape do operador: abandona somente a venda/operação em andamento
+        e retorna ao PDV limpo e pronto, sem registrar venda, sem alterar estoque/caixa/financeiro
+        e sem fechar o programa.
+        """
+        # 1. Fecha qualquer janela modal temporária aberta no PDV
+        try:
+            for w in list(self.winfo_children()):
+                if isinstance(w, (ctk.CTkToplevel,)):
+                    try:
+                        w.grab_release()
+                    except Exception:
+                        pass
+                    try:
+                        w.destroy()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 2. Fecha o menu retrátil se estiver aberto
+        if getattr(self, "_menu_operacoes_aberto", False):
+            try:
+                self._alternar_menu_operacoes()
+            except Exception:
+                pass
+
+        # 3. Limpa o contexto documental temporário (Vale/Orçamento carregado)
+        if hasattr(self, "_limpar_contexto_documental"):
+            self._limpar_contexto_documental()
+        else:
+            self._vales_para_quitar = []
+            self._operacao_documento_tipo = None
+            self._orcamento_para_vender_id = None
+            self._operacao_vale_cliente_id = None
+
+        # 4. Limpa itens do carrinho
+        self.itens_carrinho = []
+        self.item_selecionado_idx = None
+        self._renderizar_carrinho()
+        self.atualizar_total_display()
+
+        # 5. Limpa pagamentos parciais / acumulados
+        if hasattr(self, "limpar_pagamentos_recebidos"):
+            self.limpar_pagamentos_recebidos()
+        else:
+            self.valor_pago_acumulado = 0.0
+            self.pagamentos_parciais = []
+
+        if hasattr(self, "ent_valor_pago") and self.ent_valor_pago.winfo_exists():
+            self.ent_valor_pago.delete(0, "end")
+        if hasattr(self, "lbl_troco_venda"):
+            self.lbl_troco_venda.configure(text="R$ 0,00")
+
+        # 6. Limpa campos de entrada de produtos e multiplicadores
+        if hasattr(self, "ent_cod_barras") and self.ent_cod_barras.winfo_exists():
+            self.ent_cod_barras.delete(0, "end")
+            self.ent_cod_barras.configure(placeholder_text="Código ou Nome do Produto (Enter para adicionar)")
+        if hasattr(self, "ent_quantidade") and self.ent_quantidade.winfo_exists():
+            self.ent_quantidade.delete(0, "end")
+        self.multiplicador_atual = 1
+        self.forma_pagamento_selecionada = "DINHEIRO"
+
+        # 7. Restaura status informativo
+        self._set_status("Venda cancelada. PDV pronto para nova operação.", "#f1c40f")
+
+        # 8. Devolve o foco automaticamente à barra Código / Nome do Produto com cursor ativo
+        self._retornar_foco_pdv()
+
     def imprimir_comprovante_simplificado(self):
         if not self.itens_carrinho:
             self._set_status("Não há itens para imprimir.", "#ff6666")
@@ -3265,6 +3363,62 @@ class ModuloPDV(ctk.CTkToplevel):
             registrar_log(None, "PDV Gaveta", "Falha", f"Erro ao abrir gaveta: {e}")
             return False
 
+    def _forma_para_gaveta_pos_venda(self, forma_pagamento):
+        """DECISAO da gaveta (nenhum comando ESC/POS aqui).
+
+        Retorna a forma a ser repassada a `abrir_gaveta` quando a venda tem
+        dinheiro, ou None quando a gaveta NAO deve ser acionada.
+
+        - DINHEIRO / ESPÉCIE: aciona.
+        - MISTO (multiplo pagamento): aciona SOMENTE se houver dinheiro entre
+          os parciais registrados; misto sem dinheiro (ex.: PIX + Debito) nao
+          aciona.
+        - PIX, DEBITO, CREDITO, VOUCHER, VALE e qualquer outra forma: NAO
+          aciona.
+
+        Esta e a unica decisao de gaveta do fluxo pos-venda: ela e usada tanto
+        quando o operador imprimi o comprovante quanto quando escolhe
+        "NAO IMPRIMIR", de modo que a abertura do gaveteiro independe da
+        impressao.
+        """
+        forma_normalizada = str(forma_pagamento or "").strip().lower()
+        if forma_normalizada in ("dinheiro", "espécie", "especie"):
+            return forma_pagamento
+        if forma_normalizada == "misto":
+            formas_recebidas = {
+                str(f or "").strip().upper()
+                for f, _v in (getattr(self, "pagamentos_parciais", None) or [])
+            }
+            if formas_recebidas & {"DINHEIRO", "ESPECIE", "ESPÉCIE"}:
+                return "DINHEIRO"
+        return None
+
+    def _acionar_gaveta_pos_venda(self, forma_pagamento):
+        """Abre o gaveteiro de forma INDEPENDENTE da impressao do comprovante.
+
+        Chamada pelo fluxo que imprime o cupom e tambem pelo fluxo em que o
+        operador escolheu "NAO IMPRIMIR": venda paga em DINHEIRO sempre aciona
+        a gaveta. A decisao fica em `_forma_para_gaveta_pos_venda` e o comando
+        ESC/POS permanece em `abrir_gaveta` (nao alterado).
+
+        Retorna (gaveta_acionada, erro).
+        """
+        forma_para_gaveta = self._forma_para_gaveta_pos_venda(forma_pagamento)
+        if forma_para_gaveta is None:
+            # Forma sem dinheiro (PIX/DEBITO/CREDITO/VOUCHER/VALE): nada a fazer.
+            return False, None
+        try:
+            abertura_realizada = self.abrir_gaveta(forma_para_gaveta)
+        except Exception as e:
+            registrar_log(None, "PDV Gaveta", "Falha", f"Erro ao abrir gaveta: {e}")
+            return False, e
+        if abertura_realizada:
+            registrar_log(None, "PDV Gaveta", "Sucesso", "Comando de abertura de gaveta enviado.")
+            return True, None
+        erro_gaveta = "Abertura bloqueada pela forma de pagamento ou não realizada."
+        registrar_log(None, "PDV Gaveta", "Falha", erro_gaveta)
+        return False, erro_gaveta
+
     def _obter_peso_kg(self, produto):
         """Solicita o PESO em KG (decimal, até 3 casas) de produto vendido por KG.
 
@@ -3348,72 +3502,211 @@ class ModuloPDV(ctk.CTkToplevel):
         self._carregar_clientes_orcamento(preservar_selecao=False)
         labels = [label for label, mapped_id in self.clientes_orcamento_map.items() if mapped_id is not None]
         if not labels:
-            messagebox.showwarning("Abrir Vale", "Cadastre um cliente antes de abrir um Vale.", parent=self)
+            messagebox.showwarning("Consulta de Vale", "Cadastre um cliente antes de abrir um Vale.", parent=self)
+            self._retornar_foco_pdv()
             return
+
         modal = ctk.CTkToplevel(self)
-        modal.title("ABRIR VALE")
-        modal.geometry("440x220")
+        modal.title("CONSULTA DE VALES")
+        # Geometria ajustada (cirurgico, somente layout): garante que os
+        # controles do rodape (FINALIZAR VALE / NAO FINALIZAR / FECHAR)
+        # fiquem integralmente visiveis. Nenhuma logica foi alterada.
+        modal.geometry("880x700")
+        modal.minsize(780, 560)
         modal.transient(self)
         modal.grab_set()
-        ctk.CTkLabel(modal, text="CLIENTE:", font=("Roboto", 12, "bold")).pack(pady=(24, 8))
-        combo = ctk.CTkOptionMenu(modal, values=labels, width=340)
-        combo.set(labels[0])
-        combo.pack(padx=20)
-        resultado = {"carregar": False}
 
-        def carregar():
+        # Topo: Seleção do Cliente
+        frame_topo = ctk.CTkFrame(modal, fg_color="transparent")
+        frame_topo.pack(fill="x", padx=16, pady=(14, 6))
+
+        ctk.CTkLabel(frame_topo, text="CLIENTE:", font=("Roboto", 12, "bold")).pack(side="left", padx=(0, 8))
+        combo = ctk.CTkOptionMenu(frame_topo, values=labels, width=320)
+        combo.set(labels[0])
+        combo.pack(side="left", padx=4)
+
+        # Container Central: Lista de Vales do Cliente + Detalhes dos Itens
+        frame_corpo = ctk.CTkFrame(modal, fg_color="transparent")
+        frame_corpo.pack(fill="both", expand=True, padx=16, pady=4)
+
+        lbl_lista = ctk.CTkLabel(frame_corpo, text="VALES PENDENTES:", font=("Roboto", 11, "bold"), text_color="gray")
+        lbl_lista.pack(anchor="w", pady=(0, 2))
+
+        scroll_vales = ctk.CTkScrollableFrame(frame_corpo, height=120, fg_color="#181818")
+        scroll_vales.pack(fill="x", pady=(0, 8))
+
+        lbl_detalhe = ctk.CTkLabel(frame_corpo, text="ITENS DO VALE SELECIONADO:", font=("Roboto", 11, "bold"), text_color="gray")
+        lbl_detalhe.pack(anchor="w", pady=(0, 2))
+
+        scroll_itens = ctk.CTkScrollableFrame(frame_corpo, height=190, fg_color="#181818")
+        scroll_itens.pack(fill="both", expand=True, pady=(0, 4))
+
+        lbl_total_vale = ctk.CTkLabel(frame_corpo, text="TOTAL: R$ 0,00", font=("Roboto", 14, "bold"), text_color="#2ecc71")
+        lbl_total_vale.pack(anchor="e", pady=(2, 6))
+
+        # Estado da seleção
+        estado = {
+            "vale_selecionado": None,
+            "itens_selecionados": [],
+            "cliente_id": None,
+            "vales_ids": [],
+            "finalizar": False,
+        }
+
+        # Rodapé de Ações
+        botoes = ctk.CTkFrame(modal, fg_color="transparent")
+        botoes.pack(fill="x", padx=16, pady=(4, 14))
+
+        btn_finalizar = ctk.CTkButton(
+            botoes,
+            text="FINALIZAR VALE",
+            fg_color="#27ae60",
+            hover_color="#219150",
+            width=160,
+            height=38,
+            font=("Roboto", 12, "bold"),
+            state="disabled",
+        )
+        btn_finalizar.pack(side="left", padx=6)
+
+        def _fechar_sem_finalizar():
+            try:
+                modal.grab_release()
+            except Exception:
+                pass
+            modal.destroy()
+            self._retornar_foco_pdv()
+
+        btn_fechar = ctk.CTkButton(
+            botoes,
+            text="NÃO FINALIZAR / FECHAR",
+            fg_color="#555555",
+            hover_color="#444444",
+            width=200,
+            height=38,
+            font=("Roboto", 12, "bold"),
+            command=_fechar_sem_finalizar,
+        )
+        btn_fechar.pack(side="right", padx=6)
+
+        def _exibir_itens_vale(vale_id, numero, total_vale, data_criacao):
+            estado["vale_selecionado"] = vale_id
+            estado["vales_ids"] = [int(vale_id)]
+            for w in scroll_itens.winfo_children():
+                w.destroy()
+
+            # Cabeçalho da tabela de itens
+            cab = ctk.CTkFrame(scroll_itens, fg_color="#222222")
+            cab.pack(fill="x", pady=1)
+            ctk.CTkLabel(cab, text="PRODUTO / DESCRIÇÃO", font=("Roboto", 10, "bold"), width=240, anchor="w").pack(side="left", padx=4)
+            ctk.CTkLabel(cab, text="QTD", font=("Roboto", 10, "bold"), width=60).pack(side="left", padx=4)
+            ctk.CTkLabel(cab, text="UN", font=("Roboto", 10, "bold"), width=40).pack(side="left", padx=4)
+            ctk.CTkLabel(cab, text="PREÇO", font=("Roboto", 10, "bold"), width=80).pack(side="left", padx=4)
+            ctk.CTkLabel(cab, text="SUBTOTAL", font=("Roboto", 10, "bold"), width=90).pack(side="left", padx=4)
+
+            itens = []
+            with get_db_connection() as conn:
+                linhas = conn.execute(
+                    """
+                    SELECT produto_id, codigo_barras, descricao_produto, ncm,
+                           quantidade, unidade, preco_unitario, subtotal
+                    FROM vale_itens WHERE vale_id = ? ORDER BY id
+                    """,
+                    (int(vale_id),),
+                ).fetchall()
+                for linha in linhas:
+                    item_dict = {
+                        "id": linha[0], "barcode": linha[1] or "", "nome": linha[2],
+                        "ncm": linha[3] or "", "quantidade": float(linha[4] or 0.0),
+                        "unidade": str(linha[5] or "UN").upper(),
+                        "preco": float(linha[6] or 0.0), "total": float(linha[7] or 0.0),
+                        "origem": "VALE", "vale_id": int(vale_id), "numero_vale": numero,
+                    }
+                    itens.append(item_dict)
+
+                    linha_f = ctk.CTkFrame(scroll_itens, fg_color="transparent")
+                    linha_f.pack(fill="x", pady=1)
+                    ctk.CTkLabel(linha_f, text=str(linha[2]), width=240, anchor="w").pack(side="left", padx=4)
+                    ctk.CTkLabel(linha_f, text=f"{float(linha[4] or 0.0):g}", width=60).pack(side="left", padx=4)
+                    ctk.CTkLabel(linha_f, text=str(linha[5] or "UN"), width=40).pack(side="left", padx=4)
+                    ctk.CTkLabel(linha_f, text=self._formatar_moeda_br(float(linha[6] or 0.0)), width=80).pack(side="left", padx=4)
+                    ctk.CTkLabel(linha_f, text=self._formatar_moeda_br(float(linha[7] or 0.0)), width=90).pack(side="left", padx=4)
+
+            estado["itens_selecionados"] = itens
+            lbl_total_vale.configure(text=f"TOTAL DO VALE #{numero}: {self._formatar_moeda_br(float(total_vale or 0.0))}")
+            if itens:
+                btn_finalizar.configure(state="normal")
+            else:
+                btn_finalizar.configure(state="disabled")
+
+        def _carregar_vales_cliente(_escolha=None):
+            estado["vale_selecionado"] = None
+            estado["itens_selecionados"] = []
+            estado["vales_ids"] = []
+            btn_finalizar.configure(state="disabled")
+            lbl_total_vale.configure(text="TOTAL: R$ 0,00")
+            for w in scroll_vales.winfo_children():
+                w.destroy()
+            for w in scroll_itens.winfo_children():
+                w.destroy()
+
             cliente_id = self.clientes_orcamento_map.get(combo.get())
             if not cliente_id:
                 return
+            estado["cliente_id"] = int(cliente_id)
+
             with get_db_connection() as conn:
                 vales = conn.execute(
-                    "SELECT id, numero FROM vales WHERE cliente_id = ? AND status = 'PENDENTE' ORDER BY id",
+                    "SELECT id, numero, data_criacao, total FROM vales WHERE cliente_id = ? AND status = 'PENDENTE' ORDER BY numero DESC",
                     (int(cliente_id),),
                 ).fetchall()
-                if not vales:
-                    messagebox.showinfo("Abrir Vale", "Este cliente não possui vales pendentes.", parent=modal)
-                    return
-                itens = []
-                for vale_id, numero in vales:
-                    linhas = conn.execute(
-                        """
-                        SELECT produto_id, codigo_barras, descricao_produto, ncm,
-                               quantidade, unidade, preco_unitario, subtotal
-                        FROM vale_itens WHERE vale_id = ? ORDER BY id
-                        """,
-                        (int(vale_id),),
-                    ).fetchall()
-                    for linha in linhas:
-                        itens.append({
-                            "id": linha[0], "barcode": linha[1] or "", "nome": linha[2],
-                            "ncm": linha[3] or "", "quantidade": float(linha[4] or 0.0),
-                            "unidade": str(linha[5] or "UN").upper(),
-                            "preco": float(linha[6] or 0.0), "total": float(linha[7] or 0.0),
-                            "origem": "VALE", "vale_id": int(vale_id), "numero_vale": numero,
-                        })
-            if not itens:
-                messagebox.showwarning("Abrir Vale", "Os vales pendentes não possuem itens.", parent=modal)
+
+            if not vales:
+                ctk.CTkLabel(scroll_vales, text="Nenhum vale pendente para este cliente.", text_color="#f39c12").pack(pady=10)
                 return
-            resultado.update({
-                "cliente_id": int(cliente_id), "itens": itens,
-                "vales_ids": [int(vale_id) for vale_id, _numero in vales], "carregar": True,
-            })
-            modal.grab_release()
+
+            for idx, (v_id, v_num, v_data, v_tot) in enumerate(vales):
+                data_str = str(v_data or "")[:16]
+                btn_v = ctk.CTkButton(
+                    scroll_vales,
+                    text=f"Vale #{v_num} — {data_str} — Total: {self._formatar_moeda_br(float(v_tot or 0.0))}",
+                    fg_color="#2c3e50",
+                    hover_color="#1a252f",
+                    anchor="w",
+                    command=lambda vid=v_id, num=v_num, tot=v_tot, dt=v_data: _exibir_itens_vale(vid, num, tot, dt),
+                )
+                btn_v.pack(fill="x", padx=4, pady=2)
+                if idx == 0:
+                    _exibir_itens_vale(v_id, v_num, v_tot, v_data)
+
+        combo.configure(command=_carregar_vales_cliente)
+
+        def _acionar_finalizar():
+            if not estado["itens_selecionados"] or not estado["cliente_id"]:
+                return
+            estado["finalizar"] = True
+            try:
+                modal.grab_release()
+            except Exception:
+                pass
             modal.destroy()
 
-        botoes = ctk.CTkFrame(modal, fg_color="transparent")
-        botoes.pack(pady=22)
-        ctk.CTkButton(botoes, text="CARREGAR", width=130, command=carregar).pack(side="left", padx=6)
-        ctk.CTkButton(botoes, text="CANCELAR", width=130, fg_color="#666666", command=modal.destroy).pack(side="left", padx=6)
-        modal.protocol("WM_DELETE_WINDOW", modal.destroy)
+        btn_finalizar.configure(command=_acionar_finalizar)
+
+        # Carrega lista inicial do primeiro cliente selecionado
+        _carregar_vales_cliente()
+
+        modal.protocol("WM_DELETE_WINDOW", _fechar_sem_finalizar)
         modal.wait_window()
-        if resultado.get("carregar") and self._preparar_carrinho_documental(
-            resultado["itens"], resultado["cliente_id"], "VALE", resultado["vales_ids"]
-        ):
-            self._set_status(
-                f"{len(resultado['vales_ids'])} Vale(s) pendente(s) carregado(s) no PDV.",
-                "#2ecc71",
-            )
+
+        if estado["finalizar"]:
+            if self._preparar_carrinho_documental(
+                estado["itens_selecionados"], estado["cliente_id"], "VALE", estado["vales_ids"]
+            ):
+                self._set_status(
+                    f"Vale carregado no PDV. Escolha a forma de pagamento e finalize a venda.",
+                    "#2ecc71",
+                )
 
     def imprimir_cupom_vale(self, vale_id):
         """Imprime o documento do Vale usando o mesmo transporte térmico existente."""
@@ -3626,10 +3919,16 @@ class ModuloPDV(ctk.CTkToplevel):
         registrar_log(None, "PDV Impressão", "Sucesso", "Cupom não fiscal enviado para impressora térmica.")
 
     def _executar_automacao_pos_venda(self, dados_cupom):
-        """Dispara a impressão do cupom pós-venda e a abertura da gaveta
-        SOMENTE quando a forma de pagamento é DINHEIRO/ESPÉCIE."""
+        """Dispara a impressão do cupom pós-venda e, em seguida, a abertura da
+        gaveta quando a venda tem DINHEIRO.
+
+        ROTATORES SEPARADOS DE PROPOSITO: a impressao do cupom e a abertura do
+        gaveteiro sao etapas independentes — a decisao/acionamento da gaveta
+        vive em `_acionar_gaveta_pos_venda`, que e reutilizada pelo fluxo
+        "NAO IMPRIMIR" em `finalizar_venda_pdv`. Assim, uma falha (ou a
+        ausencia) de impressao jamais impede a gaveta de abrir, e vice-versa.
+        """
         erro_impressao = None
-        erro_gaveta = None
 
         try:
             self.imprimir_cupom(dados_cupom)
@@ -3637,44 +3936,15 @@ class ModuloPDV(ctk.CTkToplevel):
             registrar_log(None, "PDV Impressão", "Falha", f"Erro impressão cupom: {e}")
             erro_impressao = e
 
-        forma_normalizada = str(dados_cupom.get("forma_pagamento") or "").strip().lower()
-        gaveta_permitida = forma_normalizada in ("dinheiro", "espécie", "especie")
-
-        # MISTO (múltiplo pagamento): abre a gaveta SOMENTE quando há dinheiro
-        # entre os pagamentos parciais registrados na venda. Misto sem dinheiro
-        # (ex.: PIX + Débito) NÃO aciona a gaveta.
-        if not gaveta_permitida and forma_normalizada == "misto":
-            formas_recebidas = {
-                str(f or "").strip().upper()
-                for f, _v in (getattr(self, "pagamentos_parciais", None) or [])
-            }
-            gaveta_permitida = bool(formas_recebidas & {"DINHEIRO", "ESPECIE", "ESPÉCIE"})
-
-        if gaveta_permitida:
-            try:
-                # Pass the real payment method to the drawer routine.
-                # No caso MISTO com dinheiro, repassa "DINHEIRO" para o guard
-                # interno da rotina de gaveta (somente a DECISÃO de abrir é
-                # tratada aqui; nenhum comando ESC/POS foi alterado).
-                forma_para_gaveta = (
-                    dados_cupom.get("forma_pagamento")
-                    if forma_normalizada in ("dinheiro", "espécie", "especie")
-                    else "DINHEIRO"
-                )
-                abertura_realizada = self.abrir_gaveta(forma_para_gaveta)
-                if abertura_realizada:
-                    registrar_log(None, "PDV Gaveta", "Sucesso", "Comando de abertura de gaveta enviado.")
-                else:
-                    erro_gaveta = "Abertura bloqueada pela forma de pagamento ou não realizada."
-                    registrar_log(None, "PDV Gaveta", "Falha", erro_gaveta)
-            except Exception as e:
-                registrar_log(None, "PDV Gaveta", "Falha", f"Erro ao abrir gaveta: {e}")
-                erro_gaveta = e
+        gaveta_acionada, erro_gaveta = self._acionar_gaveta_pos_venda(
+            dados_cupom.get("forma_pagamento")
+        )
+        gaveta_permitida = erro_gaveta is None and gaveta_acionada
 
         if erro_impressao is None and erro_gaveta is None:
             self._set_status(
                 "Cupom não fiscal impresso e gaveta acionada."
-                if gaveta_permitida
+                if gaveta_acionada
                 else "Cupom não fiscal impresso.",
                 "#2ecc71",
             )
@@ -3801,7 +4071,10 @@ class ModuloPDV(ctk.CTkToplevel):
         if hasattr(self, "_resolver_forma_pagamento_registro"):
             forma_pgto = self._resolver_forma_pagamento_registro()
 
-        valor_bruto = sum(i["quantidade"] * i["preco"] for i in self.itens_carrinho)
+        valor_bruto = round(
+            sum(float(i.get("total", round(i["quantidade"] * i["preco"], 2)) or 0.0) for i in self.itens_carrinho),
+            2,
+        )
         valor_impostos = 0.0
         total_icms = 0.0
         total_pis = 0.0
@@ -4245,6 +4518,17 @@ class ModuloPDV(ctk.CTkToplevel):
                     "pagamentos": list(getattr(self, "pagamentos_parciais", None) or []),
                 }
             )
+        else:
+            # GAVETA INDEPENDENTE DA IMPRESSAO: o operador escolheu "NAO
+            # IMPRIMIR" (F12) e mesmo assim a venda paga em DINHEIRO precisa
+            # abrir o gaveteiro. Reutiliza exatamente a mesma decisao/acao do
+            # fluxo com cupom (`_acionar_gaveta_pos_venda`), sem imprimir nada
+            # e sem tocar em pagamento, troco, vale ou fechamento.
+            _gd_acionada, _gd_erro = self._acionar_gaveta_pos_venda(forma_pgto)
+            if _gd_erro is not None:
+                self._set_status(f"Venda registrada, mas falha ao abrir gaveta: {_gd_erro}", "#ff6666")
+            elif _gd_acionada:
+                self._set_status("Gaveta acionada (sem impressão de comprovante).", "#2ecc71")
 
         # RESÍDUO VISUAL PÓS-VENDA REMOVIDO (regra de exibição): a faixa
         # intermediária NÃO mostra mais o antigo resumo da venda — nem a
@@ -4280,10 +4564,17 @@ class ModuloPDV(ctk.CTkToplevel):
         # O painel grande inferior (VALOR PAGO | TROCO | TOTAL DA VENDA)
         # NÃO é tocado aqui — tamanho, posição e cores inalterados.
         self._set_status("")
-        self._safe_focus(self.ent_quantidade)
+        if hasattr(self, "_retornar_foco_pdv"):
+            self._retornar_foco_pdv()
+        elif hasattr(self, "_safe_focus"):
+            self._safe_focus(getattr(self, "ent_cod_barras", getattr(self, "ent_quantidade", None)))
 
     def _retornar_foco_pdv(self):
-        self._safe_after(30, lambda: self._safe_focus(self.ent_quantidade))
+        target = getattr(self, "ent_cod_barras", getattr(self, "ent_quantidade", None))
+        if hasattr(self, "_safe_after") and hasattr(self, "_safe_focus"):
+            self._safe_after(30, lambda: self._safe_focus(target))
+        elif hasattr(self, "_safe_focus"):
+            self._safe_focus(target)
 
     def _to_float(self, texto):
         return parse_numero(texto, "Valor", minimo=0)
@@ -4540,11 +4831,15 @@ class ModuloPDV(ctk.CTkToplevel):
                 cursor.execute("SELECT saldo_inicial FROM caixa_operacao WHERE id = ?", (self.caixa_id,))
                 linha_saldo = cursor.fetchone()
                 saldo_inicial = float(linha_saldo[0] or 0.0) if linha_saldo else 0.0
-                movs = modulo_financeiro.obter_movimentacoes_caixa(self.caixa_id)
-                total_sangrias = float(movs.get("total_sangrias", 0.0) or 0.0)
-                total_reforcos = float(movs.get("total_reforcos", 0.0) or 0.0)
-                lista_sangrias = list(movs.get("sangrias", []) or [])
-                lista_reforcos = list(movs.get("reforcos", []) or [])
+            # Movimentações (sangrias/reforços) lidas FORA da conexão acima:
+            # a rotina abre a própria conexão e, se aninhada, recebia
+            # "database is locked" — o que zerava sangrias/reforços na
+            # composição do DINHEIRO do ciclo.
+            movs = modulo_financeiro.obter_movimentacoes_caixa(self.caixa_id)
+            total_sangrias = float(movs.get("total_sangrias", 0.0) or 0.0)
+            total_reforcos = float(movs.get("total_reforcos", 0.0) or 0.0)
+            lista_sangrias = list(movs.get("sangrias", []) or [])
+            lista_reforcos = list(movs.get("reforcos", []) or [])
 
             vendas_por_forma = modulo_financeiro.obter_vendas_dia_por_forma(caixa_id=self.caixa_id)
             esperado = {}
@@ -4556,29 +4851,41 @@ class ModuloPDV(ctk.CTkToplevel):
                 else:
                     esperado[modalidade] = round(vendas_por_forma.get(modalidade, 0.0), 2)
 
-            informado = dict(esperado)
+            informado = {m: 0.0 for m in MODALIDADES}
             if exibir_conferencia:
                 try:
                     informado_modal = self._abrir_modal_conferencia_fechamento(esperado)
                     if informado_modal is None:
                         self._set_status("Fechamento cancelado pelo operador.", "#f39c12")
                         return
-                    informado = informado_modal
+                    informado = {m: round(float((informado_modal or {}).get(m, 0.0) or 0.0), 2)
+                                 for m in MODALIDADES}
                 except Exception as e_modal:
-                    # Rotinas automáticas/sem UI (ex.: checklist): grava conferência espelhada e fecha.
-                    registrar_log(None, "Fechamento de Caixa", "Aviso", f"Conferência visual indisponível ({e_modal}); fechamento automático.")
-                    informado = dict(esperado)
+                    # Rotinas automáticas/sem UI (ex.: checklist): mantém conferência
+                    # zerada (operador não informou) em vez de espelhar o sistema.
+                    # REGRA 1.0.20: INFORMADO = exatamente o valor informado;
+                    # ABERTURA NÃO participa do informado nem da diferença.
+                    registrar_log(None, "Fechamento de Caixa", "Aviso", f"Conferência visual indisponível ({e_modal}); informado zerado.")
+                    informado = {m: 0.0 for m in MODALIDADES}
 
+            # REGRA 1.0.20:
+            # - SISTEMA (esperado) inclui a ABERTURA no DINHEIRO (TOTAL DO SISTEMA).
+            # - CONFERENCIA usa o SISTEMA DO CICLO (calculado = esperado_mov,
+            #   sem abertura) e o INFORMADO puro do operador (modal/0.00).
+            # - DIFERENCA = INFORMADO - SISTEMA DO CICLO.
+            esperado_mov = {m: (round(float(esperado.get(m, 0.0) or 0.0)
+                                      - (saldo_inicial if m == "DINHEIRO" else 0.0), 2))
+                            for m in MODALIDADES}
             with get_db_connection() as conn_fechamento:
                 for modalidade in MODALIDADES:
-                    diferenca = round(informado[modalidade] - esperado[modalidade], 2)
+                    diferenca = round(informado[modalidade] - esperado_mov[modalidade], 2)
                     conn_fechamento.execute(
                         """
                         INSERT INTO caixa_conferencia
                             (caixa_operacao_id, modalidade, valor_calculado, valor_sistema, valor_informado, diferenca)
                         VALUES (?, ?, ?, ?, ?, ?)
                         """,
-                        (self.caixa_id, modalidade, esperado[modalidade], esperado[modalidade], informado[modalidade], diferenca),
+                        (self.caixa_id, modalidade, esperado_mov[modalidade], esperado_mov[modalidade], informado[modalidade], diferenca),
                     )
                 conn_fechamento.execute(
                     "UPDATE caixa_operacao SET status = 'FECHADO', data_fechamento = CURRENT_TIMESTAMP WHERE id = ?",
@@ -4586,15 +4893,33 @@ class ModuloPDV(ctk.CTkToplevel):
                 )
 
             sucesso, msg_fechamento = modulo_financeiro.fechar_caixa(caixa_id=self.caixa_id)
+            # REGRA 1.0.20 (resumo inferior):
+            # - TOTAL DO SISTEMA segue com ABERTURA (total_sistema).
+            # - DIFERENCA da conferencia usa INFORMADO x SISTEMA DO CICLO
+            #   (total_sistema_ciclo, sem abertura).
             total_sistema = round(sum(esperado.values()), 2)
+            total_sistema_ciclo = round(sum(esperado_mov.values()), 2)
             total_informado = round(sum(informado.values()), 2)
-            diferenca_geral = round(total_informado - total_sistema, 2)
+            diferenca_geral = round(total_informado - total_sistema_ciclo, 2)
             caixa_fechado_id = self.caixa_id
+            # TOTAL DE VALE DO CICLO — SOMENTE INFORMATIVO.
+            # Leitura isolada dos Vales GERADOS (criados) neste ciclo de caixa.
+            # NAO entra em DINHEIRO, TOTAL DO SISTEMA, VALOR INFORMADO,
+            # DIFERENCA nem em qualquer outra composicao financeira do
+            # fechamento: nenhum calculo acima foi alterado por causa dela.
+            total_vales_gerados = 0.0
+            try:
+                total_vales_gerados = float(
+                    modulo_financeiro.obter_total_vales_caixa(caixa_fechado_id) or 0.0
+                )
+            except Exception as e_vales:
+                registrar_log(None, "Fechamento de Caixa (Vales)", "Aviso", f"Total informativo de vales indisponível: {e_vales}")
+                total_vales_gerados = 0.0
             if sucesso:
                 self._set_status("Caixa fechado com sucesso.", "#2ecc71")
                 # Indicador compacto volta ao estado real (🔴 CAIXA FECHADO).
                 self._atualizar_indicadores_caixa(False)
-                divergencias = ", ".join(f"{m} {informado[m] - esperado[m]:+.2f}" for m in MODALIDADES)
+                divergencias = ", ".join(f"{m} {informado[m] - esperado_mov[m]:+.2f}" for m in MODALIDADES)
                 registrar_log(
                     None,
                     "Fechamento de Caixa",
@@ -4614,9 +4939,9 @@ class ModuloPDV(ctk.CTkToplevel):
                     "modalidades": [
                         {
                             "modalidade": m,
-                            "calculado": round(esperado[m], 2),
+                            "calculado": round(esperado_mov[m], 2),
                             "informado": round(informado[m], 2),
-                            "diferenca": round(informado[m] - esperado[m], 2),
+                            "diferenca": round(informado[m] - esperado_mov[m], 2),
                         }
                         for m in MODALIDADES
                     ],
@@ -4628,6 +4953,10 @@ class ModuloPDV(ctk.CTkToplevel):
                     "total_reforcos": round(total_reforcos, 2),
                     "sangrias": [{"hora": h, "valor": v} for h, v in lista_sangrias],
                     "reforcos": [{"hora": h, "valor": v} for h, v in lista_reforcos],
+                    # INFORMATIVO: total dos Vales gerados no ciclo. Nao compoe
+                    # nenhum total financeiro do fechamento (nem DINHEIRO, nem
+                    # TOTAL DO SISTEMA, VALOR INFORMADO ou DIFERENCA).
+                    "total_vales_gerados": round(total_vales_gerados, 2),
                 }
                 try:
                     imprimir_resumo = self._perguntar_impressao_fechamento()
@@ -4691,27 +5020,42 @@ class ModuloPDV(ctk.CTkToplevel):
             except Exception:
                 _v = 0.0
             if _v > 0.0004:
-                return f"{_v:+>9.2f}"
+                # Sinal "+" SOMENTE no sinal do numero (sem usar "+" como
+                # caractere de preenchimento, que poluia a coluna).
+                return f"{_v:>+9.2f}"
             return f"{_v:>9.2f}"
-        for item in dados.get("modalidades", []):
-            linhas.append(
-                f"{str(item.get('modalidade', '')):<12} "
-                f"{float(item.get('calculado', 0.0)):>9.2f} "
-                f"{float(item.get('informado', 0.0)):>9.2f} "
-                f"{_fmt_dif_col(item.get('diferenca', 0.0))}"
-            )
-        linhas.append(sep)
+        # REGRA 1.0.20 — tabela superior de conferencia (sem abertura):
+        # SISTEMA = SISTEMA DO CICLO (calculado ja vem sem abertura);
+        # INFORMADO = exatamente o valor informado pelo operador (0.00 se
+        # nao informado); DIFERENCA = INFORMADO - SISTEMA.
         _abertura = float(dados.get("saldo_abertura", 0.0) or 0.0)
         _total_sis = float(dados.get("total_calculado", 0.0) or 0.0)
         _total_inf = float(dados.get("total_informado", 0.0) or 0.0)
         _dif = float(dados.get("diferenca_geral", 0.0) or 0.0)
         _mods = {str(i.get("modalidade", "")).upper(): i for i in dados.get("modalidades", [])}
         _din = _mods.get("DINHEIRO", {})
-        _din_sis = float(_din.get("calculado", 0.0) or 0.0) - _abertura
-        _din_inf = float(_din.get("informado", 0.0) or 0.0) - _abertura
+        _din_sis = round(float(_din.get("calculado", 0.0) or 0.0), 2)
+        _din_inf = round(float(_din.get("informado", 0.0) or 0.0), 2)
         _din_dif = round(_din_inf - _din_sis, 2)
+        for item in dados.get("modalidades", []):
+            if str(item.get("modalidade", "")).strip().upper() == "DINHEIRO":
+                _sis, _inf, _df = _din_sis, _din_inf, _din_dif
+            else:
+                _sis = float(item.get("calculado", 0.0) or 0.0)
+                _inf = float(item.get("informado", 0.0) or 0.0)
+                _df = float(item.get("diferenca", 0.0) or 0.0)
+            linhas.append(
+                f"{str(item.get('modalidade', '')):<12} "
+                f"{_sis:>9.2f} "
+                f"{_inf:>9.2f} "
+                f"{_fmt_dif_col(_df)}"
+            )
+        linhas.append(sep)
         linhas.append(f"VALOR DE ABERTURA DO CAIXA: R$ {_abertura:>9.2f}")
         linhas.append(sep)
+        # REGRA 1.0.20 — resumo inferior: abertura separada, DINHEIRO somente
+        # com a movimentacao do ciclo (sem abertura), TOTAL DO SISTEMA com
+        # abertura + movimentacao, e DIFERENCA = INFORMADO x SISTEMA DO CICLO.
         linhas.append(f"DINHEIRO:                  R$ {_din_sis:>9.2f}")
         for _m in ("DEBITO", "CREDITO", "VOUCHER", "PIX"):
             _v = float((_mods.get(_m) or {}).get("calculado", 0.0) or 0.0)
@@ -4747,6 +5091,19 @@ class ModuloPDV(ctk.CTkToplevel):
         linhas.append(f"TOTAL DO SISTEMA:            R$ {_total_sis:>9.2f}")
         linhas.append(f"VALOR INFORMADO:             R$ {_total_inf:>9.2f}")
         linhas.append(_dif_linha)
+        linhas.append(sep)
+        # ================================ LINHA SOMENTE INFORMATIVA (pos-totais)
+        # TOTAL DE VALE GERADO DURANTE O DIA: informa o total dos Vales GERADOS
+        # (criados) neste ciclo de caixa. NAO entra em DINHEIRO, TOTAL DO
+        # SISTEMA, VALOR INFORMADO, DIFERENCA nem em qualquer outra composicao
+        # financeira acima — nenhuma linha de calculo do fechamento foi
+        # alterada por causa desta informacao.
+        try:
+            _vales = round(float(dados.get("total_vales_gerados", 0.0) or 0.0), 2)
+        except Exception:
+            _vales = 0.0
+        _vales_txt = f"{_vales:,.2f}".replace(",", "#").replace(".", ",").replace("#", ".")
+        linhas.append(f"TOTAL DE VALE GERADO DURANTE O DIA: R$ {_vales_txt}")
         linhas.append(sep)
         return "\n".join(linhas)
 
@@ -4832,9 +5189,9 @@ class ModuloPDV(ctk.CTkToplevel):
         """Após o resultado final do fechamento: pergunta "ABRIR NOVO CAIXA?".
 
         SIM → abre a tela de CONTAGEM DE ABERTURA (ciclo existente).
-        NÃO → NÃO abre a tela de contagem; o caixa permanece FECHADO
-        (``caixa_id = None``, indicador 🔴 CAIXA FECHADO) e o programa
-        pode ser encerrado normalmente. A tela de contagem NUNCA abre
+        NÃO → o caixa permanece FECHADO (``caixa_id = None``, indicador
+        🔴 CAIXA FECHADO), a janela do PDV é encerrada e o foco volta
+        automaticamente ao MENU PRINCIPAL. A tela de contagem NUNCA abre
         automaticamente depois de um fechamento.
         """
         abrir = False
@@ -4857,6 +5214,35 @@ class ModuloPDV(ctk.CTkToplevel):
         self.caixa_id = None
         self._atualizar_indicadores_caixa(False)
         self._set_status("Caixa fechado. Nenhum novo caixa aberto.", "#f1c40f")
+        # NÃO REABRIR CAIXA: encerra o PDV e devolve o MENU PRINCIPAL.
+        self._fechar_pdv_e_retornar_menu()
+
+    def _fechar_pdv_e_retornar_menu(self):
+        """NÃO REABRIR CAIXA: fecha a janela do PDV e retorna ao MENU PRINCIPAL.
+
+        Executado SOMENTE no caminho "NÃO REABRIR" do fim do fechamento de
+        caixa. Não interfere no fluxo de "REABRIR CAIXA", que continua usando
+        ``_encerrar_ciclo_e_abrir_novo_caixa`` (abre a contagem de abertura).
+        """
+        master = getattr(self, "master", None)
+        try:
+            if getattr(master, "_janela_pdv", None) is self:
+                master._janela_pdv = None
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
+        try:
+            if master is not None and master.winfo_exists():
+                resgatar = getattr(master, "_resgatar_janela", None)
+                if callable(resgatar):
+                    resgatar()
+                master.lift()
+                master.focus_force()
+        except Exception:
+            pass
 
     def _encerrar_ciclo_e_abrir_novo_caixa(self):
         """Encerra o ciclo do caixa fechado e inicia abertura do próximo.
@@ -4955,6 +5341,44 @@ class ModuloPDV(ctk.CTkToplevel):
                 modal.grab_set()
         except Exception:
             pass
+
+    def _ligar_atalho_end_gaveta(self):
+        """Atalho <End> -> SOMENTE abrir a gaveta.
+
+        Não executa nenhum outro fluxo: não finaliza venda, não inicia
+        pagamento, não imprime, não fecha/reabre caixa, não cancela item e
+        não altera carrinho, estoque ou financeiro. Reutiliza a rotina segura
+        já existente (`abrir_gaveta`, ESC/POS), sem duplicar lógica.
+        """
+        try:
+            self.bind("<End>", self._ao_pressionar_end_abrir_gaveta)
+        except Exception as e:
+            registrar_log(None, "PDV Gaveta", "Falha", f"Falha ao ligar atalho <End>: {e}")
+
+    def _ao_pressionar_end_abrir_gaveta(self, event=None):
+        """<End> -> uma única ação: ACIONAR A GAVETA.
+
+        Forma de pagamento NÃO é informada de propósito: a trava de segurança
+        de `abrir_gaveta` só restringe quando a forma é informada, e aqui a
+        abertura é um comando explícito do operador, independente do fluxo de
+        venda em andamento.
+        """
+        try:
+            # Não sequestra a tecla quando o foco está em campo de edição
+            # (mantém o comportamento nativo do widget, sem acionar a gaveta).
+            try:
+                foco = self.focus_get()
+                if foco is not None:
+                    classe = type(foco).__name__.lower()
+                    if "entry" in classe or "text" in classe or "spinbox" in classe or "combobox" in classe:
+                        return None
+            except Exception:
+                pass
+            self.abrir_gaveta()
+        except Exception as e:
+            registrar_log(None, "PDV Gaveta", "Falha", f"Erro no atalho <End>: {e}")
+            return None
+        return "break"
 
 
 if __name__ == "__main__":

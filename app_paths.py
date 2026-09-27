@@ -1,6 +1,8 @@
 import os
 import sys
 import tempfile
+from pathlib import Path
+
 
 
 def _base_executavel():
@@ -49,6 +51,23 @@ def _garantir_escrita(path_base: str) -> None:
     os.remove(tmp_path)
 
 
+def _versioned_portable_data_base():
+    """Resolve a pasta de dados compartilhada de um runtime versionado."""
+    if not getattr(sys, "frozen", False):
+        return None
+    exe_dir = _base_executavel()
+    try:
+        # <app_root>/runtime/versions/<versao>/FRS_Mercado.exe
+        version_dir = Path(exe_dir).resolve().parent
+        runtime_dir = version_dir.parent
+        app_root = runtime_dir.parent
+        if version_dir.name == "versions" and runtime_dir.name == "runtime":
+            return str(app_root / "data")
+    except Exception:
+        pass
+    return None
+
+
 def obter_caminho_dados(*partes):
     """
     Retorna caminho de dados priorizando pasta relativa ao executável quando permitido.
@@ -62,6 +81,9 @@ def obter_caminho_dados(*partes):
     if getattr(sys, "frozen", False):
         base_exe = _base_executavel()
         if not _esta_em_program_files(base_exe):
+            base_runtime = _versioned_portable_data_base()
+            if base_runtime:
+                preferencias.append(base_runtime)
             preferencias.append(os.path.join(base_exe, "data"))
     preferencias.append(_base_appdata())
 
@@ -85,17 +107,5 @@ def obter_caminho_dados(*partes):
 
 
 def obter_caminho_log(nome_arquivo: str) -> str:
-    """Retorna caminho de log com fallback silencioso para APPDATA em caso de permissão negada."""
-    if getattr(sys, "frozen", False):
-        base_exe = _base_executavel()
-        if not _esta_em_program_files(base_exe):
-            local_log = os.path.join(base_exe, "data", nome_arquivo)
-            try:
-                os.makedirs(os.path.dirname(local_log), exist_ok=True)
-                with open(local_log, "a", encoding="utf-8"):
-                    pass
-                return local_log
-            except Exception:
-                pass
-
+    """Usa sempre a mesma raiz de dados resolvida por obter_caminho_dados()."""
     return obter_caminho_dados(nome_arquivo)

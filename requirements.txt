@@ -3,6 +3,7 @@ pandas
 reportlab
 google-api-python-client
 google-auth-httplib2
+cryptography
 bcrypt
 firebase-admin
 flet

@@ -1,5 +1,5 @@
 #define MyAppName "FRS Mercado"
-#define MyAppVersion "1.0.18"
+#define MyAppVersion "1.0.20"
 #define MyAppPublisher "FRS Solutions"
 #define MyAppExeName "FRS_Mercado.exe"
 #define PaymentURL "https://invoice.infinitepay.io/plans/frsoficinadepesca/avka57U38g"
@@ -40,7 +40,6 @@ Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs
 Source: "EULA.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "_build_support\checklist_homologacao.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "_build_support\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
-Source: "_build_support\acbr\ACBrMonitor.exe"; DestDir: "{app}\instala"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "_build_support\acbr\ACBrMonitor_Installer.exe"; DestDir: "{app}\instala"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Dirs]
@@ -54,7 +53,14 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingD
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\assets\logo.ico"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\instala\ACBrMonitor_Installer.exe"; Parameters: "/VERYSILENT /NORESTART"; Description: "Instalar ACBrMonitor"; Flags: waituntilterminated runhidden skipifsilent skipifdoesntexist; Tasks: instalaracbr
+; O instalador do ACBr roda TAMBEM quando o FRS e instalado em /VERYSILENT ou
+; /SILENT. A flag skipifsilent era omitida de proposito aqui porque impedia a
+; instalacao silenciosa do motor fiscal (o task instalaracbr nunca executava em
+; modo silencioso, deixando o cliente sem emissao de NF-e).
+; runhidden mantem a execucao sem janela; waituntilterminated garante que o
+; Inno so avancs apos o instalador do ACBr terminar, permitindo ao
+; RegistrarResultadoAcbr verificar o resultado real.
+Filename: "{app}\instala\ACBrMonitor_Installer.exe"; Parameters: "/VERYSILENT /NORESTART /LOG={app}\instala\acbr_install.log"; Description: "Instalar ACBrMonitor"; Flags: runhidden waituntilterminated skipifdoesntexist; Tasks: instalaracbr; Check: ShouldRunAcbrInstaller
 Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent skipifdoesntexist
 
 [Code]
@@ -89,10 +95,100 @@ begin
 	end;
 end;
 
+// Declaracao antecipada: o Pascal Script do Inno Setup exige que a procedure
+// esteja DEFINIDA antes de ser chamada em outra procedure.
+procedure RegistrarResultadoAcbr; forward;
+
+// Localiza o MOTOR REAL do ACBrMonitor (nao e o instalador, nao e .exe
+// renomeado). O instalador oficial 1.4.0.467 grava em C:\ACBrMonitorPLUS.
+function LocalizarMotorAcbr: string;
+var
+Nome: string;
+begin
+Result := '';
+Nome := 'ACBrMonitor.exe';
+if FileExists('C:\ACBrMonitorPLUS\' + Nome) then
+begin
+Result := 'C:\ACBrMonitorPLUS\' + Nome;
+Exit;
+end;
+if FileExists(ExpandConstant('{app}\instala\') + Nome) then
+begin
+Result := ExpandConstant('{app}\instala\') + Nome;
+Exit;
+end;
+end;
+
+// Decide se o instalador do ACBr deve rodar. O instalador oficial 1.4.0.467
+// devolve EXIT CODE 2 quando o ACBr ja esta instalado, e o Inno Setup trata
+// qualquer codigo diferente de zero como falha fatal, abortando a instalacao
+// INTEIRA do FRS. O ACBr e um componente OPCIONAL: o FRS nunca pode ser
+// impedido de instalar por causa dele. Aqui retornamos False apenas quando o
+// motor ja existe (nao ha o que instalar); caso contrario o instalador roda e,
+// mesmo se falhar, o resultado e apenas registrado - nunca aborta o FRS.
+function ShouldRunAcbrInstaller: Boolean;
+begin
+Result := not WizardIsTaskSelected('instalaracbr');
+if Result then
+Exit;
+Result := LocalizarMotorAcbr = '';
+end;
+
+// Verifica o resultado da instalacao do ACBr e grava um status legivel.
+// O task 'instalaracbr' roda silenciosamente; sem esta verificacao uma falha
+// so apareceria quando o usuario abrisse o aplicativo pela primeira vez.
+procedure RegistrarResultadoAcbr;
+var
+	Instalador, Motor, LogArq, StatusArq: string;
+	Linha: string;
+begin
+	StatusArq := ExpandConstant('{app}\instala\acbr_status.txt');
+	Instalador := ExpandConstant('{app}\instala\ACBrMonitor_Installer.exe');
+	LogArq := ExpandConstant('{app}\instala\acbr_install.log');
+
+	if not WizardIsTaskSelected('instalaracbr') then
+	begin
+		Linha := 'ACBR=DESSELECTADO; usuario optou por nao instalar o motor fiscal.';
+		SaveStringToFile(StatusArq, Linha + #13#10, False);
+		Exit;
+	end;
+
+	if not FileExists(Instalador) then
+	begin
+		Linha := 'AVISO: instalador do ACBrMonitor nao encontrado em {app}\instala.'
+			+ ' O componente fiscal nao sera instalado; o aplicativo continuara'
+			+ ' funcionando, porem sem emissao de documentos fiscais.';
+		SaveStringToFile(StatusArq, Linha + #13#10, False);
+		Exit;
+	end;
+
+Motor := LocalizarMotorAcbr;
+
+if Motor = '' then
+begin
+Linha := 'AVISO: o instalador do ACBrMonitor foi executado, mas o MOTOR REAL'
++ ' nao foi localizado (esperado C:\ACBrMonitorPLUS\ACBrMonitor.exe).'
++ ' Consulte acbr_install.log. O aplicativo tentara configurar/instalar'
++ ' o motor no primeiro uso.';
+if FileExists(LogArq) then
+Linha := Linha + ' Log gerado em: ' + LogArq;
+SaveStringToFile(StatusArq, Linha + #13#10, False);
+Exit;
+end;
+
+	Linha := 'OK: motor fiscal ACBrMonitor disponivel (' + Motor + ').';
+	if FileExists(LogArq) then
+		Linha := Linha + #13#10 + 'Log do instalador: ' + LogArq;
+	SaveStringToFile(StatusArq, Linha + #13#10, False);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
 	if CurStep = ssPostInstall then
+	begin
 		CriarConfiguracaoInicial;
+		RegistrarResultadoAcbr;
+	end;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;

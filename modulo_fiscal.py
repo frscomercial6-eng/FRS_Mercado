@@ -13,11 +13,20 @@ from database_manager import obter_caminho_dados
 
 
 def _es_nome_instalador_acbr(nome: str) -> bool:
-    """True se o nome corresponde a um instalador (-I/DEMO/installer),
-    nunca ao binario real do motor fiscal."""
+    """True se o nome corresponde a um INSTALADOR, nunca ao motor fiscal.
+
+    Cobre os nomes em ingles (Installer/DEMO/-I) e em portugues
+    (Instalador/-Instalador), que existem no projeto: o instalador oficial
+    traz "DEMO"/"-I", e o pacote de distribuicao tambem traz
+    "ACBrMonitorPLUS-1.4.0.497-x86-Instalador.exe". Sem "instalador" na
+    lista, esse arquivo seria tomado como motor fiscal pelo
+    localizar_acbr_instalado().
+    """
     nome_low = str(nome or "").lower()
     return (
         "installer" in nome_low
+        or "instalador" in nome_low
+        or "setup" in nome_low
         or "demo" in nome_low
         or nome_low.endswith("-i.exe")
     )
@@ -356,7 +365,15 @@ class FiscalManager:
         self.raiz_projeto = Path(__file__).resolve().parent
         # Pasta "instala" e somente leitura (local de instalacao do ACBrMonitor);
         # nunca deve receber gravacoes para evitar WinError 5 sob Program Files.
-        self.pasta_instala = self.raiz_projeto / "instala"
+        # Em PyInstaller (onedir) Path(__file__) aponta para a pasta interna do
+        # runtime (_internal), enquanto o executavel e a pasta "instala" ficam
+        # na raiz do aplicativo; por isso usamos _pasta_base_aplicacao(), que ja
+        # resolve a pasta do executavel quando congelado.
+        self.pasta_instala = _pasta_base_aplicacao() / "instala"
+        # Em codigo-fonte (nao congelado) mantem a raiz historica do projeto,
+        # onde a pasta "instala" tambem existe.
+        if not self.pasta_instala.is_dir() and self.raiz_projeto.is_dir():
+            self.pasta_instala = self.raiz_projeto / "instala"
         # Arquivos gerados em runtime (ini/entrega/retorno) vao para local gravavel.
         self.pasta_fiscal_in = Path(obter_caminho_dados("fiscal_in"))
         self.pasta_fiscal_out = Path(obter_caminho_dados("fiscal_out"))
@@ -380,52 +397,194 @@ class FiscalManager:
         self.pasta_fiscal_out.mkdir(parents=True, exist_ok=True)
         self.pasta_config_acbr.mkdir(parents=True, exist_ok=True)
 
-    def _configurar_acbr_ini(self):
-        cfg = configparser.ConfigParser()
-        if self.arquivo_ini.exists():
+    # ------------------------------------------------------------------
+    # Configuracao real do ACBrMonitorPLUS 1.4.0.467.
+    #
+    # A UI (Menu MONITOR) grava em "ACBrMonitor.ini", secao [ACBrMonitor],
+    # com as chaves abaixo - verificadas empiricamente no executavel real.
+    # O binario NAO possui as chaves antigas (PastaEntrada/PastaSaida/
+    # ArqEntrada...): o Monitor ignorava o INI e mantinha o alerta
+    # "Configure a forma de Integracao TCP/IP ou TXT".
+    #
+    # O INI real possui ~52 secoes (WebService, Certificado, SAT, NFSe...).
+    # Apenas [ACBrMonitor] e gerenciada aqui; todas as demais sao PRESERVADAS.
+    # ------------------------------------------------------------------
+    _SECAO_ACBR = "ACBrMonitor"
+
+    # Chaves fixas exigidas pelo FRS (modo TXT com troca por arquivos).
+    # HashSenha NAO entra aqui: e gerado pela UI e deve ser preservado.
+    _CHAVES_ACBR_FIXAS = {
+        "Modo_TCP": "0",
+        "Modo_TXT": "1",
+        "MonitorarPasta": "0",
+        "TCP_Porta": "3434",
+        "TCP_TimeOut": "10000",
+        "Converte_TCP_Ansi": "0",
+        "Converte_TXT_Entrada_Ansi": "1",
+        "Converte_TXT_Saida_Ansi": "1",
+        "Intervalo": "50",
+        "Gravar_Log": "1",
+        "Arquivo_Log": "LOG.TXT",
+        "Linhas_Log": "0",
+        "Comandos_Remotos": "0",
+        "Uma_Instancia": "1",
+        "MostraAbas": "0",
+        "MostrarNaBarraDeTarefas": "0",
+        "RetirarAcentosNaResposta": "0",
+        "MostraLogEmRespostasEnviadas": "0",
+        "TipoResposta": "0",
+    }
+
+    # Ordem usada pela UI do ACBr (mantida para o INI ficar identico ao original).
+    _ORDEM_ACBR = [
+        "Modo_TCP", "Modo_TXT", "MonitorarPasta", "TCP_Porta", "TCP_TimeOut",
+        "Converte_TCP_Ansi", "TXT_Entrada", "TXT_Saida",
+        "Converte_TXT_Entrada_Ansi", "Converte_TXT_Saida_Ansi", "Intervalo",
+        "Gravar_Log", "Arquivo_Log", "Linhas_Log", "Comandos_Remotos",
+        "Uma_Instancia", "MostraAbas", "MostrarNaBarraDeTarefas",
+        "RetirarAcentosNaResposta", "MostraLogEmRespostasEnviadas",
+        "HashSenha", "TipoResposta",
+    ]
+
+    def _ini_do_motor(self):
+        """Caminho do ACBrMonitor.ini real (na pasta do executavel do ACBr)."""
+        executavel = self._localizar_executavel_acbr()
+        if not executavel:
+            return None
+        return Path(executavel).resolve().parent / "ACBrMonitor.ini"
+
+    def _valores_acbr_desejados(self):
+        """Chaves [ACBrMonitor] exigidas, com caminhos ABSOLUTOS resolvidos."""
+        valores = dict(self._CHAVES_ACBR_FIXAS)
+        valores["TXT_Entrada"] = str(Path(self.arquivo_entrega).resolve())
+        valores["TXT_Saida"] = str(Path(self.arquivo_retorno).resolve())
+        return valores
+
+    def _ler_ini_seguro(self, caminho):
+        """Le o INI como texto bruto, preservando todas as secoes do ACBr.
+
+        O configparser normaliza e reescreve o arquivo inteiro; o INI real
+        tem ~52 secoes que NAO podem ser reescritas. Lemos o texto e mexemos
+        apenas no bloco [ACBrMonitor].
+        """
+        if not caminho or not Path(caminho).exists():
+            return None
+        try:
+            return Path(caminho).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    @staticmethod
+    def _bloco_acbr_do_texto(texto):
+        """(inicio, fim, linhas) do bloco [ACBrMonitor] no texto, ou None."""
+        if texto is None:
+            return None
+        linhas = texto.splitlines()
+        ini = None
+        for i, linha in enumerate(linhas):
+            if linha.strip().lower() == "[acbrmonitor]":
+                if ini is None:
+                    ini = i
+        if ini is None:
+            return None
+        fim = ini
+        for j in range(ini + 1, len(linhas)):
+            if linhas[j].strip().startswith("["):
+                return ini, j, linhas[ini:j]
+            fim = j
+        return ini, len(linhas), linhas[ini:fim + 1]
+
+    def _montar_bloco_acbr(self, valores, hash_atual=""):
+        """Bloco [ACBrMonitor] na ordem da UI, preservando HashSenha."""
+        out = [f"[{self._SECAO_ACBR}]"]
+        for chave in self._ORDEM_ACBR:
+            if chave == "HashSenha":
+                if hash_atual:
+                    out.append(f"HashSenha={hash_atual}")
+                continue
+            if chave in valores:
+                out.append(f"{chave}={valores[chave]}")
+        return "\n".join(out) + "\n"
+
+    def _atualizar_ini_acbr(self, caminho, forcar=False):
+        """Aplica [ACBrMonitor] preservando TODAS as demais secoes do INI.
+
+        Idempotente: se o bloco ja estiver correto, o arquivo nao e tocado.
+        Devolve (alterado: bool, motivo: str).
+        """
+        ini = Path(caminho)
+        texto = self._ler_ini_seguro(ini)
+        valores = self._valores_acbr_desejados()
+
+        if texto is None:
+            # Arquivo inexistente: cria somente com a secao necessaria.
             try:
-                cfg.read(self.arquivo_ini, encoding="utf-8")
-            except Exception:
-                cfg = configparser.ConfigParser()
+                ini.parent.mkdir(parents=True, exist_ok=True)
+                ini.write_text(self._montar_bloco_acbr(valores), encoding="utf-8")
+            except OSError as exc:
+                return False, f"nao foi possivel criar {ini}: {exc}"
+            return True, f"ACBrMonitor.ini criado com a secao [{self._SECAO_ACBR}]"
 
-        # Alguns ambientes usam nomes diferentes de secao/chaves.
-        # Atualizamos as convencoes mais comuns para forcar a troca por arquivos.
-        secoes = ["ACBrMonitor", "Monitor", "MONITOR"]
-        executavel_acbr = self._localizar_executavel_acbr()
-        for secao in secoes:
-            if secao not in cfg:
-                cfg[secao] = {}
+        bloco = self._bloco_acbr_do_texto(texto)
+        hash_atual = ""
+        if bloco:
+            for linha in bloco[2]:
+                if linha.strip().lower().startswith("hashsenha="):
+                    hash_atual = linha.split("=", 1)[1].strip()
+                    break
 
-            cfg[secao]["PastaEntrada"] = str(self.pasta_fiscal_in)
-            cfg[secao]["PastaSaida"] = str(self.pasta_fiscal_out)
-            cfg[secao]["ArquivoEntrada"] = str(self.arquivo_entrega)
-            cfg[secao]["ArquivoSaida"] = str(self.arquivo_retorno)
-            cfg[secao]["ArqEntrada"] = str(self.arquivo_entrega)
-            cfg[secao]["ArqSaida"] = str(self.arquivo_retorno)
-            if executavel_acbr:
-                cfg[secao]["Executavel"] = executavel_acbr
+        esperado = self._montar_bloco_acbr(valores, hash_atual)
+
+        def _sem_hash(t):
+            return [
+                l.rstrip() for l in (t or "").splitlines()
+                if l.strip() and not l.strip().lower().startswith("hashsenha=")
+            ]
+
+        if bloco and not forcar and _sem_hash("\n".join(bloco[2])) == _sem_hash(esperado):
+            return False, f"[{self._SECAO_ACBR}] ja esta correta (preservado)"
+
+        if bloco:
+            # Substitui SOMENTE o bloco [ACBrMonitor], preservando o resto.
+            inicio, fim, _ = bloco
+            linhas = texto.splitlines()
+            novo_texto = "\n".join(
+                linhas[:inicio] + esperado.rstrip("\n").split("\n") + [""] + linhas[fim:]
+            )
+        else:
+            # Nao existe a secao: acrescenta ao final, preservando o resto.
+            sep = "" if (not texto.strip() or texto.endswith("\n")) else "\n"
+            novo_texto = texto + sep + esperado
+
+        if novo_texto == texto:
+            return False, f"[{self._SECAO_ACBR}] ja esta correta (preservado)"
 
         try:
-            with open(self.arquivo_ini, "w", encoding="utf-8") as f:
-                cfg.write(f)
+            ini.write_text(novo_texto, encoding="utf-8")
+        except OSError as exc:
+            return False, f"nao foi possivel gravar {ini}: {exc}"
+        return True, f"[{self._SECAO_ACBR}] atualizado em {ini}"
+
+    def _configurar_acbr_ini(self):
+        """Aplica a configuracao real do monitor no ACBrMonitor.ini do motor.
+
+        Nao reescreve o arquivo inteiro: apenas a secao [ACBrMonitor] e
+        tocada, preservando as demais (~52) secoes do ACBr.
+        """
+        try:
+            self.pasta_config_acbr.mkdir(parents=True, exist_ok=True)
         except OSError:
-            # Sem permissao de escrita: mantem app funcionando, apenas sem atualizar o ini local.
             pass
 
-        # O ACBrMonitor real le o ACBrMonitor.ini na propria pasta de instalacao.
-        # Provisiona a MESMA configuracao (mesmas chaves/valores ja usados pelo
-        # FRS) no diretorio do motor apenas quando o monitor ainda nao possui
-        # INI (primeiro uso), sem sobrescrever configuracao propria do ACBr e
-        # sem criar nenhuma chave fiscal nova.
-        if executavel_acbr:
-            try:
-                pasta_motor = Path(executavel_acbr).resolve().parent
-                ini_motor = pasta_motor / "ACBrMonitor.ini"
-                if pasta_motor.is_dir() and not ini_motor.exists():
-                    with open(ini_motor, "w", encoding="utf-8") as f:
-                        cfg.write(f)
-            except OSError:
-                pass
+        # Prioriza o INI real do motor; usa o espelho local como fallback
+        # quando o ACBr ainda nao esta instalado.
+        ini_motor = self._ini_do_motor()
+        if ini_motor is not None:
+            self._atualizar_ini_acbr(ini_motor)
+        else:
+            self._atualizar_ini_acbr(self.arquivo_ini)
+
+
 
     def _localizar_executavel_acbr(self):
         # Mantém primeiro os caminhos já usados pelo FRS (pasta "instala") e
@@ -434,6 +593,154 @@ class FiscalManager:
         # Instaladores (DEMO/-I/Installer) nunca são considerados motor.
         caminho = localizar_acbr_instalado(self.pasta_instala)
         return str(caminho) if caminho else ""
+
+    # ------------------------------------------------------------------
+    # Health-check e reparo da configuracao do ACBr (motor presente, porem
+    # com INI ausente/invalido/desapontado para as pastas do FRS).
+    # Nao reinstala o ACBr: apenas regrava a configuracao, de forma idempotente.
+    # ------------------------------------------------------------------
+    def _pastas_fiscais_gravaveis(self):
+        """(ok, detalhe) para leitura+escrita nas pastas fiscais do FRS."""
+        for rotulo, pasta in (
+            ("entrada", self.pasta_fiscal_in),
+            ("saida", self.pasta_fiscal_out),
+        ):
+            try:
+                pasta.mkdir(parents=True, exist_ok=True)
+                teste = pasta / "_frs_acbr_write.tmp"
+                teste.write_text("ok", encoding="utf-8")
+                teste.unlink(missing_ok=True)
+            except OSError as exc:
+                return False, f"pasta fiscal de {rotulo} nao gravavel: {exc}"
+        return True, ""
+
+    def _chaves_do_bloco(self, bloco):
+        """Converte as linhas do bloco [ACBrMonitor] em dict (minusculas)."""
+        if not bloco:
+            return {}
+        d = {}
+        for linha in bloco:
+            linha = linha.strip()
+            if not linha or linha.startswith("[") or "=" not in linha:
+                continue
+            chave, valor = linha.split("=", 1)
+            d[chave.strip().lower()] = valor.strip()
+        return d
+
+    def _bloco_real_do_motor(self, caminho):
+        """Lê o bloco [ACBrMonitor] do INI real, ou None."""
+        texto = self._ler_ini_seguro(caminho)
+        bloco = self._bloco_acbr_do_texto(texto)
+        return bloco[2] if bloco else None
+
+    def _healthcheck_acbr(self, executavel=None, verificar_pastas=True):
+        """Diagnostica o ACBr instalado, sem reinstala-lo e sem gravar nada.
+
+        Valida as chaves REAIS do ACBrMonitorPLUS 1.4.0.467 (secao
+        [ACBrMonitor]): Modo_TXT, Modo_TCP, MonitorarPasta, TXT_Entrada,
+        TXT_Saida, Converte_*_Ansi, Intervalo e TipoResposta.
+
+        Devolve (ok: bool, motivo: str).
+        """
+        caminho = executavel or self._localizar_executavel_acbr()
+        if not caminho:
+            return False, "ACBr ausente (executavel nao encontrado)"
+        caminho = Path(caminho)
+
+        # (a) executavel presente e utilizavel
+        if not caminho.is_file():
+            return False, f"executavel do ACBr inexistente: {caminho}"
+        if _es_nome_instalador_acbr(caminho.name):
+            return False, f"apenas o instalador foi encontrado, nao o motor: {caminho.name}"
+
+        # (b) configuracao real
+        ini_motor = caminho.parent / "ACBrMonitor.ini"
+        bloco = self._bloco_real_do_motor(ini_motor)
+        if bloco is None:
+            return False, f"ACBrMonitor.ini sem secao [ACBrMonitor] em {caminho.parent}"
+        chaves = self._chaves_do_bloco(bloco)
+
+        # (c) modo de integracao: TXT ativo, TCP desligado
+        if chaves.get("modo_txt", "") != "1":
+            return False, f"Modo_TXT inativo (valor: {chaves.get('modo_txt', 'ausente')!r})"
+        if chaves.get("modo_tcp", "") != "0":
+            return False, f"Modo_TCP deveria estar 0 (valor: {chaves.get('modo_tcp', 'ausente')!r})"
+
+        # (d) TXT_Entrada = caminho absoluto do FRS
+        esperado_entrada = str(Path(self.arquivo_entrega).resolve())
+        atual_entrada = str(chaves.get("txt_entrada", "")).strip().strip('"')
+        if not atual_entrada:
+            return False, "TXT_Entrada ausente no ACBrMonitor.ini"
+        if atual_entrada.lower() != esperado_entrada.lower():
+            return False, f"TXT_Entrada divergente: {atual_entrada}"
+        if not Path(atual_entrada).parent.is_dir():
+            return False, f"pasta de TXT_Entrada inexistente: {Path(atual_entrada).parent}"
+
+        # (e) TXT_Saida = caminho absoluto do FRS
+        esperado_saida = str(Path(self.arquivo_retorno).resolve())
+        atual_saida = str(chaves.get("txt_saida", "")).strip().strip('"')
+        if not atual_saida:
+            return False, "TXT_Saida ausente no ACBrMonitor.ini"
+        if atual_saida.lower() != esperado_saida.lower():
+            return False, f"TXT_Saida divergente: {atual_saida}"
+        if not Path(atual_saida).parent.is_dir():
+            return False, f"pasta de TXT_Saida inexistente: {Path(atual_saida).parent}"
+
+        # (f) gravacao das pastas fiscais
+        if verificar_pastas:
+            ok_pastas, detalhe = self._pastas_fiscais_gravaveis()
+            if not ok_pastas:
+                return False, detalhe
+
+        return True, ""
+
+    def _configuracao_coerente(self, cfg=None):
+        """True quando [ACBrMonitor] do motor ja esta correta para o FRS.
+
+        "Correto" = as chaves REAIS apontam para os caminhos absolutos do FRS
+        (TXT_Entrada/TXT_Saida) e as chaves fixas tem os valores esperados.
+        Nao exige HashSenha, para nao forcar reescrita de config valida.
+        """
+        caminho = self._localizar_executavel_acbr()
+        if not caminho:
+            return False
+        ini_motor = Path(caminho).parent / "ACBrMonitor.ini"
+        if cfg is None:
+            bloco = self._bloco_real_do_motor(ini_motor)
+            if bloco is None:
+                return False
+            cfg = self._chaves_do_bloco(bloco)
+
+        esperado = self._valores_acbr_desejados()
+        for chave, valor in esperado.items():
+            atual = str(cfg.get(chave.lower(), "")).strip().strip('"')
+            if atual.lower() != valor.lower():
+                return False
+        return True
+
+    def reparar_configuracao_acbr(self, forcar=False):
+        """Reescreve a configuracao do ACBr quando ela nao serve ao FRS.
+
+        Idempotente: se ja estiver coerente e `forcar` for False, o arquivo
+        NAO e tocado (preserva configuracao valida). Nao reinstala o motor e
+        nao altera as rotinas de comunicacao ENTREGA.TXT/RETORNO.TXT.
+
+        Devolve (reparado: bool, motivo: str).
+        """
+        caminho = self._localizar_executavel_acbr()
+        if not caminho:
+            return False, "ACBr ausente: nada a reparar"
+        caminho = Path(caminho)
+        ini_motor = caminho.resolve().parent / "ACBrMonitor.ini"
+
+        # Garante as pastas fiscais antes de apontar o ACBr para elas.
+        ok_pastas, detalhe = self._pastas_fiscais_gravaveis()
+        if not ok_pastas:
+            return False, detalle
+
+        # Idempotente: so reescreve quando [ACBrMonitor] nao serve ao FRS.
+        return self._atualizar_ini_acbr(ini_motor, forcar=forcar)
+        return True, f"configuracao do ACBr reparada em {ini_motor}"
 
     def _to_float(self, valor, default=0.0):
         try:

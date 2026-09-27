@@ -1,15 +1,13 @@
 import traceback
 from pathlib import Path
 from datetime import datetime
-import os
+import subprocess
 import sys
 
 import customtkinter as ctk
 
-from client_credentials_store import load_client_credentials
 from modulo_login import ModuloLogin
 from database_manager import get_db_connection, obter_caminho_dados
-from error_notifier import notify_error, ensure_error_telemetry_started
 from app_paths import obter_caminho_log
 
 
@@ -40,9 +38,12 @@ def _aplicar_configuracao_segura_ui() -> None:
 
 
 def _global_exception_handler(exc_type, exc_value, exc_tb) -> None:
+    """Antes do login, registra erros somente no arquivo local.
+
+    Nenhuma notificação remota é iniciada nesta fase da aplicação.
+    """
     try:
         _log_debug("Excecao global nao tratada", exc_value)
-        notify_error("excecao_global", exc_value)
     except Exception:
         pass
 
@@ -56,42 +57,57 @@ def _garantir_banco_inicial() -> None:
         conn.execute("SELECT 1")
 
 
-def _carregar_credenciais_cliente() -> None:
-    """Carrega credenciais protegidas para uso unificado no desktop/mobile."""
+def _reexecutar_runtime_versionado() -> bool:
+    """Encaminha o Portable raiz para a versão validada em runtime/current.json."""
+    if not getattr(sys, "frozen", False):
+        return False
+    executable = Path(sys.executable).resolve()
+    root = executable.parent
+    pointer = root / "runtime" / "current.json"
+    if not pointer.is_file():
+        return False
     try:
-        dados = load_client_credentials()
-    except Exception as e:
-        _log_debug("Falha ao carregar arquivo protegido de credenciais do cliente", e)
-        return
-
-    if not dados:
-        return
-
-    mapa = {
-        "license_key": "FRS_CLIENT_LICENSE_KEY",
-        "client_key": "FRS_CLIENT_KEY",
-        "firebase_admin_key_path": "FIREBASE_ADMIN_KEY_PATH",
-        "google_oauth_credentials_path": "FRS_GOOGLE_CREDENTIALS_PATH",
-        "google_services_path": "FRS_GOOGLE_SERVICES_PATH",
-    }
-
-    for source_key, env_key in mapa.items():
-        value = str(dados.get(source_key, "") or "").strip()
-        if not value:
-            continue
-        os.environ[env_key] = value
+        import json
+        payload = json.loads(pointer.read_text(encoding="utf-8"))
+        if payload.get("schema") != "FRS-MERCADO-RUNTIME-POINTER-V1":
+            return False
+        target = Path(str(payload.get("runtime") or "")).resolve()
+        runtime_root = (root / "runtime" / "versions").resolve()
+        if target == executable.parent:
+            return False
+        if runtime_root != target and runtime_root not in target.parents:
+            _log_debug("Ponteiro de runtime rejeitado: destino fora de runtime/versions.")
+            return False
+        target_executable = target / executable.name
+        if not target_executable.is_file():
+            _log_debug(f"Runtime apontado não encontrado: {target_executable}")
+            return False
+        args = [str(target_executable), *sys.argv[1:]]
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) if hasattr(subprocess, "DETACHED_PROCESS") else 0
+        subprocess.Popen(args, cwd=str(target), close_fds=True, creationflags=flags)
+        return True
+    except Exception as exc:
+        _log_debug("Falha ao despachar runtime versionado", exc)
+        return False
 
 
 def main() -> None:
-    """Fluxo único de inicialização: Login/Licença -> Interface principal."""
-    ensure_error_telemetry_started()
+    """Fluxo local e offline: banco -> autenticação -> interface principal."""
+    if "--update-health-check" in sys.argv:
+        # O helper externo usa este modo para validar o runtime novo sem
+        # abrir login, caixa, PDV ou qualquer integração remota.
+        print("FRS Mercado update health check: OK")
+        return
+
+    if _reexecutar_runtime_versionado():
+        return
+
     _aplicar_configuracao_segura_ui()
 
     for tentativa in range(2):
         usuario_logado = None
         app = None
         try:
-            _carregar_credenciais_cliente()
             _garantir_banco_inicial()
 
             app = ctk.CTk()
@@ -124,12 +140,10 @@ def main() -> None:
                     iniciar_sistema(usuario_logado)
                 except Exception as e:
                     _log_debug("Falha ao carregar/inicializar modulo_main", e)
-                    notify_error("modulo_main", e)
             return
 
         except Exception as e:
             _log_debug("Erro critico na inicializacao geral", e)
-            notify_error("inicializacao_geral", e)
             _aplicar_configuracao_segura_ui()
             if tentativa == 0:
                 continue

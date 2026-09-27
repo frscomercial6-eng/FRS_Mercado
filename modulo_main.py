@@ -1,8 +1,6 @@
 import sys
 import os
 import json
-import re
-import hashlib
 import time
 import sqlite3
 import threading
@@ -14,9 +12,19 @@ import customtkinter as ctk
 from tkinter import messagebox, filedialog
 from urllib.parse import quote
 from database_manager import get_db_connection, get_db_path, obter_caminho_dados, registrar_log
+from license_manager import LicenseManager, operacao_comercial_bloqueada
 from modulo_config import carregar_configuracoes, salvar_configuracoes
-from updater import Updater
+from updater_secure import Updater
 from system_monitor import SystemMonitor
+
+# Identificacao visual da versao (somente leitura da versao oficial gerada
+# pelo release_manager). Nao altera nenhuma logica de funcionamento.
+try:
+    from release_info import APP_VERSION as _FRS_APP_VERSION
+except Exception:
+    _FRS_APP_VERSION = "1.0.20"
+
+COMPRAR_LICENCA_URL = "https://www.frssolutions.com.br/planos"
 
 
 def _log_debug(contexto: str, erro: Exception | None = None) -> None:
@@ -56,7 +64,9 @@ class AppPrincipal(ctk.CTk):
         self._updater = Updater(parent=self)
         self._system_monitor = None
         self._fiscal_alerta_em_exibicao = False
-        self._license_status = {"expired": False, "warning": False, "message": "Licença: Verificando...", "color": "#f1c40f", "renewal_url": ""}
+        # Placeholder inicial: NÃO é uma expiração real. O estado autoritativo
+        # (licenca.data_expiracao) é carregado em login_concluido/_aplicar_status_licenca.
+        self._license_status = {"expired": False, "warning": False, "message": "Licença: verificando licença assinada...", "color": "#f1c40f", "renewal_url": ""}
         self._license_block_alert_open = False
         self._pdv_expired_notified = False
         self.btn_abrir_pdv = None
@@ -70,14 +80,8 @@ class AppPrincipal(ctk.CTk):
         # Lazy loading: evita consulta ao banco durante o __init__.
         self.admin_cadastrado = False
 
-                # === INYECCIÓN TEMPORAL PARA DESARROLLO ===
-        # Fuerza sesión de administrador (NO USAR EN BUILD PRODUCTIVO)
-        if not getattr(self, '_desarrollo_force_login', False):
-            self.usuario_atual = {"nome": "Administrador", "permissão": "Administrador"}
-            self._desarrollo_force_login = True
-        # === FIN DE INYECCIÓN TEMPORAL ===
-        
-        # Fluxo de login passa a ser exclusivo do main.py.
+        # A sessão é definida exclusivamente pelo login local. Nunca substituir
+        # o usuário autenticado por um valor de desenvolvimento.
         if not self.usuario_atual:
             aviso = "Sessão vazia recebida na transição Login -> Main. Inicialização abortada."
             print(f"[SESSAO] {aviso}")
@@ -237,12 +241,20 @@ class AppPrincipal(ctk.CTk):
         self.lbl_modulo_hora.configure(text=f"Ação registrada às {agora}")
 
     def _modulo_bloqueado_por_licenca(self, modulo_nome: str) -> bool:
+        """Bloqueia o módulo quando a licença venceu (modo restrito).
+
+        Exportação, relatórios, usuários, configurações e a própria ativação
+        permanecem liberados para recuperação de dados, compra e ativação.
+        """
         if not bool(self._license_status.get("expired", False)):
             return False
-        nome = str(modulo_nome or "").upper()
-        if nome == "PDV":
-            return True
-        return "FISCAL" in nome
+        return operacao_comercial_bloqueada(modulo_nome)
+
+    def _operacao_bloqueada_por_licenca(self, operacao_nome: str) -> bool:
+        """Ações comerciais que não abrem módulo (ex.: importação de produtos)."""
+        if not bool(self._license_status.get("expired", False)):
+            return False
+        return operacao_comercial_bloqueada(operacao_nome)
 
     def _exibir_bloqueio_licenca(self):
         if self._license_block_alert_open:
@@ -280,102 +292,111 @@ class AppPrincipal(ctk.CTk):
             self._pdv_expired_notified = False
             self.btn_abrir_pdv.configure(state="normal", fg_color="#27ae60", hover_color="#27ae60")
 
-    def _obter_identificador_ativacao(self) -> str:
-        cfg = carregar_configuracoes()
-        return (
-            str(cfg.get("market_id") or "").strip()
-            or str(cfg.get("cnpj") or "").strip()
-            or str(cfg.get("razao_social") or "").strip()
-            or "FRS_MERCADO"
-        ).upper()
+    def _aplicar_status_licenca(self, status):
+        self._license_status = {
+            "expired": bool(status.get("is_expired", status.get("expired", False))),
+            "warning": bool(status.get("is_warning", status.get("warning", False))),
+            "message": str(status.get("message") or "Licença: indisponível"),
+            "color": str(status.get("color") or "#ff5555"),
+            "renewal_url": str(status.get("renewal_url") or ""),
+            "source": str(status.get("source") or ""),
+            "restricted": bool(status.get("restricted", status.get("is_expired", False))),
+        }
+        try:
+            if getattr(self, "lbl_status_licenca_sidebar", None) is not None:
+                self.lbl_status_licenca_sidebar.configure(
+                    text=self._license_status["message"],
+                    text_color=self._license_status["color"],
+                )
+        except Exception:
+            pass
+        self._atualizar_estado_botao_pdv()
+
+    def _atualizar_licenca_local(self):
+        from license_manager import LicenseManager
+
+        self._aplicar_status_licenca(LicenseManager().get_status())
 
     def _validar_chave_ativacao(self, chave: str):
-        chave_txt = str(chave or "").strip().upper().replace(" ", "")
-        if chave_txt.startswith("LICENCA_FRS:"):
-            chave_txt = chave_txt.split(":", 1)[1].strip()
+        """Valida a chave digitada sem persistir (fluxo histórico comprovado)."""
+        return LicenseManager().validar_chave(chave)
 
-        padrao = r"^FRS-(\d{8})-([A-F0-9]{12})$"
-        match = re.match(padrao, chave_txt)
-        if not match:
-            return False, "Formato inválido. Use FRS-AAAAMMDD-XXXXXXXXXXXX.", None
-
-        data_raw, assinatura = match.groups()
+    def _abrir_comprar_licenca(self, parent=None):
         try:
-            exp_date = datetime.strptime(data_raw, "%Y%m%d").date()
-        except ValueError:
-            return False, "Data da chave inválida.", None
-
-        identificador = self._obter_identificador_ativacao()
-        base = f"{identificador}|{data_raw}|FRS_ATIVACAO_2026"
-        esperado = hashlib.sha256(base.encode("utf-8")).hexdigest()[:12].upper()
-        if assinatura != esperado:
-            return False, "Chave de ativação inválida para este cliente.", None
-
-        return True, "Licença validada com sucesso.", exp_date
-
-    def _persistir_licenca_ativada(self, chave: str, data_exp):
-        cfg = carregar_configuracoes()
-        cfg["license_mode"] = "full"
-        cfg["license_key"] = str(chave or "").strip()
-        cfg["license_expiration"] = data_exp.isoformat()
-        salvar_configuracoes(cfg, exibir_alerta=False)
-
-        with get_db_connection() as conn:
-            row = conn.execute("SELECT id FROM licenca ORDER BY id DESC LIMIT 1").fetchone()
-            if row:
-                conn.execute("UPDATE licenca SET data_expiracao = ? WHERE id = ?", (data_exp.isoformat(), row[0]))
-            else:
-                conn.execute("INSERT INTO licenca (data_expiracao) VALUES (?)", (data_exp.isoformat(),))
+            webbrowser.open(COMPRAR_LICENCA_URL, new=2)
+        except Exception as exc:
+            messagebox.showerror("Licença", f"Não foi possível abrir a página de planos: {exc}", parent=parent or self)
 
     def abrir_tela_ativacao_sistema(self):
+        """ATIVAÇÃO DE SISTEMA pelo fluxo histórico comprovado.
+
+        Campo de digitação da chave + COMPRAR LICENÇA. Nenhuma emissão, geração
+        de chave, challenge, pasta privada ou tooling do FRS aparece aqui.
+        """
         janela = ctk.CTkToplevel(self)
         janela.title("Ativação de Sistema")
-        janela.geometry("520x230")
+        janela.geometry("540x300")
         janela.transient(self)
         janela.grab_set()
 
         ctk.CTkLabel(
-            janela,
-            text="Ativação de Sistema",
-            font=("Roboto", 20, "bold"),
-        ).pack(pady=(18, 8))
+            janela, text="ATIVAÇÃO DE SISTEMA", font=("Roboto", 18, "bold"),
+        ).pack(pady=(18, 6))
 
         ctk.CTkLabel(
             janela,
             text="Insira a Chave de Ativação:",
             font=("Roboto", 12, "bold"),
-        ).pack(anchor="w", padx=24)
+        ).pack(anchor="w", padx=28)
 
         entry_chave = ctk.CTkEntry(
-            janela,
-            width=460,
-            placeholder_text="FRS-AAAAMMDD-XXXXXXXXXXXX",
+            janela, width=470, placeholder_text="FRS-AAAAMMDD-XXXXXXXXXXXX",
         )
-        entry_chave.pack(padx=24, pady=(6, 12))
+        entry_chave.pack(padx=28, pady=(6, 10))
 
-        lbl_feedback = ctk.CTkLabel(janela, text="", text_color="#f1c40f", font=("Roboto", 11, "bold"))
-        lbl_feedback.pack(anchor="w", padx=24)
+        lbl_feedback = ctk.CTkLabel(
+            janela, text="", text_color="#f1c40f", font=("Roboto", 11, "bold"),
+            wraplength=470, justify="left",
+        )
+        lbl_feedback.pack(anchor="w", padx=28)
 
         def _validar_licenca():
-            ok, msg, exp = self._validar_chave_ativacao(entry_chave.get())
-            if not ok or exp is None:
-                lbl_feedback.configure(text=msg, text_color="#ff6666")
-                return
             try:
-                self._persistir_licenca_ativada(entry_chave.get(), exp)
-                self._license_status["expired"] = False
-                lbl_feedback.configure(text=f"Licença validada. Expira em {exp.isoformat()}.", text_color="#66ff99")
-                self._atualizar_estado_botao_pdv()
+                ok, mensagem, _status = LicenseManager().ativar(entry_chave.get())
             except Exception as exc:
-                lbl_feedback.configure(text=f"Falha ao salvar licença: {exc}", text_color="#ff6666")
+                ok, mensagem = False, f"Não foi possível ativar a licença: {exc}"
+
+            if not ok:
+                registrar_log(None, "Ativação de Licença", "Falha", str(mensagem))
+                try:
+                    lbl_feedback.configure(text=str(mensagem), text_color="#ff6666")
+                except Exception:
+                    pass
+                return
+
+            registrar_log(None, "Ativação de Licença", "Sucesso", str(mensagem))
+            try:
+                lbl_feedback.configure(text=str(mensagem), text_color="#66ff99")
+            except Exception:
+                pass
+            self._atualizar_licenca_local()
+            try:
+                messagebox.showinfo("Licença ativada", str(mensagem), parent=janela)
+            except Exception:
+                pass
 
         ctk.CTkButton(
-            janela,
-            text="Validar Licença",
-            fg_color="#1d4ed8",
-            hover_color="#2563eb",
+            janela, text="ATIVAR SISTEMA", fg_color="#15803d", hover_color="#116b32",
             command=_validar_licenca,
-        ).pack(pady=(10, 8))
+        ).pack(fill="x", padx=28, pady=(14, 6))
+        ctk.CTkButton(
+            janela, text="COMPRAR LICENÇA", fg_color="#1d4ed8", hover_color="#1740ad",
+            command=lambda: self._abrir_comprar_licenca(janela),
+        ).pack(fill="x", padx=28, pady=6)
+        ctk.CTkButton(
+            janela, text="FECHAR", fg_color="#555555", command=janela.destroy,
+        ).pack(fill="x", padx=28, pady=6)
+        janela.protocol("WM_DELETE_WINDOW", janela.destroy)
 
     def _abrir_modulo_seguro(self, modulo_nome, opener):
         """Abre módulo com proteção de foco e tratamento de exceções sem esconder a raiz."""
@@ -566,7 +587,34 @@ class AppPrincipal(ctk.CTk):
             return id_after
 
     def fechar_sistema(self):
-        """Realiza um encerramento limpo e forçado do processo Python no Windows."""
+        """Encerra a sessão; se houver atualização preparada, pregunta antes de sair."""
+        # Não repetir a pergunta quando o fechamento já está em andamento.
+        if getattr(self, "_encerramento_em_curso", False):
+            return
+        self._encerramento_em_curso = True
+        try:
+            pending = self._updater is not None and self._updater.has_pending_update()
+        except Exception:
+            pending = False
+        if pending:
+            try:
+                # O método faz nova confirmação e revalida o gate operacional.
+                resultado = self._updater.preparar_instalacao_no_encerramento()
+                if resultado is None:
+                    # O gate impediu a atualização; NÃO encerre para evitar perda
+                    # de estado e permita que o operador feche caixa/carrinho antes.
+                    self._encerramento_em_curso = False
+                    return
+            except Exception as exc:
+                _log_debug("Falha ao preparar atualização no encerramento", exc)
+                self._encerramento_em_curso = False
+                messagebox.showerror(
+                    "Atualização",
+                    "Não foi possível preparar a atualização. O sistema continuará aberto e funcional.",
+                    parent=self,
+                )
+                return
+
         self._watchdog_janela_ativo = False
         try:
             if self._system_monitor is not None:
@@ -584,9 +632,7 @@ class AppPrincipal(ctk.CTk):
                 self.destroy()
         except Exception:
             pass
-        # Medidas de segurança final para matar o processo no SO
-        sys.exit()
-        os._exit(0)
+        raise SystemExit(0)
 
     def cancelar_loops(self):
         """Cancela todos os loops de IA e interface pendentes."""
@@ -609,15 +655,35 @@ class AppPrincipal(ctk.CTk):
         self.cores_pulso = ["#2b2b2b", "#3b1a1a", "#5e1919", "#8b1a1a", "#b31b1b", "#8b1a1a", "#5e1919", "#3b1a1a"]
         
         self.configurar_interface()
+
+        # Ordem crítica pós-login: aplica o estado autoritativo de licença
+        # (licenca.data_expiracao via LicenseManager) IMEDIATAMENTE após a UI,
+        # antes do SystemMonitor e de qualquer aviso. Assim, com Trial de 30 dias
+        # válido o sistema entra direto em "Licença Trial ativa" sem exibir o
+        # falso popup "Licença expirada"; um licença realmente expirada continua
+        # disparando o aviso normalmente.
+        try:
+            self._atualizar_licenca_local()
+        except Exception as e:
+            _log_debug("Falha ao carregar status de licença pós-login", e)
+
         self._iniciar_monitor_ociosidade()
         self.sistema_pronto = True
         self._watchdog_visibilidade_janela()
         self._registrar_after(120, self._inicializar_recursos_pos_login)
 
     def _inicializar_recursos_pos_login(self):
-        """Carrega tarefas pesadas após a UI estar visível."""
+        """Carrega tarefas pesadas após a UI estar visível e a sessão estar local."""
         if not self.winfo_exists():
             return
+
+        # Telemetria só é habilitada depois da autenticação local. O login
+        # permanece totalmente funcional mesmo sem rede.
+        try:
+            from error_notifier import ensure_error_telemetry_started
+            ensure_error_telemetry_started()
+        except Exception as e:
+            _log_debug("Falha ao iniciar telemetria pós-login (ignorada)", e)
 
         self.atualizar_dashboard()
         self.admin_cadastrado = self._verificar_admin_cadastrado()
@@ -651,6 +717,8 @@ class AppPrincipal(ctk.CTk):
                 "message": str(status.get("license_text") or "Licença: Indisponível"),
                 "color": str(status.get("license_color") or "#f1c40f"),
                 "renewal_url": str(status.get("renewal_url") or ""),
+                "source": str(status.get("license_source") or ""),
+                "restricted": bool(status.get("license_restricted", status.get("license_expired", False))),
             }
 
             try:
@@ -824,6 +892,14 @@ class AppPrincipal(ctk.CTk):
 
         ctk.CTkLabel(self.main_container, text="MENU PRINCIPAL", font=("Roboto", 24, "bold")).pack(pady=30)
 
+        # Identificacao visual da versao (somente rotulo, sem logica).
+        ctk.CTkLabel(
+            self.main_container,
+            text=f"FRS Mercado v{_FRS_APP_VERSION}",
+            font=("Roboto", 12),
+            text_color="gray",
+        ).pack(pady=(0, 10))
+
         self.frame_navegacao = ctk.CTkFrame(self.main_container, fg_color="#111111", border_width=1, border_color="#333333")
         self.frame_navegacao.pack(fill="x", padx=40, pady=(0, 10))
         self.lbl_modulo_ativo = ctk.CTkLabel(
@@ -975,6 +1051,10 @@ class AppPrincipal(ctk.CTk):
 
     def importar_produtos_gdoor(self):
         """Abre opções para importar arquivo ou baixar planilha modelo."""
+        if self._operacao_bloqueada_por_licenca("IMPORTAR PRODUTOS"):
+            self._exibir_bloqueio_licenca()
+            return
+
         acao = self._abrir_dialogo_importacao_produtos()
         if not acao:
             return

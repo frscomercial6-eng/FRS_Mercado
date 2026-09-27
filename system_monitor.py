@@ -9,11 +9,16 @@ from license_manager import LicenseManager
 
 
 def _es_nome_instalador_acbr(nome: str) -> bool:
-    """True se o nome corresponde a um instalador (-I/DEMO/installer),
-    nunca ao binario real do motor fiscal."""
+    """True se o nome corresponde a um INSTALADOR, nunca ao motor fiscal.
+
+    Inclui "instalador"/"setup" (nomes em portugues/alternativos presentes no
+    projeto) para que um instalador nunca seja iniciado como motor fiscal.
+    """
     nome_low = str(nome or "").lower()
     return (
         "installer" in nome_low
+        or "instalador" in nome_low
+        or "setup" in nome_low
         or "demo" in nome_low
         or nome_low.endswith("-i.exe")
     )
@@ -30,6 +35,8 @@ class SystemMonitor:
         # Instalação do ACBr Monitor DEMO oficial (motor fiscal ausente).
         self._instalacao_acbr_em_andamento = False
         self._ultima_tentativa_instalacao_acbr = 0.0
+        # Ultimo motivo de falha do health-check/reparo (diagnostico).
+        self._ultimo_motivo_acbr = ""
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -99,11 +106,14 @@ class SystemMonitor:
             "license_expired": lic_expirada,
             "license_warning": lic_alerta,
             "license_days_left": lic.get("days_left"),
+            "license_source": lic.get("source"),
+            "license_restricted": bool(lic.get("restricted", lic_expirada)),
             "renewal_url": lic.get("renewal_url"),
             "header_text": header_text,
             "header_color": header_color,
             "alerta": alerta,
             "iniciou_servico": iniciou_servico,
+            "acbr_detalhe": self._ultimo_motivo_acbr,
         }
 
     def _is_acbr_running(self):
@@ -215,27 +225,86 @@ class SystemMonitor:
             return None
 
     def _agendar_instalacao_acbr(self):
-        """Agenda a instalação do ACBr DEMO oficial quando o motor está ausente."""
+        """Agenda instalacao/reparo do ACBr DEMO oficial.
+
+        Tres estados, avaliados nesta ordem:
+          A) motor ausente           -> instala (instalador empacotado);
+          B) motor presente e saudavel -> nao faz nada;
+          C) motor presente, config invalida -> repara (sem reinstalar).
+        """
         if self._instalacao_acbr_em_andamento:
             return False
 
-        # ACBr já instalado? NÃO executar o instalador.
+        # Throttle de 5 min: evita instalacao/reparo repetido a cada ciclo.
+        agora = time.time()
+        if (agora - self._ultima_tentativa_instalacao_acbr) < 300:
+            return False
+
         try:
             from modulo_fiscal import localizar_acbr_instalado
-
-            if localizar_acbr_instalado():
-                return False
         except Exception:
             return False
 
-        agora = time.time()
-        # Nova tentativa de instalação no máximo a cada 5 minutos.
-        if (agora - self._ultima_tentativa_instalacao_acbr) < 300:
-            return False
+        motor = localizar_acbr_instalado()
+
+        # B) ACBr instalado: apenas garante a configuracao (idempotente).
+        if motor is not None:
+            if self._configuracao_acbr_saudavel():
+                return False
+            self._ultima_tentativa_instalacao_acbr = agora
+            self._instalacao_acbr_em_andamento = True
+            threading.Thread(target=self._reparar_acbr_e_iniciar, daemon=True).start()
+            return True
+
+        # A) ACBr realmente ausente: instala o DEMO oficial empacotado.
         self._ultima_tentativa_instalacao_acbr = agora
         self._instalacao_acbr_em_andamento = True
         threading.Thread(target=self._instalar_acbr_e_iniciar, daemon=True).start()
         return True
+
+    def _configuracao_acbr_saudavel(self):
+        """True quando o ACBr instalado tem configuracao utilizavel pelo FRS."""
+        try:
+            from modulo_fiscal import FiscalManager
+
+            ok, motivo = FiscalManager()._healthcheck_acbr()
+            if not ok:
+                self._ultimo_motivo_acbr = motivo
+            return ok
+        except Exception as exc:
+            self._ultimo_motivo_acbr = str(exc)
+            return False
+
+    def _reparar_acbr_e_iniciar(self):
+        """Cenario C: motor presente, configuracao invalida. Repara e inicia."""
+        try:
+            from modulo_fiscal import FiscalManager, localizar_acbr_instalado
+
+            executavel = localizar_acbr_instalado()
+            if executavel is None:
+                return
+
+            reparado, motivo = FiscalManager().reparar_configuracao_acbr()
+            if not reparado:
+                self._ultimo_motivo_acbr = motivo
+                return
+
+            # Aplica a configuracao existente do FRS (pastas fiscal_in/fiscal_out
+            # e ACBrMonitor.ini nos locais correto, inclusive o do ACBr).
+            try:
+                FiscalManager()
+            except Exception:
+                pass
+
+            subprocess.Popen(
+                [str(executavel)],
+                cwd=str(executavel.parent),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
+        finally:
+            self._instalacao_acbr_em_andamento = False
 
     def _instalar_acbr_e_iniciar(self):
         """Instala o DEMO oficial, aplica a configuração existente e inicia o motor."""

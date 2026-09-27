@@ -169,6 +169,11 @@ def estornar_venda(venda_id: int, motivo: str = "") -> dict:
             raise ValueError("Valor financeiro inválido no estorno.") from exc
 
     with get_db_connection() as conn:
+        # A abertura do gerenciador já pode ter iniciado uma transação ao
+        # garantir o schema (migrações/ALTER TABLE). Encerra somente essa
+        # transação de inicialização antes de adquirir o lock explícito do
+        # estorno; os dados do estorno continuam em uma única transação.
+        conn.commit()
         # Serializa a verificação e a reversão, inclusive entre dois operadores.
         conn.execute("BEGIN IMMEDIATE")
         cursor = conn.cursor()

@@ -1,29 +1,36 @@
 import customtkinter as ctk
-from tkinter import messagebox
 import hashlib
-import uuid
-import webbrowser
 import os
-import sys
+import webbrowser
+from datetime import datetime
+from tkinter import messagebox
+
 from PIL import Image
-from app_config import AUTO_UPDATE_REPO
-from app_paths import obter_caminho_dados
+
 from database_manager import get_db_connection, registrar_log
-from datetime import datetime, timedelta
-from modulo_config import carregar_configuracoes # Para obter a Razão Social
-from market_identity import ensure_market_identity_provisioning, ensure_local_market_id
-from updater import Updater
+from license_manager import LicenseManager
+
+# Identificacao visual da versao (somente leitura da versao oficial gerada
+# pelo release_manager). Nao altera nenhuma logica de funcionamento.
+try:
+    from release_info import APP_VERSION as _FRS_APP_VERSION
+except Exception:
+    _FRS_APP_VERSION = "1.0.20"
+
+COMPRAR_LICENCA_URL = "https://www.frssolutions.com.br/planos"
 
 
 _USUARIO_LOGADO = None
-PLANOS_URL = "https://www.frssolutions.com.br/planos"
 
 class ModuloLogin(ctk.CTkToplevel):
     def __init__(self, parent, callback_sucesso, auto_update_repo: str | None = None):
         super().__init__(parent)
         self.parent = parent
         self.callback_sucesso = callback_sucesso
-        self.auto_update_repo = str(auto_update_repo or AUTO_UPDATE_REPO or "").strip()
+        # Parâmetro mantido por compatibilidade. O login nunca consulta o
+        # updater; a verificação ocorre somente no sistema principal.
+        self.auto_update_repo = ""
+        ctk.set_appearance_mode("Dark")
         
         self.title("Autenticação - Mercado FRS")
         self.geometry("420x470")
@@ -38,17 +45,11 @@ class ModuloLogin(ctk.CTkToplevel):
         self.backup_google_autenticado = self._verificar_token_backup_local()
         self._system_monitor = None
         self._logo_image = None
-        self._updater = Updater(parent=self)
-        self._update_notice_label = None
-        self._update_notice_scheduled = False
 
         # Centralizar janela
         self._registrar_after(10, self._centralizar)
 
-        # A chave secreta deve ser a mesma usada no gerador_licenca.py.
-        # Em produção, carregue de forma mais segura (ex: variável de ambiente).
-        self.SECRET_SALT = "MinhaChaveSecretaSuperSeguraFRS2024!"
-        ctk.set_appearance_mode("Dark")
+
 
         # Título do Sistema
         self.lbl_titulo = ctk.CTkLabel(self, text="SISTEMA DE GESTAO", font=("Roboto", 20, "bold"))
@@ -61,7 +62,9 @@ class ModuloLogin(ctk.CTkToplevel):
         self._verificar_estado_sistema()
 
     def _verificar_token_backup_local(self):
-        """No login, valida apenas existência local do token, sem qualquer chamada de rede."""
+        """Consulta somente o estado local; não acessa Google/Firebase."""
+        from app_paths import obter_caminho_dados
+
         token_path = obter_caminho_dados("token.pickle")
         token_ok = os.path.exists(token_path)
         if token_ok:
@@ -95,64 +98,12 @@ class ModuloLogin(ctk.CTkToplevel):
         super().destroy()
 
     def _iniciar_system_monitor(self):
-        try:
-            if self._system_monitor is None:
-                self._system_monitor = SystemMonitor(on_status=self._on_system_status, interval_seconds=6)
-            self._system_monitor.start()
-        except Exception as e:
-            print(f"[MONITOR LOGIN] Falha ao iniciar monitor: {e}")
+        # Mantido como ponto de compatibilidade; o monitor só é iniciado no
+        # sistema principal, depois da autenticação local.
+        return None
 
     def _on_system_status(self, status):
-        def _apply():
-            if not self.winfo_exists():
-                return
-            try:
-                cor = status.get("header_color", "#f1c40f")
-                self.lbl_status_badge.configure(
-                    text=status.get("header_text", "Licença/Fiscal: Indisponível"),
-                    text_color=cor,
-                )
-                self.frame_status.configure(border_color=cor)
-            except Exception:
-                pass
-
-        try:
-            self.after(0, _apply)
-        except Exception:
-            pass
-
-    def _get_hwid(self):
-        """Gera um ID único baseado no hardware da máquina."""
-        return str(uuid.getnode())
-
-    def _gerar_assinatura_local(self, data_exp, hw1, hw2):
-        """Gera uma assinatura para garantir que o banco não foi editado manualmente."""
-        conteudo = f"{data_exp}|{hw1}|{hw2}|{self.SECRET_SALT}"
-        return hashlib.sha256(conteudo.encode()).hexdigest()
-
-    def _modo_desenvolvedor_ativo(self):
-        """Ativa autoassinatura para ambiente de desenvolvimento.
-
-        Regras:
-        - Execução não empacotada (script Python) é tratada como desenvolvimento.
-        - Em executável, pode ser habilitado com FRS_DEV_TRUST_DB=1.
-        """
-        if not getattr(sys, "frozen", False):
-            return True
-
-        flag = os.environ.get("FRS_DEV_TRUST_DB", "0").strip().lower()
-        return flag in {"1", "true", "yes", "on"}
-
-    def _recalcular_e_atualizar_assinatura(self, row_id, data_exp, hw1, hw2, origem="sistema"):
-        """Recalcula e persiste assinatura da licença para marcar estado atual como válido."""
-        try:
-            nova_assinatura = self._gerar_assinatura_local(data_exp, hw1, hw2)
-            with get_db_connection() as conn:
-                conn.execute("UPDATE licenca SET assinatura = ? WHERE rowid = ?", (nova_assinatura, row_id))
-            registrar_log(None, "Integridade de Licença", "Sucesso", f"Assinatura recalculada ({origem}).")
-            print(f"[INTEGRIDADE] Assinatura de licença atualizada ({origem}).")
-        except Exception as e:
-            print(f"[ERRO INTEGRIDADE] Falha ao atualizar assinatura ({origem}): {e}")
+        return None
 
     def _encerrar_aplicacao_segura(self):
         """Encerra login e aplicação sem acionar operações de foco em janelas já destruídas."""
@@ -190,67 +141,42 @@ class ModuloLogin(ctk.CTkToplevel):
         except Exception as e:
             print(f"[ERRO DEBUG] Falha ao ler tabela de usuários: {e}")
 
+    def _status_licenca(self):
+        """Status da licença (Trial/ativa/vencida). Nunca interrompe o login."""
+        try:
+            return LicenseManager().get_status()
+        except Exception as exc:
+            print(f"[LICENCA] Falha ao consultar status local: {exc}")
+            return {
+                "message": "Licença: indisponível",
+                "is_expired": False,
+                "is_warning": False,
+                "color": "#f1c40f",
+                "days_left": None,
+            }
+
     def _verificar_estado_sistema(self):
-        """Define qual tela exibir com base no banco de dados."""
-        conn = None
+        """Escolhe setup/login. A licença nunca impede a entrada no sistema.
+
+        Autenticação é estritamente local: o login abre inclusive com licença
+        vencida (modo restrito), permitindo exportar/recuperar dados, comprar e
+        ativar a licença. A verificação de licença é feita pelo próprio sistema.
+        """
         try:
             with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM usuarios")
-                tem_usuarios = cursor.fetchone()[0] > 0
-                
-                # Verifica Licença e Integridade
-                cursor.execute("SELECT rowid, data_expiracao, hwid1, hwid2, assinatura FROM licenca LIMIT 1")
-                res_lic = cursor.fetchone()
-                
-                current_hwid = self._get_hwid()
-                licenca_data = None
-                
-                if res_lic:
-                    lic_rowid, exp_str, hw1, hw2, sig = res_lic
-                    assinatura_esperada = self._gerar_assinatura_local(exp_str, hw1, hw2)
-
-                    if sig != assinatura_esperada:
-                        aviso = "Assinatura da licença divergente; seguindo com validação por data."
-                        print(f"[AVISO INTEGRIDADE] {aviso}")
-                        registrar_log(None, "Integridade de Licença", "Aviso", aviso)
-
-                    # Em modo desenvolvedor, o sistema reaprende o estado atual do banco como válido.
-                    if self._modo_desenvolvedor_ativo() and sig != assinatura_esperada:
-                        self._recalcular_e_atualizar_assinatura(
-                            lic_rowid,
-                            exp_str,
-                            hw1,
-                            hw2,
-                            origem="bootstrap-dev",
-                        )
-                    
-                    # Verifica se esta máquina está autorizada (Multi-instalação)
-                    if hw1 and hw2 and current_hwid not in [hw1, hw2]:
-                        self._configurar_tela_ativacao("Limite de 2 computadores atingido.")
-                        return
-                    licenca_data = datetime.strptime(exp_str, '%Y-%m-%d')
-
+                tem_usuarios = conn.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0] > 0
             if not tem_usuarios:
-                print("[SISTEMA] Banco vazio detectado. Redirecionando para Setup Inicial.")
+                print("[SISTEMA] Banco sem usuários. Redirecionando para Setup Inicial.")
                 self._configurar_setup_inicial()
-            elif licenca_data and datetime.now() > licenca_data:
-                self._configurar_tela_ativacao()
-            else:
-                dias_restantes = (licenca_data - datetime.now()).days if licenca_data else 99
-                self._configurar_tela_login(aviso_vencimento=dias_restantes)
-        except Exception as e:
-            messagebox.showerror("Erro Crítico", f"Erro ao iniciar segurança: {e}")
-            # Se houver erro crítico na verificação, garantimos o fechamento seguro
+                return
+
+            status = self._status_licenca()
+            dias_restantes = status.get("days_left")
+            self._configurar_tela_login(aviso_vencimento=dias_restantes)
+        except Exception as exc:
+            messagebox.showerror("Erro Crítico", f"Erro ao verificar o estado local: {exc}")
             if self.winfo_exists():
                 self._encerrar_aplicacao_segura()
-        finally:
-            # Evita erro de variável local não associada e garante fechamento seguro.
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
 
     def _centralizar(self):
         self.update_idletasks()
@@ -285,26 +211,23 @@ class ModuloLogin(ctk.CTkToplevel):
                 return messagebox.showwarning("Erro", "Senha e confirmação não conferem.")
             
             senha_hash = hashlib.sha256(p.encode()).hexdigest()
-            data_exp = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
 
             try:
                 with get_db_connection() as conn:
-                    conn.execute("INSERT INTO usuarios (nome, senha_hash, permissao) VALUES (?, ?, 'Administrador')", (u, senha_hash))
-                    conn.execute("INSERT INTO licenca (data_expiracao) VALUES (?)", (data_exp,))
-            except Exception as e:
+                    conn.execute(
+                        "INSERT INTO usuarios (nome, senha_hash, permissao) VALUES (?, ?, 'Administrador')",
+                        (u, senha_hash),
+                    )
+            except Exception:
                 messagebox.showerror("Erro", "Não foi possível concluir o setup inicial. Tente novamente.")
-                print(f"[ERRO SETUP] Falha ao gravar setup inicial: {e}")
                 return
 
+            # Trial de 30 dias criado no setup inicial (fluxo histórico).
             try:
-                resultado_market = ensure_market_identity_provisioning()
-                print(
-                    "[MARKET] Setup inicial provisionado | "
-                    f"market_id={resultado_market.market_id} "
-                    f"firebase_ok={resultado_market.firebase_ok} drive_ok={resultado_market.drive_ok}"
-                )
-            except Exception as e:
-                print(f"[MARKET] Falha no provisionamento pós-setup: {e}")
+                data_trial = LicenseManager().iniciar_trial()
+                print(f"[LICENCA] Trial de 30 dias criado ate {data_trial.isoformat()}.")
+            except Exception as exc:
+                print(f"[LICENCA] Falha ao criar o Trial de 30 dias: {exc}")
 
             messagebox.showinfo("Sucesso", "Sistema inicializado com 30 dias de licença trial.")
             self.frame_setup.pack_forget()
@@ -312,127 +235,102 @@ class ModuloLogin(ctk.CTkToplevel):
 
         ctk.CTkButton(self.frame_setup, text="FINALIZAR SETUP", command=realizar_setup).pack(pady=20)
 
-    def _validar_formato_codigo(self, codigo_sem_prefixo):
-        partes = str(codigo_sem_prefixo or "").strip().split("-")
-        if len(partes) != 4:
-            return None, "Codigo invalido."
-        data_chave = "-".join(partes[:3])
-        try:
-            datetime.strptime(data_chave, "%Y-%m-%d")
-        except Exception:
-            return None, "Codigo invalido."
-        hp = str(partes[3] or "").strip().lower()
-        if len(hp) != 16 or any(c not in "0123456789abcdef" for c in hp):
-            return None, "Codigo invalido."
-        return (data_chave, hp), None
-
-    def validar_codigo_ativacao(self, client_identifier, entered_code):
-        codigo = str(entered_code or "").strip().upper()
-        if codigo.startswith("LICENCA_FRS:"):
-            codigo = codigo[len("LICENCA_FRS:"):]
-        parsed, erro = self._validar_formato_codigo(codigo)
-        if erro:
-            return None, "Codigo de ativacao em formato invalido."
-        data_chave, hash_parte = parsed
-        ident = str(client_identifier or "").strip().upper()
-        if not ident:
-            return None, "Razao Social nao configurada."
-        data_to_hash = f"{ident}-{data_chave}-{self.SECRET_SALT}"
-        expected_hash = hashlib.sha256(data_to_hash.encode()).hexdigest()
-        if expected_hash[:16] != hash_parte[:16]:
-            return None, "Codigo de ativacao invalido."
-        try:
-            exp_dt = datetime.strptime(data_chave, "%Y-%m-%d").date()
-        except Exception:
-            return None, "Codigo de ativacao em formato invalido."
-        hoje = datetime.now().date()
-        delta = (exp_dt - hoje).days
-        janelas = ((28, 31), (88, 92), (178, 183), (363, 368))
-        ok = any(lo - 2 <= delta <= hi + 2 for lo, hi in janelas)
-        if not ok:
-            return None, "Codigo de ativacao expirado ou gerado para outra data."
-        if delta <= 0:
-            try:
-                with get_db_connection() as conn:
-                    row = conn.execute("SELECT data_expiracao FROM licenca ORDER BY id DESC LIMIT 1").fetchone()
-                if not row or str(row[0]).strip() >= data_chave:
-                    return None, "Codigo de ativacao expirado ou gerado para outra data."
-            except Exception:
-                return None, "Codigo de ativacao expirado ou gerado para outra data."
-        return data_chave, None
-
     def _configurar_tela_ativacao(self, msg=None):
-        self.geometry("460x560")
+        """Ativação pelo fluxo histórico: campo de digitação da chave.
+
+        Nenhuma emissão, geração de chave, challenge, pasta privada ou tooling
+        do FRS aparece para o cliente.
+        """
+        self.geometry("520x560")
         self.frame_login.pack_forget()
         self.frame_setup.pack_forget()
-        self.lbl_titulo.configure(text="ATIVACAO DE LICENCA", text_color="#F1C40F")
-        try:
-            self.frame_ativacao.pack_forget()
-        except Exception:
-            pass
+        self.lbl_titulo.configure(text="ATIVAÇÃO DE LICENÇA", text_color="#F1C40F")
         for widget in self.frame_ativacao.winfo_children():
             widget.destroy()
         self.frame_ativacao.pack(padx=30, pady=10, fill="both", expand=True)
 
         if msg:
-            ctk.CTkLabel(self.frame_ativacao, text=msg, text_color="#FFCC00", font=("Arial", 11, "bold")).pack(pady=(10, 0))
+            ctk.CTkLabel(
+                self.frame_ativacao, text=msg, text_color="#FFCC00",
+                font=("Arial", 11, "bold"), wraplength=440,
+            ).pack(pady=(10, 4))
 
-        ctk.CTkLabel(self.frame_ativacao, text="Insira o Código de Ativação:", text_color="orange").pack(pady=20)
-        self.ent_codigo = ctk.CTkEntry(self.frame_ativacao, width=300, placeholder_text="LICENCA_FRS:AAAA-MM-DD-XXXX")
-        self.ent_codigo.pack(pady=10)
+        ctk.CTkLabel(
+            self.frame_ativacao,
+            text="Insira a Chave de Ativação:",
+            font=("Roboto", 12, "bold"),
+        ).pack(anchor="w", padx=34, pady=(12, 0))
 
-        def validar_ativacao():
-            entered_code = self.ent_codigo.get().strip().upper()
+        self.ent_codigo = ctk.CTkEntry(
+            self.frame_ativacao, width=420, placeholder_text="FRS-AAAAMMDD-XXXXXXXXXXXX",
+        )
+        self.ent_codigo.pack(padx=34, pady=(6, 10))
+        self.ent_codigo.bind("<Return>", lambda _evento: self._validar_ativacao_chave())
 
-            # 1. Obter o identificador do cliente (Razão Social)
+        self.lbl_feedback_ativacao = ctk.CTkLabel(
+            self.frame_ativacao, text="", text_color="#f1c40f",
+            font=("Roboto", 11, "bold"), wraplength=440,
+        )
+        self.lbl_feedback_ativacao.pack(anchor="w", padx=34)
+
+        ctk.CTkLabel(
+            self.frame_ativacao,
+            text="A chave é enviada pelo FRS após a contratação do plano.",
+            wraplength=440,
+        ).pack(pady=(12, 4))
+
+        ctk.CTkButton(
+            self.frame_ativacao,
+            text="ATIVAR SISTEMA", fg_color="#15803d", hover_color="#116b32",
+            command=self._validar_ativacao_chave,
+        ).pack(fill="x", padx=34, pady=8)
+        ctk.CTkButton(
+            self.frame_ativacao,
+            text="COMPRAR LICENÇA", fg_color="#1d4ed8", hover_color="#1740ad",
+            command=self._abrir_comprar_licenca,
+        ).pack(fill="x", padx=34, pady=8)
+        ctk.CTkButton(
+            self.frame_ativacao, text="VOLTAR AO LOGIN", fg_color="#555555",
+            command=lambda: self._configurar_tela_login(aviso_vencimento=None),
+        ).pack(fill="x", padx=34, pady=8)
+
+    def _abrir_comprar_licenca(self):
+        try:
+            webbrowser.open(COMPRAR_LICENCA_URL, new=2)
+        except Exception as exc:
+            messagebox.showerror("Licença", f"Não foi possível abrir a página de planos: {exc}", parent=self)
+
+    def _validar_ativacao_chave(self):
+        """Valida a chave digitada pelo fluxo histórico e persiste a licença."""
+        chave = self.ent_codigo.get().strip() if hasattr(self, "ent_codigo") else ""
+        try:
+            ok, mensagem, _status = LicenseManager().ativar(chave)
+        except Exception as exc:
+            ok, mensagem = False, f"Não foi possível ativar a licença: {exc}"
+
+        if not ok:
+            registrar_log(None, "Ativação de Licença", "Falha", str(mensagem))
             try:
-                config = carregar_configuracoes()
-                client_identifier = config.get("razao_social", "").strip().upper()
-            except Exception as e:
-                messagebox.showerror("Erro", "Falha ao carregar configurações para ativação.")
-                print(f"[ERRO LICENCA] Falha ao carregar configuração: {e}")
-                return
-            
-            if not client_identifier:
-                messagebox.showerror("Erro", "Razão Social não configurada. Por favor, configure os dados do mercado em 'Configurações Globais'.")
-                registrar_log(None, "Ativação de Licença", "Falha", "Razão Social não configurada.")
-                return
-
-            data_expiracao, erro_msg = self.validar_codigo_ativacao(client_identifier, entered_code)
-            if erro_msg:
-                messagebox.showerror("Erro", erro_msg)
-                registrar_log(None, "Ativacao de Licenca", "Falha", f"{erro_msg} ({client_identifier}).")
-                return
-            try:
-                with get_db_connection() as conn:
-                    try:
-                        n_lic = conn.execute("SELECT COUNT(*) FROM licenca").fetchone()[0]
-                    except Exception:
-                        n_lic = 0
-                    if n_lic and n_lic > 0:
-                        conn.execute("UPDATE licenca SET data_expiracao = ?", (data_expiracao,))
-                    else:
-                        conn.execute("INSERT INTO licenca (data_expiracao) VALUES (?)", (data_expiracao,))
-                config["license_mode"] = "licensed"
-                config["license_expiration_date"] = data_expiracao
-                salvar_configuracoes(config, exibir_alerta=False)
-            except Exception as e:
-                messagebox.showerror("Erro", "Licenca valida, porem nao foi possivel gravar no banco.")
-                print(f"[ERRO LICENCA] Falha ao atualizar licenca: {e}")
-                registrar_log(None, "Ativacao de Licenca", "Falha", "Codigo valido, mas erro ao gravar no banco.")
-                return
-            try:
-                _dias = (datetime.strptime(data_expiracao, "%Y-%m-%d").date() - datetime.now().date()).days
+                self.lbl_feedback_ativacao.configure(text=str(mensagem), text_color="#ff6666")
             except Exception:
-                _dias = 0
-            messagebox.showinfo("Ativado", f"Licenca ativada! Nova validade: {data_expiracao} ({_dias} dias).")
-            registrar_log(None, "Ativacao de Licenca", "Sucesso", f"Licenca ativada para {client_identifier} ate {data_expiracao}.")
-            self.frame_ativacao.pack_forget()
-            self._verificar_estado_sistema()
+                messagebox.showerror("Erro", str(mensagem), parent=self)
+            return
 
-        ctk.CTkButton(self.frame_ativacao, text="ATIVAR LICENCA", command=validar_ativacao).pack(pady=20)
+        registrar_log(None, "Ativação de Licença", "Sucesso", str(mensagem))
+        try:
+            self.lbl_feedback_ativacao.configure(text=str(mensagem), text_color="#66ff99")
+        except Exception:
+            pass
+        messagebox.showinfo("Ativado", str(mensagem), parent=self)
+        self.frame_ativacao.pack_forget()
+        self._verificar_estado_sistema()
 
-    def _configurar_tela_login(self, aviso_vencimento):
+    def _configurar_tela_login(self, aviso_vencimento=None):
+        """Tela de login local.
+
+        ``aviso_vencimento`` recebe os dias restantes da licença apenas para
+        contexto; a entrada nunca é bloqueada por licença (modo restrito).
+        """
         self.frame_setup.pack_forget()
         self.frame_ativacao.pack_forget()
         self.frame_login.pack(padx=30, pady=10, fill="both", expand=True)
@@ -440,13 +338,6 @@ class ModuloLogin(ctk.CTkToplevel):
 
         for widget in self.frame_login.winfo_children():
             widget.destroy()
-
-        def abrir_site_planos():
-            try:
-                webbrowser.open(PLANOS_URL, new=2)
-            except Exception as e:
-                messagebox.showerror("Erro", "Não foi possível abrir o site da FRS Solutions no navegador.")
-                print(f"[ERRO PLANOS] Falha ao abrir URL: {e}")
 
         def abrir_ativacao():
             self.frame_login.pack_forget()
@@ -462,6 +353,35 @@ class ModuloLogin(ctk.CTkToplevel):
                 pass
 
         ctk.CTkLabel(self.frame_login, text="FRS MERCADO", font=("Roboto", 18, "bold")).pack(pady=(0, 10))
+        # Identificacao visual da versao (somente rotulo, sem logica).
+        ctk.CTkLabel(
+            self.frame_login,
+            text=f"FRS Mercado v{_FRS_APP_VERSION}",
+            font=("Roboto", 11),
+            text_color="gray",
+        ).pack(pady=(0, 6))
+
+        status = self._status_licenca()
+        ctk.CTkLabel(
+            self.frame_login,
+            text=str(status.get("message") or "Licença: indisponível"),
+            text_color=str(status.get("color") or "#f1c40f"),
+            font=("Roboto", 11, "bold"),
+            wraplength=300,
+            justify="center",
+        ).pack(pady=(0, 6), padx=20)
+        if status.get("is_expired"):
+            ctk.CTkLabel(
+                self.frame_login,
+                text=(
+                    "Modo restrito: PDV, vendas, estoque e financeiro bloqueados. "
+                    "Exportação, relatórios, compra e ativação continuam liberados."
+                ),
+                text_color="#ffcc00",
+                font=("Roboto", 10, "italic"),
+                wraplength=300,
+                justify="center",
+            ).pack(pady=(0, 6), padx=20)
 
         ctk.CTkLabel(self.frame_login, text="Usuário:").pack(pady=(10, 0), padx=20, anchor="w")
         self.ent_usuario = ctk.CTkEntry(self.frame_login, width=300)
@@ -480,69 +400,20 @@ class ModuloLogin(ctk.CTkToplevel):
 
         ctk.CTkButton(
             acoes_licenca,
-            text="COMPRAR LICENCA",
+            text="COMPRAR LICENÇA",
             fg_color="#1f6aa5",
             hover_color="#144870",
-            command=abrir_site_planos,
+            command=self._abrir_comprar_licenca,
         ).pack(fill="x", pady=(0, 8))
 
         ctk.CTkButton(
             acoes_licenca,
-            text="ATIVAR LICENCA",
+            text="ATIVAR LICENÇA",
             fg_color="#7f8c8d",
             hover_color="#5d6d74",
             command=abrir_ativacao,
         ).pack(fill="x")
 
-        self._agendar_verificacao_atualizacao()
-
-    def _agendar_verificacao_atualizacao(self):
-        if self._update_notice_scheduled:
-            return
-        self._update_notice_scheduled = True
-
-        def _start_check():
-            self._update_notice_scheduled = False
-            if not self.winfo_exists():
-                return
-            if not self.auto_update_repo:
-                return
-
-            try:
-                config = carregar_configuracoes()
-                enabled = bool(config.get("auto_update_enabled", True))
-            except Exception:
-                enabled = True
-
-            self._updater.start_login_notice_check(
-                repo=self.auto_update_repo,
-                enabled=enabled,
-                on_available=self._mostrar_aviso_atualizacao,
-            )
-
-        self._registrar_after(750, _start_check)
-
-    def _mostrar_aviso_atualizacao(self, release):
-        if not self.winfo_exists() or release is None:
-            return
-
-        try:
-            if self._update_notice_label is None or not self._update_notice_label.winfo_exists():
-                self._update_notice_label = ctk.CTkLabel(
-                    self.frame_login,
-                    text="",
-                    text_color="#f1c40f",
-                    font=("Roboto", 10, "italic"),
-                    wraplength=300,
-                    justify="center",
-                )
-                self._update_notice_label.pack(pady=(8, 0), padx=20)
-
-            self._update_notice_label.configure(
-                text=f"Atualização disponível em segundo plano: versão {release.version}",
-            )
-        except Exception:
-            pass
 
     def tentar_entrar(self):
         usuario = self.ent_usuario.get()
@@ -568,35 +439,6 @@ class ModuloLogin(ctk.CTkToplevel):
                     user_info = {"id": resultado[0], "nome": resultado[1], "permissao": resultado[2]}
                     registrar_log(user_info["id"], "Login", "Sucesso", f"Usuário {user_info['nome']} iniciou sessão.")
 
-                    try:
-                        ensure_local_market_id()
-                        resultado_market = ensure_market_identity_provisioning()
-                        print(
-                            "[MARKET] Login provisionado | "
-                            f"market_id={resultado_market.market_id} "
-                            f"firebase_ok={resultado_market.firebase_ok} drive_ok={resultado_market.drive_ok}"
-                        )
-                    except Exception as e:
-                        print(f"[MARKET] Falha ao garantir identificação de mercado no login: {e}")
-
-                    # Desenvolvedor pode consolidar a assinatura atual após bootstrap de sucesso.
-                    if self._modo_desenvolvedor_ativo():
-                        try:
-                            with get_db_connection() as conn:
-                                lic = conn.execute(
-                                    "SELECT rowid, data_expiracao, hwid1, hwid2 FROM licenca LIMIT 1"
-                                ).fetchone()
-                            if lic:
-                                self._recalcular_e_atualizar_assinatura(
-                                    lic[0],
-                                    lic[1],
-                                    lic[2],
-                                    lic[3],
-                                    origem="login-dev",
-                                )
-                        except Exception as e:
-                            print(f"[ERRO INTEGRIDADE] Falha no recálculo pós-login: {e}")
-                    
                     # Ordem crítica para evitar 'grab failed':
                     # 1. Desativa interação, 2. Libera o foco, 3. Oculta, 4. Inicia próximo módulo
                     try:

@@ -347,6 +347,90 @@ def obter_movimentacoes_caixa(caixa_id):
         return {"sangrias": [], "reforcos": [], "total_sangrias": 0.0, "total_reforcos": 0.0}
 
 
+def _total_vales_caixa(conn, caixa_id, abertura, fechamento):
+    """Soma os Vales GERADOS (criados) dentro do ciclo do caixa.
+
+    SOMENTE LEITURA e SOMENTE INFORMATIVO: este valor nao entra em DINHEIRO,
+    TOTAL DO SISTEMA, VALOR INFORMADO, DIFERENCA nem em nenhuma outra
+    composicao financeira do fechamento (Vale e uma promessa de receita e so
+    vira caixa quando for quitado por uma venda do PDV).
+
+    Segue a mesma politica dos demais agregados do ciclo: prefere o vinculo
+    `caixa_operacao_id` e usa a janela [data_abertura, data_fechamento] como
+    fallback para vales criados sem vinculo (e o caso do PDV, que grava
+    apenas numero/cliente/status/total). Vales CANCELADOS (exclusao logica)
+    ficam fora do total, pois deixaram de existir como venda a prazo.
+    """
+    tem_vinculo = _tem_coluna(conn, "vales", "caixa_operacao_id")
+    # `vales.data_criacao`, `caixa_operacao.data_abertura` e `data_fechamento`
+    # usam CURRENT_TIMESTAMP (UTC). Uma borda superior anterior a abertura (que
+    # so acontece quando quem chamou trouxe relogio diferente) nao e uma janela
+    # valida: e tratada como ciclo em andamento para jamais cortar vales do
+    # proprio ciclo.
+    if abertura and fechamento and fechamento < abertura:
+        fechamento = None
+    base = (
+        "SELECT COALESCE(SUM(total), 0.0) FROM vales "
+        "WHERE COALESCE(UPPER(status), '') <> 'CANCELADO'"
+    )
+    if tem_vinculo and abertura and fechamento:
+        row = conn.execute(
+            base
+            + " AND (caixa_operacao_id = ? OR (caixa_operacao_id IS NULL "
+            + "AND data_criacao >= ? AND data_criacao <= ?))",
+            (caixa_id, abertura, fechamento),
+        ).fetchone()
+    elif tem_vinculo and abertura:
+        row = conn.execute(
+            base
+            + " AND (caixa_operacao_id = ? OR (caixa_operacao_id IS NULL "
+            + "AND data_criacao >= ?))",
+            (caixa_id, abertura),
+        ).fetchone()
+    elif tem_vinculo:
+        row = conn.execute(base + " AND caixa_operacao_id = ?", (caixa_id,)).fetchone()
+    elif abertura and fechamento:
+        row = conn.execute(
+            base + " AND data_criacao >= ? AND data_criacao <= ?", (abertura, fechamento)
+        ).fetchone()
+    elif abertura:
+        row = conn.execute(base + " AND data_criacao >= ?", (abertura,)).fetchone()
+    else:
+        row = conn.execute(base).fetchone()
+    return round(float((row or [0.0])[0] or 0.0), 2)
+
+
+def obter_total_vales_caixa(caixa_id):
+    """API publica: total dos Vales gerados no ciclo do caixa (informativo).
+
+    Nunca escreve no banco e nunca deve compor totais financeiros.
+
+    A janela do ciclo e lida direto de `caixa_operacao` (e nao de
+    `_janela_caixa`) porque `_janela_caixa` usa `datetime('now','localtime')`
+    como borda superior quando o caixa ainda esta aberto, enquanto as linhas de
+    `vales`/`caixa_operacao` sao gravadas em CURRENT_TIMESTAMP (UTC). Em fuso
+    UTC-3 isso deixaria de fora os Vales da propria sessao; aqui a borda
+    superior usa o mesmo relogio dos dados. No fechamento normal do PDV
+    `data_fechamento` ja esta gravada, entao a janela e exatamente o ciclo.
+    """
+    try:
+        with get_db_connection() as conn:
+            linha = conn.execute(
+                "SELECT data_abertura, data_fechamento FROM caixa_operacao WHERE id = ?",
+                (caixa_id,),
+            ).fetchone()
+            abertura = str(linha[0]) if linha and linha[0] else None
+            fechamento = str(linha[1]) if linha and linha[1] else None
+            if abertura and not fechamento:
+                fechamento = str(
+                    conn.execute("SELECT datetime('now')").fetchone()[0] or ""
+                ) or None
+            return _total_vales_caixa(conn, caixa_id, abertura, fechamento)
+    except Exception as e:
+        registrar_log(None, "Fechamento de Caixa (Vales)", "Aviso", f"Total informativo de vales indisponivel: {e}")
+        return 0.0
+
+
 def obter_resumo_fluxo_caixa_dia(caixa_id=None):
     """Retorna resumo com valores bruto, impostos retidos e líquido.
 
