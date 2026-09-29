@@ -531,6 +531,11 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.var_preco_venda = StringVar()
         self._atualizando_precificacao = False
         self._margem_ajustada_manual = False
+        # HOTFIX 1.0.21 (correção definitiva): marca que o operador ainda está
+        # digitando no campo Preço de Venda. Enquanto verdadeiro, os valores
+        # intermediários ("1", "0", "15,") NÃO geram margem — evita gravar
+        # margem negativa (ex.: -80,00 / -100,00) que depois congelaria o campo.
+        self._preco_venda_editando = False
         self._cor_margem_padrao = ["#F9F9FA", "#343638"]
         self._cor_borda_margem_padrao = ["#979DA2", "#565B5E"]
         self._cor_texto_margem_padrao = ["gray10", "#DCE4EE"]
@@ -589,6 +594,16 @@ class ModuloEstoque(ctk.CTkToplevel):
         aplicar_padrao_entrada_numerica(self.ent_preco_custo, inteiro=False, casas_decimais=2)
         aplicar_padrao_entrada_numerica(self.ent_margem_lucro, inteiro=False, casas_decimais=2)
         aplicar_padrao_entrada_numerica(self.ent_preco_venda, inteiro=False, casas_decimais=2)
+        # HOTFIX 1.0.21: ciclo de edição do Preço de Venda. A marcação precisa
+        # ser feita em <KeyPress> (que o Tk entrega ANTES de inserir o caractere
+        # e, portanto, antes de o trace de var_preco_venda rodar) — em
+        # <KeyRelease> o trace já teria visto o valor parcial. A máscara de
+        # validacao_numerica já está ligada antes (add="+"), portanto no
+        # <FocusOut> ela executa primeiro e normaliza o texto; o commit abaixo
+        # recalcula a margem uma única vez, com o valor FINAL do operador.
+        self.ent_preco_venda.bind("<KeyPress>", self._marcar_preco_venda_em_edicao, add="+")
+        self.ent_preco_venda.bind("<FocusOut>", self._encerrar_edicao_preco_venda, add="+")
+        self.ent_preco_venda.bind("<Return>", self._encerrar_edicao_preco_venda, add="+")
         # FASE 1 UN/KG: máscara decimal (até 3 casas) permite digitar peso KG
         # (ex.: 1,250). A obrigatoriedade de inteiro em produtos UN continua
         # garantida na validação de salvar_produto (parse_numero inteiro=True).
@@ -1540,6 +1555,21 @@ class ModuloEstoque(ctk.CTkToplevel):
             text_color=["#7A4B00", "#FFE6A8"] if ativo else self._cor_texto_margem_padrao,
         )
 
+    def _marcar_preco_venda_em_edicao(self, _event=None):
+        """Sinaliza que o Preço de Venda está em edição (tecla do operador).
+
+        Mecanismo que distingue EDIÇÃO INTERMEDIÁRIA de VALOR FINAL sem usar
+        heurística de tamanho: enquanto o operador digita/apaga, o preço
+        passa por valores parciais ("1", "0", "15,") que NÃO representam
+        decisão de preço e produziriam margem negativa espúria.
+        """
+        self._preco_venda_editando = True
+
+    def _encerrar_edicao_preco_venda(self, _event=None):
+        """Commit da edição: recalcula a margem com o valor final do campo."""
+        self._preco_venda_editando = False
+        self._atualizar_margem_por_preco_manual()
+
     def _preencher_precificacao(self, custo=None, margem=None, preco=None, margem_manual=False):
         self._atualizando_precificacao = True
         try:
@@ -1547,7 +1577,7 @@ class ModuloEstoque(ctk.CTkToplevel):
                 self.var_preco_custo.set(custo)
             if margem is not None:
                 margem_num = self._parse_numero(margem, "Margem", permitir_vazio=True, default=0.0)
-                self.var_margem_lucro.set(str(int(round(margem_num))))
+                self.var_margem_lucro.set(f"{margem_num:.2f}".replace(".", ","))
             if preco is not None:
                 self.var_preco_venda.set(preco)
         finally:
@@ -1558,12 +1588,26 @@ class ModuloEstoque(ctk.CTkToplevel):
         if self._atualizando_precificacao:
             return
 
+        # HOTFIX 1.0.21 (BUG 1): o preço de venda digitado é SOBERANO.
+        # Custo e margem apenas SUGEREM um preço; nunca sobrescrevem um
+        # ajuste manual já sinalizado pelo badge "Margem Ajustada
+        # Manualmente" (self._margem_ajustada_manual).
+        if self._margem_ajustada_manual:
+            return
+
         custo_texto = self.ent_preco_custo.get().strip()
         margem_texto = self.ent_margem_lucro.get().strip()
 
+        # HOTFIX 1.0.21: preço de venda SOBERANO durante a digitação. Enquanto o
+        # operador estiver no campo, custo/margem NÃO recriam nem zeram o preço
+        # (ex.: ao limpar o campo e a máscara da Margem normalizar no FocusOut,
+        # o preço voltava a ser preenchido, exigindo um segundo apagamento).
+        if self._preco_venda_editando:
+            return
+
+        # Custo vazio NÃO pode apagar um preço de venda já digitado: sem base
+        # de cálculo não há o que sugerir, então apenas preserva o que existe.
         if not custo_texto:
-            self._set_preco_venda_texto("")
-            self._set_badge_margem_manual(False)
             return
 
         try:
@@ -1592,10 +1636,20 @@ class ModuloEstoque(ctk.CTkToplevel):
             self._set_badge_margem_manual(False)
             return
 
+        # HOTFIX 1.0.21 (correção definitiva): preço em edição é um valor
+        # PARCIAL ("1", "0", "15,"). Recalcular aqui geraria margem negativa
+        # espúria (-80,00 / -100,00). O commit em _encerrar_edicao_preco_venda
+        # recalcula com o valor final. Nenhuma heurística de tamanho é usada,
+        # portanto preço legítimo de um dígito continua válido.
+        if self._preco_venda_editando:
+            return
+
         try:
             preco_custo = self._parse_numero(custo_texto, "Preço de custo", permitir_vazio=False)
             preco_venda = self._parse_numero(preco_texto, "Preço de venda", permitir_vazio=False)
-            margem_atual = self._parse_numero(margem_atual_texto, "Margem de lucro", permitir_vazio=True, default=0.0)
+            # minimo=None: a margem é um valor DERIVADO que pode ficar negativa
+            # transitoriamente; rejeitá-la com ValueError congelava o campo.
+            margem_atual = self._parse_numero(margem_atual_texto, "Margem de lucro", permitir_vazio=True, default=0.0, minimo=None)
         except ValueError:
             return
 
@@ -1608,7 +1662,7 @@ class ModuloEstoque(ctk.CTkToplevel):
 
         self._atualizando_precificacao = True
         try:
-            self._set_margem_lucro_texto(str(int(round(margem_calculada))))
+            self._set_margem_lucro_texto(f"{margem_calculada:.2f}".replace(".", ","))
         finally:
             self._atualizando_precificacao = False
 
@@ -1720,7 +1774,10 @@ class ModuloEstoque(ctk.CTkToplevel):
         margem_manual = abs(preco - preco_regra) > 0.009
         self._preencher_precificacao(
             custo=f"{custo:.2f}".replace('.', ','),
-            margem=str(int(round(margem))),
+            # HOTFIX 1.0.21 (margem real): preservar as casas decimais da
+            # margem gravada. str(int(round(margem))) truncava 33,33 -> "33"
+            # ANTES de _preencher_precificacao, anulando a precisão de 2 casas.
+            margem=f"{margem:.2f}".replace('.', ','),
             preco=f"{preco:.2f}".replace('.', ','),
             margem_manual=margem_manual,
         )
@@ -2019,8 +2076,15 @@ class ModuloEstoque(ctk.CTkToplevel):
                 barcode_gerado = True
                 self.entry_barcode.insert(0, barcode)
 
+            # HOTFIX 1.0.21: encerra a edição do Preço de Venda ANTES de ler os
+            # campos, para que a margem reflita o valor final digitado mesmo
+            # quando o operador ainda está com o foco no campo.
+            self._encerrar_edicao_preco_venda()
+
             preco_custo = self._parse_numero(self.ent_preco_custo.get(), "Preço de custo", permitir_vazio=False)
-            margem_lucro = self._parse_numero(self.ent_margem_lucro.get(), "Margem de lucro", permitir_vazio=True, default=0.0)
+            # minimo=None: margem negativa (estado derivado/transitorio) não deve
+            # ser rejeitada pela validação numérica genérica.
+            margem_lucro = self._parse_numero(self.ent_margem_lucro.get(), "Margem de lucro", permitir_vazio=True, default=0.0, minimo=None)
             preco_venda_digitado = self.ent_preco_venda.get().strip()
             preco_venda = self._parse_numero(
                 preco_venda_digitado,
@@ -2030,21 +2094,34 @@ class ModuloEstoque(ctk.CTkToplevel):
             )
             ncm = self.ent_ncm.get().strip()
             unidade = self._obter_unidade_tela()
+            # HOTFIX 1.0.21 (estoque opcional): quantidade atual e minima
+            # deixam de ser obrigatorias. Vazio assume o valor neutro 0 e
+            # NAO rejeita o cadastro/preco manual. Quando informados, as
+            # regras de UN (inteiro) e KG (3 casas) permanecem inalteradas.
             if unidade == "KG":
-                qtd = self._parse_numero(self.ent_qtd.get(), "Estoque", permitir_vazio=False, minimo=0)
+                qtd = self._parse_numero(self.ent_qtd.get(), "Estoque", permitir_vazio=True, default=0, minimo=0)
                 qtd = round(float(qtd), 3)
                 qtd_min = self._parse_numero(self.ent_qtd_min.get(), "Quantidade mínima", permitir_vazio=True, default=0, minimo=0)
                 qtd_min = round(float(qtd_min), 3)
             else:
-                qtd = self._parse_numero(self.ent_qtd.get(), "Estoque", permitir_vazio=False, inteiro=True)
+                qtd = self._parse_numero(self.ent_qtd.get(), "Estoque", permitir_vazio=True, default=0, inteiro=True)
                 qtd_min = self._parse_numero(self.ent_qtd_min.get(), "Quantidade mínima", permitir_vazio=True, default=0, inteiro=True)
             # Normaliza para AAAA-MM-DD quando a data for interpretável; preserva o
             # texto digitado apenas se não corresponder a nenhum formato conhecido.
             validade_digitada = self.ent_val.get().strip()
             validade = normalizar_data_iso(validade_digitada) or validade_digitada
 
-            self.ent_preco_venda.delete(0, 'end')
-            self.ent_preco_venda.insert(0, f"{preco_venda:.2f}")
+            # HOTFIX 1.0.21 (achado E): a normalizacao do preco de venda passa
+            # a ocorrer sob o guard de precificacao. Antes, o delete/insert
+            # disparava var_preco_venda -> _atualizar_margem_por_preco_manual,
+            # que recalculava a margem e acendia o badge "ajustado manualmente"
+            # durante o proprio salvamento. A gravacao no banco usa a variavel
+            # local preco_venda, portanto o valor persistido nao muda.
+            self._atualizando_precificacao = True
+            try:
+                self._set_preco_venda_texto(f"{preco_venda:.2f}".replace(".", ","))
+            finally:
+                self._atualizando_precificacao = False
 
             with get_db_connection() as conn:
                 cursor = conn.cursor()

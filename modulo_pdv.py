@@ -582,6 +582,14 @@ class ModuloPDV(ctk.CTkToplevel):
         self._mascara_qtd_pdv = "UN"
         # Campo de quantidade inicia vazio; vazio assume 1 por padrão.
         self.ent_quantidade.delete(0, "end")
+        # 1.0.21 (UX/foco): o campo QTD sai da TELA e do fluxo de TAB, mas o
+        # WIDGET PERECE. Ele tem 25 referencias internas (2*, 12*,
+        # multiplicadores, UN/KG, Filizola, resgate de bipagem e reset
+        # pos-venda) e NAO pode ser destruido. pack_forget() remove apenas a
+        # presenca visual/layout; um widget sem gerenciador e ignorado pela
+        # travessia de foco, entao QTD deixa de ser destino de TAB sem
+        # quebrar nenhuma referencia interna.
+        self.ent_quantidade.pack_forget()
 
         self.ent_cod_barras = ctk.CTkEntry(
             self.input_topo,
@@ -616,6 +624,10 @@ class ModuloPDV(ctk.CTkToplevel):
         self.ent_valor_pago.bind("<KeyRelease>", lambda _e: self.atualizar_troco_display())
         self.ent_valor_pago.bind("<Return>", lambda _e: self.acrescentar_valor_pago())
         aplicar_padrao_entrada_numerica(self.ent_valor_pago, inteiro=False, casas_decimais=2)
+        # 1.0.21 (UX/foco): fecha o ciclo de TAB em exatamente dois destinos
+        # (CAMPO GRANDE <-> VALOR INFORMADO). Antes o TAB daqui caia no proximo
+        # widget natural (botoes de pagamento) e QTD era um terceiro destino.
+        self.ent_valor_pago.bind("<Tab>", self._voltar_ao_campo_codigo_pelo_tab)
 
         self.btn_acrescentar_pago = ctk.CTkButton(
             self.scroll_operacoes,
@@ -746,6 +758,8 @@ class ModuloPDV(ctk.CTkToplevel):
         # Posiciona o logo do mercado como fundo (após widgets principais)
         self._safe_after(100, self._posicionar_logo_fundo)
 
+        # 1.0.21: registra o foco central ANTES do primeiro retorno de foco.
+        self._registrar_foco_central_pdv()
         self._retornar_foco_pdv()
         self._safe_after(300, self._processar_fila_delivery)
 
@@ -784,6 +798,49 @@ class ModuloPDV(ctk.CTkToplevel):
             return "break"
         self._safe_focus(self.ent_cod_barras)
         return "break"
+
+    def _voltar_ao_campo_codigo_pelo_tab(self, _event=None):
+        """1.0.21: TAB em VALOR INFORMADO sempre devolve o campo grande."""
+        self._safe_focus(self.ent_cod_barras)
+        return "break"
+
+    def _retornar_foco_apos_clique(self, _event=None):
+        """1.0.21: devolve o foco ao campo grande DEPOIS da ação do clique.
+
+        Agenda o foco com _safe_after(1) para que a ação normal do componente
+        (seleção de item, botão, comando) ocorra antes. Nenhum bind é feito
+        sobre botões/campos de entrada: o Tk NÃO propaga bindings de um frame
+        para os filhos, então clicar em VALOR INFORMADO, em um botão ou em um
+        item do carrinho NÃO éinterceptado por este método.
+        """
+        self._safe_after(1, lambda: self._safe_focus(getattr(self, "ent_cod_barras", None)))
+
+    def _registrar_foco_central_pdv(self):
+        """1.0.21: registra o retorno de foco central nos contêineres do PDV.
+
+        Seguro por construção: liga <Button-1> apenas em FRAMES intermediários
+        (nunca em self/toplevel, botoes ou campos). Bindings de frame não
+        "sobem" para os filhos no Tk, portanto nenhum comando é roubado. Os
+        modais são Toplevels próprios e ficam fora destes bindtags.
+        """
+        for nome in (
+            "main_pdv",
+            "centro_container",
+            "grid_container",
+            "input_topo",
+            "header_vendas",
+            "scroll_vendas",
+            "painel_lateral",
+            "scroll_operacoes",
+            "menu_operacoes",
+        ):
+            widget = getattr(self, nome, None)
+            if widget is None:
+                continue
+            try:
+                widget.bind("<Button-1>", self._retornar_foco_apos_clique, add="+")
+            except Exception:
+                pass
 
     def _enfileirar_pedido_delivery(self, payload):
         try:
@@ -1384,10 +1441,23 @@ class ModuloPDV(ctk.CTkToplevel):
 
         if not entrada:
             # Recuperação: o leitor pode ter bipado com o foco no campo de quantidade.
-            # Resgata o código preso lá e processa como produto, sem abrir busca genérica.
+            # HOTFIX 1.0.21 (BUG 2): a decisão NÃO é mais pelo TAMANHO da
+            # string, e sim pelo BANCO — um código curto (1 a 3 dígitos) é
+            # resgatado quando existe produto com esse código. Isso elimina
+            # (a) bipagens curtas descartadas em silêncio e (b) um PESO em KG
+            # ("1,250" -> "1250") ser interpretado como código de barras.
             qtd_resgatada = self.ent_quantidade.get().strip() if hasattr(self, "ent_quantidade") else ""
             digitos_resgatados = "".join(ch for ch in qtd_resgatada if ch.isdigit())
-            if len(digitos_resgatados) >= 4:
+            produto_resgatado = None
+            if digitos_resgatados:
+                try:
+                    produto_resgatado = self.buscar_produto_por_ean(digitos_resgatados)
+                except Exception:
+                    produto_resgatado = None
+
+            if produto_resgatado is not None:
+                # Resgata o código preso no campo de quantidade e processa como
+                # produto, sem abrir busca genérica.
                 self.ent_quantidade.delete(0, "end")
                 self.ent_cod_barras.delete(0, "end")
                 self.ent_cod_barras.insert(0, digitos_resgatados)
@@ -1395,6 +1465,15 @@ class ModuloPDV(ctk.CTkToplevel):
                 entrada = digitos_resgatados
                 self._set_status("Código resgatado do campo de quantidade. Processando...", "#f1c40f")
             else:
+                # Nunca deixa valor preso em silêncio no campo QTD (exibido com
+                # width=1): o operador é avisado e a quantidade digitada é mantida
+                # para a próxima bipagem no campo principal.
+                if digitos_resgatados:
+                    self._set_status(
+                        f"Quantidade {qtd_resgatada} mantida. Bipe o código do produto no campo principal.",
+                        "#f1c40f",
+                    )
+                    processado_com_sucesso = True
                 return
 
         qtd_digitada = 1
@@ -1877,6 +1956,8 @@ class ModuloPDV(ctk.CTkToplevel):
                     pass
             r.configure(fg_color="#2a2a2a")
             self._set_status(f"Item selecionado: {item['nome']}", "#f1c40f")
+            # 1.0.21: após a seleção, o foco volta ao campo grande.
+            self._retornar_foco_apos_clique()
 
         # Busca imagem do cache
         barcode = item.get("barcode", "default")
@@ -1940,6 +2021,8 @@ class ModuloPDV(ctk.CTkToplevel):
                     pass
             row.configure(fg_color="#2a2a2a")
             self._set_status(f"Item selecionado: {item['nome']}", "#f1c40f")
+            # 1.0.21: após a seleção, o foco volta ao campo grande.
+            self._retornar_foco_apos_clique()
 
         barcode = item.get("barcode", "default")
         caminho_img = self.buscar_imagem_produto(barcode)

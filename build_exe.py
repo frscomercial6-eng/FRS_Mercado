@@ -476,8 +476,11 @@ def _obfuscate_sources_with_pyarmor() -> tuple[str, Path, Path | None]:
     return str(obf_entrypoint), SECURE_OBFUSCATED_DIR, (obf_runtime_hook if obf_runtime_hook.exists() else None)
 
 
-def _build_with_nuitka_secure_fallback() -> None:
+def _build_with_nuitka_secure_fallback(app_version: str = "") -> None:
     print("[NUITKA] Compilação final oficial com Nuitka.")
+    # A versão do recurso Windows do executável vem da versão resolvida pelo
+    # release_manager (version.txt), e não de um valor fixo no código.
+    versao_nuitka = str(app_version or "0.0.0").strip() or "0.0.0"
     cmd = [
         sys.executable,
         "-m",
@@ -489,8 +492,8 @@ def _build_with_nuitka_secure_fallback() -> None:
         "--windows-icon-from-ico=assets/logo.ico",
         "--company-name=FRS Solutions",
         "--product-name=FRS Mercado",
-        "--file-version=1.0.20",
-        "--product-version=1.0.20",
+        f"--file-version={versao_nuitka}",
+        f"--product-version={versao_nuitka}",
         "--include-data-files=assets/logo.ico=assets/logo.ico",
         "--include-data-files=assets/frsMercado.ico=assets/frsMercado.ico",
         "--include-data-files=assets/frsMercado.jpeg=assets/frsMercado.jpeg",
@@ -867,7 +870,7 @@ def main() -> None:
     _clean_previous_builds()
     _prepare_support_payload()
     if cli_args.nuitka:
-        _build_with_nuitka_secure_fallback()
+        _build_with_nuitka_secure_fallback(app_version)
     elif cli_args.secure_obfuscation:
         try:
             entrypoint, obf_path, obf_hook = _obfuscate_sources_with_pyarmor()
@@ -883,7 +886,7 @@ def main() -> None:
             PyInstaller.__main__.run(args)
         except Exception as exc:
             print(f"[AVISO] PyArmor falhou: {exc}")
-            _build_with_nuitka_secure_fallback()
+            _build_with_nuitka_secure_fallback(app_version)
     else:
         args = _build_pyinstaller_args(app_version)
         print("\nComando interno do PyInstaller:")

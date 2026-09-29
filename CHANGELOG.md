@@ -124,3 +124,9 @@
 ## 1.0.20 - 27/09/2026
 - Release automatizada gerada pelo Mestre de Release.
 
+## 1.0.21 - 28/09/2026
+- Cadastro de produtos: correção do cálculo e do recálculo de preço de venda e de margem, permitindo informar o preço de venda manualmente sem bloqueio e sem recálculo forçado pelo custo ou pela margem.
+- PDV: correção da identificação de produto por EAN, código de barras ou nome, inclusive nos casos em que o código digitado era confundido com a quantidade.
+- PDV: melhoria da navegação e do foco — campo de QTD ocultado visualmente, mantido funcional internamente, removido do TAB e ciclo principal Campo de Produto → Valor Informado → Campo de Produto.
+- Atualização: preservação dos dados operacionais existentes durante o processo de atualização.
+
