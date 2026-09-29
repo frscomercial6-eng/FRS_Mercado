@@ -8,7 +8,7 @@ import customtkinter as ctk
 
 from modulo_login import ModuloLogin
 from database_manager import get_db_connection, obter_caminho_dados
-from app_paths import obter_caminho_log
+from app_paths import e_compilado, executavel_atual, obter_caminho_log
 
 
 def _log_debug(contexto: str, erro: Exception | None = None) -> None:
@@ -59,10 +59,15 @@ def _garantir_banco_inicial() -> None:
 
 def _reexecutar_runtime_versionado() -> bool:
     """Encaminha o Portable raiz para a versão validada em runtime/current.json."""
-    if not getattr(sys, "frozen", False):
+    if not e_compilado():
         return False
-    executable = Path(sys.executable).resolve()
-    root = executable.parent
+    # No Nuitka, sys.executable aponta para o python.exe interno da dist.
+    # O executável real do produto vem de __compiled__.original_argv0 /
+    # sys.argv[0], e é ele que dá o nome procurado em runtime/versions/.
+    executavel = executavel_atual()
+    if executavel is None:
+        return False
+    root = executavel.parent
     pointer = root / "runtime" / "current.json"
     if not pointer.is_file():
         return False
@@ -73,12 +78,12 @@ def _reexecutar_runtime_versionado() -> bool:
             return False
         target = Path(str(payload.get("runtime") or "")).resolve()
         runtime_root = (root / "runtime" / "versions").resolve()
-        if target == executable.parent:
+        if target == executavel.parent:
             return False
         if runtime_root != target and runtime_root not in target.parents:
             _log_debug("Ponteiro de runtime rejeitado: destino fora de runtime/versions.")
             return False
-        target_executable = target / executable.name
+        target_executable = target / executavel.name
         if not target_executable.is_file():
             _log_debug(f"Runtime apontado não encontrado: {target_executable}")
             return False

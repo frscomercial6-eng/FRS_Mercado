@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from app_paths import obter_caminho_dados
+from app_paths import e_compilado, executavel_atual, obter_caminho_dados
 from licensing.canonical_json import canonical_json_bytes
 
 MANIFEST_SCHEMA = "FRS-MERCADO-UPDATE-MANIFEST-V1"
@@ -667,12 +667,22 @@ class Updater:
         threading.Thread(target=worker, daemon=True).start()
 
     def _find_helper(self) -> list[str] | None:
-        if getattr(sys, "frozen", False):
-            candidates = [
-                Path(obter_caminho_dados("updates", "bin")) / "FRS_Mercado_UpdateHelper.exe",
-                Path(sys.executable).resolve().parent / "FRS_Mercado_UpdateHelper.exe",
-            ]
-            for helper in candidates:
+        """Localiza o helper externo em builds compilados.
+
+        Num build compilado procura SEMPRE o executável
+        ``FRS_Mercado_UpdateHelper.exe`` — primeiro na pasta do executável real
+        e depois em ``<dados>/updates/bin``. Nunca procura o ``updater_helper.py``
+        de código-fonte, pois esse arquivo não é embarcado em builds.
+        """
+        if e_compilado():
+            candidatos = []
+            executavel = executavel_atual()
+            if executavel is not None:
+                candidatos.append(executavel.parent / "FRS_Mercado_UpdateHelper.exe")
+            candidatos.append(
+                Path(obter_caminho_dados("updates", "bin")) / "FRS_Mercado_UpdateHelper.exe"
+            )
+            for helper in candidatos:
                 if helper.is_file():
                     return [str(helper)]
             return None
