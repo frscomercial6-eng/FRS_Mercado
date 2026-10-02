@@ -6,7 +6,11 @@ from database_manager import get_db_connection, get_db_path, registrar_log
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
 
 
-DB_PATH = get_db_path()
+def __getattr__(name):
+    """DB_PATH resolvido sob demanda (PEP 562) — ver database_manager."""
+    if name == "DB_PATH":
+        return get_db_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def formatar_percentual_inteiro(valor):
@@ -27,7 +31,7 @@ class ModuloUsuario(ctk.CTkToplevel):
             self.destroy()
             return
 
-        self.db_path = DB_PATH
+        self.db_path = get_db_path()
         self.editing_user_id = None # Armazena o ID do usuário sendo editado
 
         # Verificação de acesso de administrador

@@ -7,8 +7,14 @@ from datetime import datetime
 from database_manager import get_db_path
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_PATH = get_db_path()
 DEFAULT_OUTPUT_PATH = os.path.abspath(os.path.join(BASE_DIR, "produtos_exportados.csv"))
+
+
+def __getattr__(name):
+    """DB_PATH resolvido sob demanda (PEP 562) — ver database_manager."""
+    if name == "DB_PATH":
+        return get_db_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def gerar_nome_arquivo_exportacao():
@@ -16,7 +22,13 @@ def gerar_nome_arquivo_exportacao():
     return f"produtos_{agora.strftime('%d%m%Y_%H%M%S')}.csv"
 
 
-def exportar_produtos_xls(output_path: str = DEFAULT_OUTPUT_PATH, db_path: str = DB_PATH):
+def exportar_produtos_xls(output_path: str = None, db_path: str = None):
+    # Ambos resolvidos na chamada (e nao no import) para nunca congelar um
+    # caminho vindo de outro ambiente/raiz de dados.
+    if output_path is None:
+        output_path = DEFAULT_OUTPUT_PATH
+    if db_path is None:
+        db_path = get_db_path()
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"Banco de dados não encontrado: {db_path}")
 

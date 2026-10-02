@@ -61,6 +61,18 @@ class ModuloRelatorio(ctk.CTkToplevel):
         self.btn_filtrar = ctk.CTkButton(self.frame_filtros, text="Atualizar BI", command=self.atualizar_dados)
         self.btn_filtrar.pack(side="left", padx=20)
 
+# L6: o caminho legado "PDF & Drive" foi desativado. O Drive agora e
+        # exclusivamente o mecanismo do contrato L5 (backup automatico em
+        # FRS Mercado/<market_id>/backups) + download em Configuracoes.
+        # O metodo gerar_e_subir_pdf permanece no codigo, inalcancavel pela UI.
+        #
+        # ACHADO/PENDENCIA (1.0.22 - Item 5): `gerar_e_subir_pdf` depende de
+        # `drive_backup_folder_id`, chave LEGADA que a L6 declarou obsoleta
+        # (o backup resolve a pasta por `market_id`). O botao NAO deve ser
+        # reativado sem antes reimplementar a exportacao sobre o contrato L5.
+        # O codigo foi mantido de proposito: `upload_para_drive` e coberto por
+        # `test_drive_backup_contract.py` (recusa de folder_id vazio) e pode
+        # servir de base para reimpressao em PDF. Nada aqui e chamado hoje.
         # L6: o caminho legado "PDF & Drive" foi desativado. O Drive agora e
         # exclusivamente o mecanismo do contrato L5 (backup automatico em
         # FRS Mercado/<market_id>/backups) + download em Configuracoes.
@@ -188,29 +200,23 @@ class ModuloRelatorio(ctk.CTkToplevel):
         ctk.CTkLabel(cab, text="AÇÃO", font=("Roboto", 11, "bold"), width=240).pack(side="left", padx=4)
 
         try:
+            # Filtro de período respeitado sempre. "Vendas do Dia" continua
+            # disponível: basta filtrar pelo dia desejado em data_ini/data_fim.
+            # A antiga lógica (hoje primeiro, período só como fallback vazio)
+            # ignorava o filtro escolhido pelo usuário.
+            ini = self.data_ini.get().strip()
+            fim = self.data_fim.get().strip()
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 linhas = cursor.execute(
                     """
                     SELECT id, data_venda, valor_total, valor_liquido, forma_pagamento, origem, status_pedido
                     FROM vendas
-                    WHERE date(data_venda) = date('now', 'localtime') AND status_pedido != 'ESTORNADO'
+                    WHERE date(data_venda) BETWEEN date(?) AND date(?) AND status_pedido != 'ESTORNADO'
                     ORDER BY id DESC
-                    """
+                    """,
+                    (ini, fim),
                 ).fetchall()
-
-                if not linhas:
-                    ini = self.data_ini.get().strip()
-                    fim = self.data_fim.get().strip()
-                    linhas = cursor.execute(
-                        """
-                        SELECT id, data_venda, valor_total, valor_liquido, forma_pagamento, origem, status_pedido
-                        FROM vendas
-                        WHERE date(data_venda) BETWEEN date(?) AND date(?) AND status_pedido != 'ESTORNADO'
-                        ORDER BY id DESC
-                        """,
-                        (ini, fim),
-                    ).fetchall()
         except Exception as e:
             ctk.CTkLabel(self.scroll_tabelas, text=f"Erro ao consultar vendas: {e}", text_color="#ff6666").pack(pady=10)
             return
@@ -218,7 +224,7 @@ class ModuloRelatorio(ctk.CTkToplevel):
         if not linhas:
             ctk.CTkLabel(
                 self.scroll_tabelas,
-                text="Nenhuma venda realizada encontrada para o dia / período selecionado.",
+                text="Nenhuma venda realizada encontrada para o período selecionado.",
                 font=("Roboto", 12, "italic"),
                 text_color="#f39c12",
             ).pack(pady=24)
@@ -277,6 +283,9 @@ class ModuloRelatorio(ctk.CTkToplevel):
         ctk.CTkLabel(cab, text="AÇÕES", font=("Roboto", 11, "bold"), width=360).pack(side="left", padx=4)
 
         try:
+            # Filtro de período respeitado (antes listava todos os vales).
+            ini = self.data_ini.get().strip()
+            fim = self.data_fim.get().strip()
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 vales = cursor.execute(
@@ -284,8 +293,10 @@ class ModuloRelatorio(ctk.CTkToplevel):
                     SELECT v.id, v.numero, COALESCE(c.nome, 'Cliente não informado'), v.data_criacao, v.total, v.status, v.data_quitacao
                     FROM vales v
                     LEFT JOIN clientes c ON c.id = v.cliente_id
+                    WHERE date(v.data_criacao) BETWEEN date(?) AND date(?)
                     ORDER BY v.numero DESC
-                    """
+                    """,
+                    (ini, fim),
                 ).fetchall()
         except Exception as e:
             ctk.CTkLabel(self.scroll_tabelas, text=f"Erro ao consultar vales: {e}", text_color="#ff6666").pack(pady=10)
@@ -294,7 +305,7 @@ class ModuloRelatorio(ctk.CTkToplevel):
         if not vales:
             ctk.CTkLabel(
                 self.scroll_tabelas,
-                text="Nenhum Vale emitido encontrado.",
+                text="Nenhum Vale emitido encontrado no período selecionado.",
                 font=("Roboto", 12, "italic"),
                 text_color="#f39c12",
             ).pack(pady=24)
@@ -344,13 +355,14 @@ class ModuloRelatorio(ctk.CTkToplevel):
             )
             btn_reimp.pack(side="left", padx=6)
 
-            # Comando contextual EXCLUIR VALE: mesmo mecanismo e mesmo padrao
+            # Comando contextual CANCELAR VALE: mesmo mecanismo e mesmo padrao
             # visual do comando contextual das VENDAS (aba "Vendas do Dia").
-            # Somente Vale PENDENTE pode ser cancelado; QUITADO/CANCELADO ficam
-            # protegidos (botao desabilitado) e permanecem no historico.
+            # O cancelamento e LOGICO (o registro permanece no historico e o
+            # numero nunca e reutilizado); somente Vale PENDENTE pode ser
+            # cancelado; QUITADO/CANCELADO ficam protegidos (botao desabilitado).
             btn_exc = ctk.CTkButton(
                 linha_f,
-                text="EXCLUIR VALE",
+                text="CANCELAR VALE",
                 width=120,
                 height=26,
                 fg_color="#8e2323",
@@ -431,14 +443,14 @@ class ModuloRelatorio(ctk.CTkToplevel):
         status_atual = str(status or "PENDENTE").upper()
         if status_atual != "PENDENTE":
             messagebox.showwarning(
-                "Excluir Vale",
-                f"O Vale #{numero} está {status_atual} e não pode ser excluído.",
+                "Cancelar Vale",
+                f"O Vale #{numero} está {status_atual} e não pode ser cancelado.",
                 parent=self,
             )
             return
 
         if not messagebox.askyesno(
-            "Confirmar Exclusão do Vale",
+            "Confirmar Cancelamento do Vale",
             f"Cancelar o Vale #{numero} — {cliente}?\n\n"
             "O Vale ficará marcado como CANCELADO e não poderá mais ser\n"
             "aberto ou finalizado. Estoque, vendas, financeiro e caixa não\n"
@@ -455,7 +467,7 @@ class ModuloRelatorio(ctk.CTkToplevel):
                     (int(vale_id),),
                 )
                 if cursor.rowcount != 1:
-                    raise RuntimeError("Somente Vale com status PENDENTE pode ser excluído.")
+                    raise RuntimeError("Somente Vale com status PENDENTE pode ser cancelado.")
                 registrar_log(
                     None,
                     "Relatório Vale",
@@ -465,7 +477,7 @@ class ModuloRelatorio(ctk.CTkToplevel):
                 )
         except Exception as e:
             messagebox.showerror(
-                "Excluir Vale", f"Falha ao cancelar o Vale:\n{e}", parent=self
+                "Cancelar Vale", f"Falha ao cancelar o Vale:\n{e}", parent=self
             )
             return
 
@@ -625,6 +637,9 @@ class ModuloRelatorio(ctk.CTkToplevel):
         ctk.CTkLabel(cab, text="AÇÃO", font=("Roboto", 11, "bold"), width=240).pack(side="left", padx=4)
 
         try:
+            # Filtro de período respeitado (antes listava todos os estornos).
+            ini = self.data_ini.get().strip()
+            fim = self.data_fim.get().strip()
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 estornadas = cursor.execute(
@@ -632,8 +647,10 @@ class ModuloRelatorio(ctk.CTkToplevel):
                     SELECT id, data_venda, valor_total, forma_pagamento, origem, status_pedido
                     FROM vendas
                     WHERE status_pedido = 'ESTORNADO'
+                      AND date(data_venda) BETWEEN date(?) AND date(?)
                     ORDER BY id DESC
-                    """
+                    """,
+                    (ini, fim),
                 ).fetchall()
         except Exception as e:
             ctk.CTkLabel(self.scroll_tabelas, text=f"Erro ao consultar estornos: {e}", text_color="#ff6666").pack(pady=10)
@@ -642,7 +659,7 @@ class ModuloRelatorio(ctk.CTkToplevel):
         if not estornadas:
             ctk.CTkLabel(
                 self.scroll_tabelas,
-                text="Nenhuma venda estornada registrada.",
+                text="Nenhuma venda estornada registrada no período selecionado.",
                 font=("Roboto", 12, "italic"),
                 text_color="#2ecc71",
             ).pack(pady=24)

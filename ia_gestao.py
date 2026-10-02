@@ -2,7 +2,12 @@ import sqlite3
 from datetime import datetime, timedelta
 from database_manager import get_db_connection, get_db_path, registrar_log
 
-DB_PATH = get_db_path()
+
+def __getattr__(name):
+    """DB_PATH resolvido sob demanda (PEP 562) — ver database_manager."""
+    if name == "DB_PATH":
+        return get_db_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 def verificar_alertas():
     """
@@ -10,7 +15,7 @@ def verificar_alertas():
     A lista de exemplos é limitada para manter o painel leve com milhares de itens.
     """
     alertas = []
-    db_path = DB_PATH
+    db_path = get_db_path()
     conn = None
     try:
         with get_db_connection() as conn:

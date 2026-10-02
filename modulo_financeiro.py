@@ -5,7 +5,16 @@ from datetime import datetime
 from database_manager import get_db_connection, get_db_path, registrar_log
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
 
-DB_PATH = get_db_path()
+
+def __getattr__(name):
+    """DB_PATH resolvido sob demanda (PEP 562).
+
+    Antes era congelado no import. Agora sempre reflete a raiz canonica atual
+    de `database_manager.get_db_path()`.
+    """
+    if name == "DB_PATH":
+        return get_db_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def formatar_percentual_inteiro(valor):

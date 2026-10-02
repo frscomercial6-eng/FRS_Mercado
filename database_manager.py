@@ -13,7 +13,23 @@ def get_db_path():
     return obter_caminho_dados("mercado.db")
 
 
-DB_PATH = get_db_path()
+def __getattr__(name):
+    """Resolve DB_PATH sob demanda (PEP 562).
+
+    Antes, `DB_PATH = get_db_path()` era avaliado no import do modulo e
+    congelava o caminho ja resolvido. Em suites que redirecionam APPDATA por
+    processo, cada modulo ficava preso ao ambiente do momento do import,
+    divergindo de `get_db_path()` chamado depois.
+
+    Manter o nome `DB_PATH` como atributo publico preserva todos os consumidores
+    existentes; apenas a resolucao passa a ocorrer no acesso, sempre a partir
+    da fonte canonica `database_manager.get_db_path()`.
+    """
+    if name == "DB_PATH":
+        return get_db_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 _PRODUTOS_SCHEMA_MIGRATED = False
 _AUX_SCHEMA_MIGRATED = False
 _ITENS_VENDA_SCHEMA_MIGRATED = False
@@ -883,7 +899,7 @@ def _ensure_aux_schema(conn):
 
 def _ensure_database_file():
     """Cria estrutura do banco do zero quando o arquivo não existe."""
-    if os.path.exists(DB_PATH):
+    if os.path.exists(get_db_path()):
         return
 
     from database import init_db
@@ -940,7 +956,7 @@ def get_db_connection():
         _ensure_database_file()
 
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect(get_db_path())
             _configure_sqlite_connection(conn)
             _ensure_produtos_schema(conn)
             _ensure_aux_schema(conn)
@@ -955,10 +971,10 @@ def get_db_connection():
                 try:
                     from database import init_db
                     # Preserva cada geração do banco e sidecars, sem apagar backup anterior.
-                    _preservar_banco_corrompido(DB_PATH)
+                    _preservar_banco_corrompido(get_db_path())
                     
                     init_db() # Recria a estrutura completa
-                    conn = sqlite3.connect(DB_PATH) # Nova conexão no arquivo limpo
+                    conn = sqlite3.connect(get_db_path()) # Nova conexão no arquivo limpo
                     _configure_sqlite_connection(conn)
                     _ensure_produtos_schema(conn)
                     _ensure_aux_schema(conn)
