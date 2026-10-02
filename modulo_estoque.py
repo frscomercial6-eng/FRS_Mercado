@@ -13,6 +13,11 @@ from modulo_config import carregar_configuracoes
 from modulo_fiscal import normalizar_data_iso
 
 
+# XMLs de exportação de venda (exportar_venda) não são NF-e e nunca devem ser
+# tratados como candidatos na importação fiscal do estoque.
+_PREFIXO_XML_EXPORTACAO_VENDA = "export_venda_"
+
+
 def distribuir_lotes_fefo(cursor, produto_id: int, quantidade_necessaria: int) -> list:
     """Seleciona lotes com saldo do produto em ordem FEFO determinística.
 
@@ -910,6 +915,10 @@ class ModuloEstoque(ctk.CTkToplevel):
                 continue
             vistos.add(pasta_norm)
             for arq in pasta.glob("*.xml"):
+                # Os XML gerados por exportar_venda() são artefatos internos
+                # (<VendaExportacao>), não NF-e: não entram como candidatos.
+                if arq.name.startswith(_PREFIXO_XML_EXPORTACAO_VENDA):
+                    continue
                 if arq.is_file():
                     arquivos.append(arq)
 

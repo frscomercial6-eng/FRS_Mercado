@@ -15,7 +15,7 @@ from license_manager import LicenseManager
 try:
     from release_info import APP_VERSION as _FRS_APP_VERSION
 except Exception:
-    _FRS_APP_VERSION = "1.0.20"
+    _FRS_APP_VERSION = "1.0.22"
 
 COMPRAR_LICENCA_URL = "https://www.frssolutions.com.br/planos"
 

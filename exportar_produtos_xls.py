@@ -4,8 +4,10 @@ import sqlite3
 import sys
 from datetime import datetime
 
+from database_manager import get_db_path
+
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_PATH = os.path.abspath(os.path.join(BASE_DIR, "data", "mercado.db"))
+DB_PATH = get_db_path()
 DEFAULT_OUTPUT_PATH = os.path.abspath(os.path.join(BASE_DIR, "produtos_exportados.csv"))
 
 

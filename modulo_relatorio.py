@@ -4,7 +4,6 @@ import sqlite3
 import csv
 from datetime import datetime
 import os
-import shutil
 from pathlib import Path
 
 # ReportLab para PDF
@@ -19,7 +18,6 @@ import pickle
 
 from database_manager import (
     get_db_connection,
-    get_db_path,
     registrar_log,
     GOOGLE_CREDS,
     obter_caminho_dados,
@@ -63,7 +61,14 @@ class ModuloRelatorio(ctk.CTkToplevel):
         self.btn_filtrar = ctk.CTkButton(self.frame_filtros, text="Atualizar BI", command=self.atualizar_dados)
         self.btn_filtrar.pack(side="left", padx=20)
 
-        self.btn_pdf = ctk.CTkButton(self.frame_filtros, text="Exportar PDF & Drive", fg_color="#2c3e50", command=self.gerar_e_subir_pdf)
+        # L6: o caminho legado "PDF & Drive" foi desativado. O Drive agora e
+        # exclusivamente o mecanismo do contrato L5 (backup automatico em
+        # FRS Mercado/<market_id>/backups) + download em Configuracoes.
+        # O metodo gerar_e_subir_pdf permanece no codigo, inalcancavel pela UI.
+        self.btn_pdf = ctk.CTkButton(
+            self.frame_filtros, text="Exportar PDF (Drive desativado)",
+            fg_color="#5a5a5a", state="disabled", command=self.gerar_e_subir_pdf,
+        )
         self.btn_pdf.pack(side="right", padx=10)
 
         self.btn_sped_base = ctk.CTkButton(
@@ -490,8 +495,11 @@ class ModuloRelatorio(ctk.CTkToplevel):
         """
         from modulo_pdv import ModuloPDV
 
+        # F-1: config.json inválido falha fechado e o arquivo é preservado em
+        # modulo_config. Não substituímos por {} (que zeraria o razao_social do
+        # comprovante); propagamos para o chamador exibir a causa real.
         impressor = ModuloPDV.__new__(ModuloPDV)
-        impressor.config = carregar_configuracoes() or {}
+        impressor.config = carregar_configuracoes()
         return impressor
 
     def _dados_venda_para_impressao(self, venda_id):
@@ -907,7 +915,17 @@ class ModuloRelatorio(ctk.CTkToplevel):
 
     @staticmethod
     def upload_para_drive(file_path, folder_id):
-        """Realiza o upload usando as credenciais OAuth2 configuradas."""
+        """Realiza o upload usando as credenciais OAuth2 configuradas.
+
+        L4: folder_id é obrigatório. Sem ele o arquivo cairia na RAIZ do Drive,
+        espalhando backup do cliente fora de 'FRS Mercado/<market_id>/backups/'.
+        """
+        folder_id = str(folder_id or "").strip()
+        if not folder_id:
+            raise ValueError(
+                "Pasta de destino do Drive não configurada. Use a árvore "
+                "'FRS Mercado/<market_id>/backups' (botão Provisionar Cliente no Drive)."
+            )
         try:
             from googleapiclient.http import MediaFileUpload
         except ImportError as exc:
@@ -919,19 +937,89 @@ class ModuloRelatorio(ctk.CTkToplevel):
         
         file_metadata = {
             'name': os.path.basename(file_path),
-            'parents': [folder_id] if folder_id else []
+            'parents': [folder_id]
         }
         media = MediaFileUpload(file_path, mimetype='application/pdf')
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
+    # --- Contrato de árvore do Google Drive (L4) --------------------------
+    # Raiz     : "FRS Mercado"
+    # Mercado  : <market_id>
+    # Backups  : "backups"
+    # Nenhum backup é gravado na raiz do Drive: 'parents' é sempre explícito.
+    # "FRS_Solution" foi descontinuado — não migrar nem reaproveitar a pasta
+    # antiga, para não colidir com dados de outro contexto.
+    PASTA_RAIZ_DRIVE = "FRS Mercado"
+    PASTA_BACKUPS_DRIVE = "backups"
+
+    @staticmethod
+    def _garantir_pasta_drive(service, nome, parent_id=None):
+        """Garante uma pasta sob `parent_id` explícito. Somente list/create.
+
+        A busca sem `parent_id` é usada exclusivamente para a pasta raiz do
+        próprio FRS. Pastas de cliente NUNCA são buscadas globalmente por nome.
+        """
+        condicoes = [
+            f"name = '{nome}'",
+            "mimeType = 'application/vnd.google-apps.folder'",
+            "trashed = false",
+        ]
+        if parent_id:
+            condicoes.append(f"'{parent_id}' in parents")
+        encontrados = (
+            service.files()
+            .list(q=" and ".join(condicoes), spaces="drive", fields="files(id,name)")
+            .execute()
+            .get("files", [])
+        )
+        if encontrados:
+            if len(encontrados) > 1:
+                registrar_log(
+                    None, "Drive", "Aviso",
+                    f"Pastas duplicadas chamadas '{nome}'; usando a primeira.",
+                )
+            return encontrados[0]["id"]
+        corpo = {"name": nome, "mimeType": "application/vnd.google-apps.folder"}
+        if parent_id:
+            corpo["parents"] = [parent_id]
+        return service.files().create(body=corpo, fields="id").execute()["id"]
+
+    @staticmethod
+    def ensure_market_drive_root(market_id: str, service=None) -> dict:
+        """Garante FRS Mercado/<market_id>/backups/ com relação pai-filho explícita.
+
+        root_id -> market_folder_id -> backups_folder_id
+        """
+        market_id = str(market_id or "").strip()
+        if not market_id:
+            raise ValueError("market_id ausente para provisionamento do Drive.")
+
+        service = service or ModuloRelatorio._obter_drive_service()
+        root_id = ModuloRelatorio._garantir_pasta_drive(
+            service, ModuloRelatorio.PASTA_RAIZ_DRIVE
+        )
+        market_folder_id = ModuloRelatorio._garantir_pasta_drive(service, market_id, root_id)
+        backups_folder_id = ModuloRelatorio._garantir_pasta_drive(
+            service, ModuloRelatorio.PASTA_BACKUPS_DRIVE, market_folder_id
+        )
+
+        return {
+            "root_folder_id": root_id,
+            "market_folder_id": market_folder_id,
+            "backups_folder_id": backups_folder_id,
+            "market_id": market_id,
+        }
+
     @staticmethod
     def provisionar_novo_cliente(email_cliente):
+        """Garante a árvore do mercado autenticado no Drive do cliente.
+
+        L4: este fluxo NÃO copia o banco do cliente e NÃO sobrescreve nenhum
+        arquivo. A antiga base_inicial_template.db era uma cópia do banco real
+        e podia sobrescrever o arquivo de outro mercado via files().update().
         """
-        Provisiona estrutura inicial no Drive do cliente autenticado:
-        - Solicita OAuth2 (se necessário)
-        - Garante pasta raiz FRS_Solution
-        - Cria/copia base inicial template e envia para a pasta
-        """
+        from market_identity import ensure_local_market_id
+
         service = ModuloRelatorio._obter_drive_service()
 
         email_drive = ""
@@ -949,118 +1037,24 @@ class ModuloRelatorio(ctk.CTkToplevel):
                 f"Email OAuth2 divergente. Esperado: {email_cliente}; autenticado: {email_drive}",
             )
 
-        query_pasta = (
-            "name = 'FRS_Solution' and "
-            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        )
-        resposta = service.files().list(q=query_pasta, spaces='drive', fields='files(id,name)').execute()
-        pastas = resposta.get("files", [])
-
-        if pastas:
-            pasta_id = pastas[0]["id"]
-        else:
-            metadata_pasta = {
-                "name": "FRS_Solution",
-                "mimeType": "application/vnd.google-apps.folder",
-            }
-            pasta_criada = service.files().create(body=metadata_pasta, fields='id').execute()
-            pasta_id = pasta_criada["id"]
-
-        # Garante base local existente e cria snapshot template para provisionamento.
-        origem_db = Path(get_db_path())
-        if not origem_db.exists():
-            with get_db_connection():
-                pass
-
-        pasta_templates = Path(obter_caminho_dados("templates"))
-        pasta_templates.mkdir(parents=True, exist_ok=True)
-        template_db = pasta_templates / "base_inicial_template.db"
-        shutil.copy2(str(origem_db), str(template_db))
-
-        try:
-            from googleapiclient.http import MediaFileUpload
-        except ImportError as exc:
-            raise RuntimeError(
-                "Google Drive requer a biblioteca google-api-python-client, "
-                "que não está instalada."
-            ) from exc
-        nome_arquivo = template_db.name
-        query_arquivo = (
-            f"name = '{nome_arquivo}' and "
-            f"'{pasta_id}' in parents and trashed = false"
-        )
-        arquivos = service.files().list(q=query_arquivo, spaces='drive', fields='files(id,name)').execute().get("files", [])
-
-        media = MediaFileUpload(str(template_db), mimetype='application/octet-stream', resumable=False)
-        if arquivos:
-            service.files().update(fileId=arquivos[0]["id"], media_body=media).execute()
-            acao_arquivo = "atualizado"
-        else:
-            service.files().create(
-                body={"name": nome_arquivo, "parents": [pasta_id]},
-                media_body=media,
-                fields='id',
-            ).execute()
-            acao_arquivo = "criado"
+        market_id = ensure_local_market_id()
+        arvore = ModuloRelatorio.ensure_market_drive_root(market_id, service=service)
 
         registrar_log(
             None,
             "Provisionamento Drive",
             "Sucesso",
-            f"Pasta FRS_Solution pronta e template {acao_arquivo}. Email OAuth: {email_drive or 'desconhecido'}",
+            f"Árvore '{ModuloRelatorio.PASTA_RAIZ_DRIVE}/{market_id}/"
+            f"{ModuloRelatorio.PASTA_BACKUPS_DRIVE}' pronta. Email OAuth: {email_drive or 'desconhecido'}",
         )
 
         return {
             "email_oauth": email_drive,
-            "pasta_raiz_id": pasta_id,
-            "arquivo_template": nome_arquivo,
-            "status": "ok",
-        }
-
-    @staticmethod
-    def ensure_market_drive_root(market_id: str) -> dict:
-        """Garante pasta raiz por mercado no Google Drive autenticado."""
-        market_id = str(market_id or "").strip()
-        if not market_id:
-            raise ValueError("market_id ausente para provisionamento do Drive.")
-
-        service = ModuloRelatorio._obter_drive_service()
-
-        query_root = (
-            "name = 'FRS_Solution' and "
-            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        )
-        root_files = service.files().list(q=query_root, spaces='drive', fields='files(id,name)').execute().get("files", [])
-        if root_files:
-            root_id = root_files[0]["id"]
-        else:
-            root_id = service.files().create(
-                body={"name": "FRS_Solution", "mimeType": "application/vnd.google-apps.folder"},
-                fields='id',
-            ).execute()["id"]
-
-        market_query = (
-            f"name = '{market_id}' and "
-            "mimeType = 'application/vnd.google-apps.folder' and "
-            f"'{root_id}' in parents and trashed = false"
-        )
-        market_files = service.files().list(q=market_query, spaces='drive', fields='files(id,name)').execute().get("files", [])
-        if market_files:
-            market_folder_id = market_files[0]["id"]
-        else:
-            market_folder_id = service.files().create(
-                body={
-                    "name": market_id,
-                    "mimeType": "application/vnd.google-apps.folder",
-                    "parents": [root_id],
-                },
-                fields='id',
-            ).execute()["id"]
-
-        return {
-            "root_folder_id": root_id,
-            "market_folder_id": market_folder_id,
             "market_id": market_id,
+            "pasta_raiz_id": arvore["root_folder_id"],
+            "pasta_mercado_id": arvore["market_folder_id"],
+            "pasta_backups_id": arvore["backups_folder_id"],
+            "status": "ok",
         }
 
 if __name__ == "__main__":

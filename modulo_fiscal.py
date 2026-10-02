@@ -305,10 +305,15 @@ class ModuloExportacaoFiscal:
                 time.sleep(0.5)
                 tentativas += 1
             
-            try:
-                callback_status("TIMEOUT", "O integrador fiscal não respondeu a tempo.")
-            except Exception as cb_err:
-                print(f"Erro no callback fiscal: {cb_err}")
+            # TIMEOUT do fluxo legado: nao pode sobrescrever o status real da
+            # NFC-e (confirmado pelo ACBr em _enviar_comando_nfce, via
+            # RETORNO.TXT). Nenhum emissor de "retorno_venda_<id>.json" existe
+            # no projeto, entao este aviso seria sempre falso. Fica somente no
+            # log, sem tocar no status exibido ao operador.
+            print(
+                f"[Fiscal] Timeout do monitoramento legado da venda {venda_id}; "
+                f"o status exibido permanece o confirmado pelo ACBr."
+            )
 
         thread = threading.Thread(target=check, daemon=True)
         thread.start()

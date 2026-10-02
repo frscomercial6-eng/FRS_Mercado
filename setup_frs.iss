@@ -31,7 +31,7 @@ Name: "desktopicon"; Description: "Criar atalhos na area de trabalho"; GroupDesc
 Name: "instalaracbr"; Description: "Instalar e configurar ACBrMonitor (motor fiscal)"; GroupDescription: "Componentes adicionais:"; Flags: checkedonce
 
 [Files]
-Source: "dist\FRS_Mercado\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\FRS_Mercado\*"; DestDir: "{app}"; Excludes: "data\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "assets\logo.ico"; DestDir: "{app}\assets"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "assets\frsMercado.ico"; DestDir: "{app}\assets"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "assets\frsMercado.jpeg"; DestDir: "{app}\assets"; Flags: ignoreversion skipifsourcedoesntexist
@@ -39,7 +39,7 @@ Source: "version.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesnt
 Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "EULA.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "_build_support\checklist_homologacao.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "_build_support\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "_build_support\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist onlyifdoesntexist
 Source: "_build_support\acbr\ACBrMonitor_Installer.exe"; DestDir: "{app}\instala"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Dirs]
@@ -64,37 +64,6 @@ Filename: "{app}\instala\ACBrMonitor_Installer.exe"; Parameters: "/VERYSILENT /N
 Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent skipifdoesntexist
 
 [Code]
-procedure CriarConfiguracaoInicial;
-var
-	DataDir, FiscalIn, FiscalOut, ExportDir, ConfigFile, Json: string;
-begin
-	DataDir := ExpandConstant('{userappdata}\FRS_Mercado\data');
-	FiscalIn := DataDir + '\fiscal_in';
-	FiscalOut := DataDir + '\fiscal_out';
-	ExportDir := DataDir + '\exportacao_fiscal';
-	ConfigFile := DataDir + '\config.json';
-
-	ForceDirectories(FiscalIn);
-	ForceDirectories(FiscalOut);
-	ForceDirectories(ExportDir);
-
-	if not FileExists(ConfigFile) then
-	begin
-		Json :=
-			'{' + #13#10 +
-			'  "razao_social": "",' + #13#10 +
-			'  "nome_estabelecimento": "",' + #13#10 +
-			'  "fiscal_ativo": false,' + #13#10 +
-			'  "auto_update_enabled": true,' + #13#10 +
-			'  "pasta_entrada_fiscal": "' + FiscalIn + '",' + #13#10 +
-			'  "pasta_retorno_fiscal": "' + FiscalOut + '",' + #13#10 +
-			'  "pasta_exportacao_fiscal": "' + ExportDir + '"' + #13#10 +
-			'}';
-		StringChangeEx(Json, '\', '\\', True);
-		SaveStringToFile(ConfigFile, Json, False);
-	end;
-end;
-
 // Declaracao antecipada: o Pascal Script do Inno Setup exige que a procedure
 // esteja DEFINIDA antes de ser chamada em outra procedure.
 procedure RegistrarResultadoAcbr; forward;
@@ -186,7 +155,6 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
 	if CurStep = ssPostInstall then
 	begin
-		CriarConfiguracaoInicial;
 		RegistrarResultadoAcbr;
 	end;
 end;

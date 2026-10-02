@@ -6,9 +6,21 @@ import sys
 
 import customtkinter as ctk
 
-from modulo_login import ModuloLogin
-from database_manager import get_db_connection, obter_caminho_dados
 from app_paths import e_compilado, executavel_atual, obter_caminho_log
+
+
+# F-3: CONFIG_FILE/DB_PATH são resolvidos no import. Se a adoção de dados
+# falhar fechada, o import de modulo_login/database_manager aborta antes de
+# qualquer janela existir. Capturamos aqui para exibir uma mensagem clara em
+# vez de um traceback cru, sem enfraquecer o fail-closed em nenhum momento.
+_ERRO_RAIZ_DADOS: Exception | None = None
+try:
+    from modulo_login import ModuloLogin
+    from database_manager import get_db_connection
+except Exception as _exc:  # pragma: no cover - depende do ambiente do cliente
+    _ERRO_RAIZ_DADOS = _exc
+    ModuloLogin = None
+    get_db_connection = None
 
 
 def _log_debug(contexto: str, erro: Exception | None = None) -> None:
@@ -96,6 +108,38 @@ def _reexecutar_runtime_versionado() -> bool:
         return False
 
 
+def _informar_erro_raiz_dados(exc: Exception) -> None:
+    """Falha fechada na raiz de dados: informa sem apagar nem recriar config.
+
+    Não há recuperação automática: o arquivo do cliente foi preservado e a
+    correção é manual, sobre o caminho informado.
+    """
+    try:
+        caminho = str(getattr(exc, "caminho", "") or "")
+    except Exception:
+        caminho = ""
+
+    mensagem = (
+        "Não foi possível preparar a pasta de dados do FRS Mercado.\n\n"
+        "Se o config.json da empresa estiver inválido, ele foi PRESERVADO: "
+        "nada foi apagado, substituído ou recriado com valores padrão.\n\n"
+    )
+    if caminho:
+        mensagem += f"Arquivo preservado:\n{caminho}\n\n"
+    mensagem += (
+        "Corrija o arquivo (ou restaure uma cópia válida) e abra o programa "
+        "novamente.\n\n"
+        f"Detalhe técnico: {exc}"
+    )
+
+    try:
+        from tkinter import messagebox
+
+        messagebox.showerror("FRS Mercado — dados preservados", mensagem)
+    except Exception:
+        print(mensagem)
+
+
 def main() -> None:
     """Fluxo local e offline: banco -> autenticação -> interface principal."""
     if "--update-health-check" in sys.argv:
@@ -105,6 +149,10 @@ def main() -> None:
         return
 
     if _reexecutar_runtime_versionado():
+        return
+
+    if _ERRO_RAIZ_DADOS is not None:
+        _informar_erro_raiz_dados(_ERRO_RAIZ_DADOS)
         return
 
     _aplicar_configuracao_segura_ui()

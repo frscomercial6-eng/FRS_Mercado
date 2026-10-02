@@ -1,3 +1,12 @@
+"""
+Smoke test fiscal — SOMENTE LEITURA.
+
+Não emite nota fiscal, não chama o ACBrMonitor, não grava no banco e não
+acessa dados do cliente. A integração PlugNotas foi removida; o que resta é
+conferir, em modo leitura, que a configuração fiscal (ACBr) e a do webhook
+continuam íntegras e carregáveis.
+"""
+
 import json
 import sqlite3
 import subprocess
@@ -8,7 +17,19 @@ from pathlib import Path
 import customtkinter as ctk
 
 from database_manager import get_db_path
-from modulo_config import carregar_config_fiscal, exibir_configuracoes, salvar_config_fiscal
+from modulo_config import (
+    carregar_config_fiscal,
+    carregar_configuracoes,
+    exibir_configuracoes,
+    webhook_token_configurado,
+)
+
+
+# Colunas legadas do PlugNotas que NÃO podem sumir nesta fase.
+COLUNAS_LEGADAS_ESPERADAS = ("api_key", "ambiente", "webhook_token_hash")
+
+# Chaves do ACBr em config.json que precisam continuar presentes.
+CHAVES_ACBR_ESPERADAS = ("fiscal_ativo", "emissor_fiscal_path")
 
 
 def log(msg, fh):
@@ -25,11 +46,8 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "smoke_test_fiscal.log"
 
-    api_key_teste = "SMOKE-KEY-20260613"
-    ambiente_teste = "PRODUCAO"
-
     with log_file.open("w", encoding="utf-8") as fh:
-        log("INICIO DO SMOKE TEST FISCAL", fh)
+        log("INICIO DO SMOKE TEST FISCAL (somente leitura)", fh)
 
         # Etapa 1: Abrir CONFIGS (janela) e fechar para validar que a tela carrega.
         log("Etapa 1/5: Abrindo janela de CONFIGS...", fh)
@@ -52,42 +70,75 @@ def main():
             print(log_file)
             return 2
 
-        # Etapa 2: Preencher API key e alternar ambiente (persistência via funções do módulo).
-        log("Etapa 2/5: Salvando nova API Key e Ambiente em config_fiscal...", fh)
+        # Etapa 2: config.json carrega e preserva as chaves do ACBr.
+        log("Etapa 2/5: Lendo config.json (chaves do ACBr)...", fh)
         try:
-            salvar_config_fiscal(api_key_teste, ambiente_teste)
-            cfg = carregar_config_fiscal()
-            ok_cfg = cfg.get("api_key") == api_key_teste and cfg.get("ambiente") == ambiente_teste
-            log(f"Resultado salvar/ler config_fiscal: {'OK' if ok_cfg else 'FALHA'} | {cfg}", fh)
+            config = carregar_configuracoes()
+            faltando = [chave for chave in CHAVES_ACBR_ESPERADAS if chave not in config]
+            log(
+                f"Resultado config.json: {'OK' if not faltando else 'FALHA'} | ausentes={faltando}",
+                fh,
+            )
         except Exception as e:
-            log(f"ERRO ao salvar/ler config_fiscal: {e}", fh)
+            log(f"ERRO ao ler config.json: {e}", fh)
             return 2
 
-        if not ok_cfg:
-            log("SMOKE TEST REPROVADO: dados não retornaram após salvar via módulo.", fh)
+        if faltando:
+            log("SMOKE TEST REPROVADO: chaves fiscais do ACBr ausentes em config.json.", fh)
             print(log_file)
             return 2
 
-        # Etapa 3: Validar persistência diretamente no banco.
-        log("Etapa 3/5: Validando persistência em banco (tabela config_fiscal)...", fh)
+        # Etapa 3: config_fiscal e as colunas legadas continuam no schema.
+        log("Etapa 3/5: Conferindo schema legado de config_fiscal (leitura)...", fh)
         try:
-            db_path = get_db_path()
-            conn = sqlite3.connect(db_path)
-            row = conn.execute("SELECT api_key, ambiente FROM config_fiscal WHERE id = 1").fetchone()
-            conn.close()
-            ok_db = bool(row) and row[0] == api_key_teste and row[1] == ambiente_teste
-            log(f"Resultado persistência banco: {'OK' if ok_db else 'FALHA'} | row={row}", fh)
+            conn = sqlite3.connect(f"file:{get_db_path()}?mode=ro", uri=True)
+            try:
+                tabelas = {
+                    linha[0]
+                    for linha in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                tem_tabela = "config_fiscal" in tabelas
+                colunas = (
+                    [linha[1] for linha in conn.execute("PRAGMA table_info(config_fiscal)")]
+                    if tem_tabela
+                    else []
+                )
+            finally:
+                conn.close()
+            ausentes = [c for c in COLUNAS_LEGADAS_ESPERADAS if c not in colunas]
+            ok_schema = tem_tabela and not ausentes
+            log(
+                f"Resultado schema config_fiscal: {'OK' if ok_schema else 'FALHA'} | "
+                f"tabela={tem_tabela} ausentes={ausentes}",
+                fh,
+            )
         except Exception as e:
-            log(f"ERRO ao consultar banco: {e}", fh)
+            log(f"ERRO ao inspecionar config_fiscal: {e}", fh)
             return 2
 
-        if not ok_db:
-            log("SMOKE TEST REPROVADO: banco não contém os valores esperados.", fh)
+        if not ok_schema:
+            log("SMOKE TEST REPROVADO: estrutura legada de config_fiscal alterada.", fh)
             print(log_file)
             return 2
 
-        # Etapa 4: Simular reabertura do sistema em novo processo.
-        log("Etapa 4/5: Simulando reabertura do sistema (novo processo Python)...", fh)
+        # Etapa 4: leitura da configuração fiscal e do status do webhook.
+        log("Etapa 4/5: Lendo config_fiscal e status do webhook...", fh)
+        try:
+            fiscal = carregar_config_fiscal()
+            token_configurado = webhook_token_configurado()
+            log(
+                f"Resultado leitura fiscal: OK | ambiente={fiscal.get('ambiente')} "
+                f"webhook_configurado={token_configurado}",
+                fh,
+            )
+        except Exception as e:
+            log(f"ERRO ao ler config_fiscal/webhook: {e}", fh)
+            return 2
+        # Etapa 5: reabertura em novo processo, confirmando que a leitura
+        # da configuração fiscal/webhook continua funcionando.
+        log("Etapa 5/5: Simulando reabertura do sistema (novo processo)...", fh)
         try:
             cmd = [
                 sys.executable,
@@ -108,20 +159,18 @@ def main():
             stdout = proc.stdout.strip().splitlines()
             last = stdout[-1] if stdout else "{}"
             cfg_reopen = json.loads(last)
-            ok_reopen = cfg_reopen.get("api_key") == api_key_teste and cfg_reopen.get("ambiente") == ambiente_teste
+            ok_reopen = "webhook_token_configurado" in cfg_reopen
             log(f"Resultado reabertura: {'OK' if ok_reopen else 'FALHA'} | {cfg_reopen}", fh)
         except Exception as e:
             log(f"ERRO na simulação de reabertura: {e}", fh)
             return 2
 
         if not ok_reopen:
-            log("SMOKE TEST REPROVADO: dados não persistiram após reabertura.", fh)
+            log("SMOKE TEST REPROVADO: leitura da configuração fiscal não funcionou.", fh)
             print(log_file)
             return 2
 
-        # Etapa 5: Resultado final
-        log("Etapa 5/5: Consolidação final do teste.", fh)
-        log("SMOKE TEST APROVADO: Fluxo fiscal validado com sucesso.", fh)
+        log("SMOKE TEST APROVADO: fluxo fiscal validado com sucesso.", fh)
 
     print(log_file)
     return 0

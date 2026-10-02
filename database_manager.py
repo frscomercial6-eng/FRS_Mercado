@@ -889,6 +889,44 @@ def _ensure_database_file():
     from database import init_db
     init_db()
 
+
+def _preservar_banco_corrompido(db_path):
+    """Move o banco e seus sidecars para um nome livre, sem apagar backups antigos."""
+    diretorio = os.path.dirname(os.path.abspath(db_path))
+    backup = os.path.join(diretorio, "mercado_old.db")
+    sufixos_sidecar = ("-wal", "-shm", "-journal")
+
+    def _colisao(candidato):
+        return any(os.path.exists(candidato + sufixo) for sufixo in ("", *sufixos_sidecar))
+
+    if _colisao(backup):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        indice = 1
+        while True:
+            backup = os.path.join(diretorio, f"mercado_old_{stamp}_{indice}.db")
+            if not _colisao(backup):
+                break
+            indice += 1
+
+    pares = [(db_path, backup)] + [
+        (db_path + sufixo, backup + sufixo) for sufixo in sufixos_sidecar
+    ]
+    movidos = []
+    try:
+        for origem, destino in pares:
+            if not os.path.exists(origem):
+                continue
+            os.replace(origem, destino)
+            movidos.append((origem, destino))
+    except Exception:
+        for origem, destino in reversed(movidos):
+            try:
+                os.replace(destino, origem)
+            except OSError:
+                pass
+        raise
+    return backup
+
 @contextmanager
 def get_db_connection():
     """
@@ -916,11 +954,8 @@ def get_db_connection():
                 
                 try:
                     from database import init_db
-                    # Renomeia o arquivo corrompido para backup
-                    backup_path = os.path.join(_get_app_data_dir(), "mercado_old.db")
-                    if os.path.exists(backup_path):
-                        os.remove(backup_path)
-                    os.rename(DB_PATH, backup_path)
+                    # Preserva cada geração do banco e sidecars, sem apagar backup anterior.
+                    _preservar_banco_corrompido(DB_PATH)
                     
                     init_db() # Recria a estrutura completa
                     conn = sqlite3.connect(DB_PATH) # Nova conexão no arquivo limpo

@@ -26,6 +26,24 @@ from error_notifier import ensure_error_telemetry_started
 ROTULO_SEM_CLIENTE_ORCAMENTO = "Sem cliente cadastrado"
 
 
+_TOLERANCIA_TROCO = 0.0049
+
+
+def _avaliar_troco_pagamento(total, recebido, pagamentos):
+    """Aplica a mesma regra de excesso/troco à tela, venda e comprovante."""
+    total = round(float(total or 0.0), 2)
+    recebido = round(float(recebido or 0.0), 2)
+    troco = round(recebido - total, 2)
+
+    tem_dinheiro = any(
+        str(forma or "").strip().upper().replace("É", "E") in {"DINHEIRO", "ESPECIE"}
+        for forma, _valor in (pagamentos or [])
+    )
+    if troco > _TOLERANCIA_TROCO and not tem_dinheiro:
+        return False, 0.0
+    return True, max(0.0, troco)
+
+
 
 def calcular_impostos_liquidos(valor_venda, ncm):
     """Calcula imposto por NCM respeitando transição para IVA Dual a partir de 2027."""
@@ -108,6 +126,7 @@ class ModuloPDV(ctk.CTkToplevel):
         # efetivamente recebido, sem alterar o total da venda.
         self.valor_pago_acumulado = 0.0
         self.pagamentos_parciais = []  # [(forma_pagamento, valor_recebido)]
+        self._gaveta_solicitada_por_pagamento = False
         self.clientes_orcamento_map = {}
         # Contextos documentais são opcionais e não participam do pagamento normal.
         self._vales_para_quitar = []
@@ -758,8 +777,6 @@ class ModuloPDV(ctk.CTkToplevel):
         # Posiciona o logo do mercado como fundo (após widgets principais)
         self._safe_after(100, self._posicionar_logo_fundo)
 
-        # 1.0.21: registra o foco central ANTES do primeiro retorno de foco.
-        self._registrar_foco_central_pdv()
         self._retornar_foco_pdv()
         self._safe_after(300, self._processar_fila_delivery)
 
@@ -814,33 +831,6 @@ class ModuloPDV(ctk.CTkToplevel):
         item do carrinho NÃO éinterceptado por este método.
         """
         self._safe_after(1, lambda: self._safe_focus(getattr(self, "ent_cod_barras", None)))
-
-    def _registrar_foco_central_pdv(self):
-        """1.0.21: registra o retorno de foco central nos contêineres do PDV.
-
-        Seguro por construção: liga <Button-1> apenas em FRAMES intermediários
-        (nunca em self/toplevel, botoes ou campos). Bindings de frame não
-        "sobem" para os filhos no Tk, portanto nenhum comando é roubado. Os
-        modais são Toplevels próprios e ficam fora destes bindtags.
-        """
-        for nome in (
-            "main_pdv",
-            "centro_container",
-            "grid_container",
-            "input_topo",
-            "header_vendas",
-            "scroll_vendas",
-            "painel_lateral",
-            "scroll_operacoes",
-            "menu_operacoes",
-        ):
-            widget = getattr(self, nome, None)
-            if widget is None:
-                continue
-            try:
-                widget.bind("<Button-1>", self._retornar_foco_apos_clique, add="+")
-            except Exception:
-                pass
 
     def _enfileirar_pedido_delivery(self, payload):
         try:
@@ -1037,6 +1027,7 @@ class ModuloPDV(ctk.CTkToplevel):
             self.lbl_troco_venda.configure(text="R$ 0,00")
         if hasattr(self, "limpar_pagamentos_recebidos"):
             self.limpar_pagamentos_recebidos()
+        self._gaveta_solicitada_por_pagamento = False
         self._renderizar_carrinho()
         self.atualizar_total_display()
         if getattr(self, "_menu_operacoes_aberto", False):
@@ -1278,6 +1269,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 self.lbl_troco_venda.configure(text="R$ 0,00")
             if hasattr(self, "limpar_pagamentos_recebidos"):
                 self.limpar_pagamentos_recebidos()
+            self._gaveta_solicitada_por_pagamento = False
             try:
                 self.imprimir_cupom_vale(vale_id)
             except Exception as e:
@@ -1333,12 +1325,37 @@ class ModuloPDV(ctk.CTkToplevel):
 
             if itens_resolvidos and not nao_resolvidos:
                 self.itens_carrinho = itens_resolvidos
-                valor_pago = 0.0
-                if valor_total_informado is not None:
+                total_delivery = round(
+                    sum(float(item.get("total", 0.0) or 0.0) for item in itens_resolvidos),
+                    2,
+                )
+                if valor_total_informado is None:
+                    valor_pago = total_delivery
+                else:
                     try:
-                        valor_pago = parse_numero(valor_total_informado, "Valor pago", permitir_vazio=True, default=0.0, minimo=0)
+                        valor_pago = parse_numero(
+                            valor_total_informado,
+                            "Valor pago",
+                            permitir_vazio=False,
+                            minimo=0,
+                        )
                     except Exception:
-                        valor_pago = 0.0
+                        self._set_status("Pedido Delivery ignorado: valor pago inválido.", "#ff6666")
+                        registrar_log(None, "Webhook Delivery", "Falha", "Valor pago inválido no pedido aprovado.")
+                        return
+
+                pagamento_valido, _troco = _avaliar_troco_pagamento(
+                    total_delivery,
+                    valor_pago,
+                    [("PIX", valor_pago)],
+                )
+                if valor_pago < total_delivery - _TOLERANCIA_TROCO or not pagamento_valido:
+                    self._set_status(
+                        "Pedido Delivery ignorado: pagamento PIX abaixo do total ou com excesso.",
+                        "#ff6666",
+                    )
+                    registrar_log(None, "Webhook Delivery", "Falha", "Valor PIX não corresponde ao total do pedido.")
+                    return
 
                 self.finalizar_venda_pdv(
                     "PIX",
@@ -2083,8 +2100,14 @@ class ModuloPDV(ctk.CTkToplevel):
 
         # Total efetivamente recebido: acumulado + valor ainda digitado no campo.
         valor_pago = round(self.valor_pago_acumulado + valor_digitado, 2)
-
-        troco = max(0.0, round(valor_pago - total, 2))
+        pagamentos = list(getattr(self, "pagamentos_parciais", None) or [])
+        if valor_digitado > 0:
+            pagamentos.append((self.forma_pagamento_selecionada, valor_digitado))
+        elif not pagamentos and self.valor_pago_acumulado > 0:
+            pagamentos.append((self.forma_pagamento_selecionada, self.valor_pago_acumulado))
+        permitido, troco = _avaliar_troco_pagamento(total, valor_pago, pagamentos)
+        if not permitido:
+            troco = 0.0
         # Tela do cliente: só o valor. O título da coluna ("TROCO" /
         # "VALOR PAGO") já identifica cada informação do painel grande.
         self.lbl_troco_venda.configure(text=self._formatar_moeda_br(troco))
@@ -2106,8 +2129,12 @@ class ModuloPDV(ctk.CTkToplevel):
         a diferença é troco e aparece no display próprio (regra 5). O total da
         venda não é alterado (regra 1).
         """
-        total = sum(i["total"] for i in self.itens_carrinho)
+        total = round(sum(float(i.get("total", 0.0) or 0.0) for i in self.itens_carrinho), 2)
         valor_digitado = self._ler_valor_pago_digitado()
+
+        if total <= 0:
+            self._set_status("Adicione itens antes de confirmar pagamento.", "#ff6666")
+            return
 
         if valor_digitado is None:
             self._set_status("Valor pago inválido.", "#ff6666")
@@ -2117,11 +2144,23 @@ class ModuloPDV(ctk.CTkToplevel):
             self._set_status("Informe o valor recebido para acrescentar ao pagamento.", "#f39c12")
             return
 
-        self.valor_pago_acumulado = round(self.valor_pago_acumulado + valor_digitado, 2)
+        novo_acumulado = round(self.valor_pago_acumulado + valor_digitado, 2)
+        pagamentos_candidatos = list(self.pagamentos_parciais)
+        pagamentos_candidatos.append((self.forma_pagamento_selecionada, valor_digitado))
+        permitido, troco = _avaliar_troco_pagamento(total, novo_acumulado, pagamentos_candidatos)
+        if not permitido:
+            excesso = round(novo_acumulado - total, 2)
+            self._set_status(
+                f"Pagamento excede o total em {self._formatar_moeda_br(excesso)}; "
+                "excesso só é permitido com parcela em dinheiro.",
+                "#ff6666",
+            )
+            return
+
+        self.valor_pago_acumulado = novo_acumulado
         self.pagamentos_parciais.append((self.forma_pagamento_selecionada, valor_digitado))
 
         if self.valor_pago_acumulado > total:
-            troco = round(self.valor_pago_acumulado - total, 2)
             self._set_status(
                 f"Pagamento de {self._formatar_moeda_br(valor_digitado)} registrado "
                 f"({self.forma_pagamento_selecionada}). Troco: {self._formatar_moeda_br(troco)}",
@@ -2143,6 +2182,11 @@ class ModuloPDV(ctk.CTkToplevel):
 
         self.ent_valor_pago.delete(0, "end")
         self.atualizar_troco_display()
+        _gaveta_acionada, erro_gaveta = self._acionar_gaveta_pos_venda(
+            self._resolver_forma_pagamento_registro(self.forma_pagamento_selecionada)
+        )
+        if erro_gaveta is not None:
+            self._set_status(f"Pagamento registrado, mas falha ao abrir gaveta: {erro_gaveta}", "#ff6666")
         # FLUXO DINHEIRO (usabilidade): ENTER confirmou o valor do recebido
         # e o foco segue para ACRESCENTAR PAGAMENTO. Demais formas de
         # pagamento: comportamento inalterado.
@@ -2172,7 +2216,6 @@ class ModuloPDV(ctk.CTkToplevel):
             return False, "Informe o valor de pelo menos uma forma de pagamento.", 0.0
 
         soma = round(sum(v for _f, v in detalhes), 2)
-        tem_dinheiro = any(str(f).strip().upper() == "DINHEIRO" for f, _v in detalhes)
 
         if soma < total - 0.0049:
             restante = round(total - soma, 2)
@@ -2183,7 +2226,8 @@ class ModuloPDV(ctk.CTkToplevel):
                 soma,
             )
 
-        if soma > total + 0.0049 and not tem_dinheiro:
+        permitido, _troco = _avaliar_troco_pagamento(total, soma, detalhes)
+        if not permitido:
             excesso = round(soma - total, 2)
             return (
                 False,
@@ -2387,6 +2431,11 @@ class ModuloPDV(ctk.CTkToplevel):
             if hasattr(self, "ent_valor_pago"):
                 self.ent_valor_pago.delete(0, "end")  # evita dupla contagem
             self.atualizar_troco_display()
+            _gaveta_acionada, erro_gaveta = self._acionar_gaveta_pos_venda(
+                self._resolver_forma_pagamento_registro()
+            )
+            if erro_gaveta is not None:
+                self._set_status(f"Pagamento confirmado, mas falha ao abrir gaveta: {erro_gaveta}", "#ff6666")
 
             try:
                 modal.grab_release()
@@ -2988,18 +3037,22 @@ class ModuloPDV(ctk.CTkToplevel):
         self.forma_pagamento_selecionada = forma_pgto
         self._set_status(f"Forma de pagamento selecionada: {forma_pgto}", "#4aa3ff")
 
-    def _resolver_forma_pagamento_registro(self):
+    def _resolver_forma_pagamento_registro(self, forma_explicita=None):
         """Define a forma de pagamento a ser gravada na venda.
 
         Pagamentos acumulados em formas distintas são registrados como 'MISTO'
         (conforme alinhado); caso contrário, a forma efetivamente usada.
         """
-        formas = {str(f).upper() for f, _ in self.pagamentos_parciais if f}
+        formas = {
+            str(f).strip().upper()
+            for f, _ in (getattr(self, "pagamentos_parciais", None) or [])
+            if f
+        }
         if len(formas) > 1:
             return "MISTO"
         if len(formas) == 1:
             return next(iter(formas))
-        return self.forma_pagamento_selecionada or "DINHEIRO"
+        return forma_explicita or getattr(self, "forma_pagamento_selecionada", None) or "DINHEIRO"
 
     def _validar_e_obter_valor_pagamento(self, forma_pgto):
         if not self.itens_carrinho:
@@ -3027,8 +3080,23 @@ class ModuloPDV(ctk.CTkToplevel):
         if valor_pago_lido is None:
             self._set_status("Valor pago inválido.", "#ff6666")
             return None
+        if (
+            valor_pago_lido > 0
+            and str(forma_pgto or "").strip().upper().replace("É", "E") in {"DINHEIRO", "ESPECIE"}
+        ):
+            self._set_status(
+                "Confirme o valor em dinheiro com Enter ou ACRESCENTAR PAGAMENTO antes de finalizar.",
+                "#f39c12",
+            )
+            return None
         if valor_pago_lido > 0:
             valor_pago = round(self.valor_pago_acumulado + valor_pago_lido, 2)
+
+        pagamentos_candidatos = list(self.pagamentos_parciais)
+        if valor_pago_lido > 0:
+            pagamentos_candidatos.append((forma_pgto, valor_pago_lido))
+        elif not pagamentos_candidatos and valor_pago > 0:
+            pagamentos_candidatos.append((forma_pgto, valor_pago))
 
         restante = round(valor_total - valor_pago, 2)
         if valor_pago < valor_total - 0.0049:
@@ -3036,6 +3104,20 @@ class ModuloPDV(ctk.CTkToplevel):
                 f"Valor pago ({self._formatar_moeda_br(valor_pago)}) menor que o total da venda "
                 f"({self._formatar_moeda_br(valor_total)}). Acrescente o restante de "
                 f"{self._formatar_moeda_br(restante)}.",
+                "#ff6666",
+            )
+            return None
+
+        permitido, _troco = _avaliar_troco_pagamento(
+            valor_total,
+            valor_pago,
+            pagamentos_candidatos,
+        )
+        if not permitido:
+            excesso = round(valor_pago - valor_total, 2)
+            self._set_status(
+                f"Pagamento excede o total em {self._formatar_moeda_br(excesso)}; "
+                "excesso só é permitido com parcela em dinheiro.",
                 "#ff6666",
             )
             return None
@@ -3261,6 +3343,7 @@ class ModuloPDV(ctk.CTkToplevel):
         else:
             self.valor_pago_acumulado = 0.0
             self.pagamentos_parciais = []
+        self._gaveta_solicitada_por_pagamento = False
 
         if hasattr(self, "ent_valor_pago") and self.ent_valor_pago.winfo_exists():
             self.ent_valor_pago.delete(0, "end")
@@ -3477,19 +3560,14 @@ class ModuloPDV(ctk.CTkToplevel):
         return None
 
     def _acionar_gaveta_pos_venda(self, forma_pagamento):
-        """Abre o gaveteiro de forma INDEPENDENTE da impressao do comprovante.
+        """Abre a gaveta uma única vez quando uma parcela em dinheiro é confirmada."""
+        if getattr(self, "_gaveta_solicitada_por_pagamento", False):
+            return False, None
 
-        Chamada pelo fluxo que imprime o cupom e tambem pelo fluxo em que o
-        operador escolheu "NAO IMPRIMIR": venda paga em DINHEIRO sempre aciona
-        a gaveta. A decisao fica em `_forma_para_gaveta_pos_venda` e o comando
-        ESC/POS permanece em `abrir_gaveta` (nao alterado).
-
-        Retorna (gaveta_acionada, erro).
-        """
         forma_para_gaveta = self._forma_para_gaveta_pos_venda(forma_pagamento)
         if forma_para_gaveta is None:
-            # Forma sem dinheiro (PIX/DEBITO/CREDITO/VOUCHER/VALE): nada a fazer.
             return False, None
+        self._gaveta_solicitada_por_pagamento = True
         try:
             abertura_realizada = self.abrir_gaveta(forma_para_gaveta)
         except Exception as e:
@@ -3855,9 +3933,17 @@ class ModuloPDV(ctk.CTkToplevel):
         nome_fantasia = str(
             self.config.get("nome_fantasia")
             or self.config.get("nome_estabelecimento")
-            or self.config.get("razao_social")
             or ""
         ).strip().upper()
+        # Razão Social é campo próprio: entra como linha independente quando
+        # existe e é diferente da identidade já exibida (evita duplicação).
+        razao_social = str(self.config.get("razao_social") or "").strip().upper()
+        if not nome_fantasia:
+            # Sem Nome Fantasia, a Razão Social segue como identidade principal.
+            nome_fantasia = razao_social
+            razao_social = ""
+        elif razao_social == nome_fantasia:
+            razao_social = ""
         cnpj_cupom = str(self.config.get("cnpj") or "").strip()
         logradouro = str(self.config.get("logradouro") or "").strip()
         numero = str(self.config.get("numero") or "").strip()
@@ -3871,6 +3957,8 @@ class ModuloPDV(ctk.CTkToplevel):
         linhas = []
         if nome_fantasia:
             linhas.append(nome_fantasia.center(largura))
+        if razao_social:
+            linhas.append(razao_social.center(largura))
         if cnpj_cupom:
             linhas.append(f"CNPJ: {cnpj_cupom}".center(largura))
         linha_log = ", ".join(p for p in (f"{logradouro}, {numero}" if logradouro and numero else (logradouro or numero),) if p)
@@ -3959,9 +4047,10 @@ class ModuloPDV(ctk.CTkToplevel):
                     recebido = dados_venda.get("valor_pago", None)
                 if recebido is not None:
                     recebido_f = round(float(recebido), 2)
-                    troco_f = round(recebido_f - round(total, 2), 2)
+                    pagamentos_troco = parciais or [(forma_pgto, recebido_f)]
+                    permitido, troco_f = _avaliar_troco_pagamento(total, recebido_f, pagamentos_troco)
                     linhas.append(f"VALOR RECEBIDO: {self._formatar_moeda_br(recebido_f)}")
-                    if troco_f > 0.0049:
+                    if permitido and troco_f > _TOLERANCIA_TROCO:
                         linhas.append(f"TROCO: {self._formatar_moeda_br(troco_f)}")
         except Exception:
             pass
@@ -4002,49 +4091,16 @@ class ModuloPDV(ctk.CTkToplevel):
         registrar_log(None, "PDV Impressão", "Sucesso", "Cupom não fiscal enviado para impressora térmica.")
 
     def _executar_automacao_pos_venda(self, dados_cupom):
-        """Dispara a impressão do cupom pós-venda e, em seguida, a abertura da
-        gaveta quando a venda tem DINHEIRO.
-
-        ROTATORES SEPARADOS DE PROPOSITO: a impressao do cupom e a abertura do
-        gaveteiro sao etapas independentes — a decisao/acionamento da gaveta
-        vive em `_acionar_gaveta_pos_venda`, que e reutilizada pelo fluxo
-        "NAO IMPRIMIR" em `finalizar_venda_pdv`. Assim, uma falha (ou a
-        ausencia) de impressao jamais impede a gaveta de abrir, e vice-versa.
-        """
-        erro_impressao = None
-
+        """Imprime o comprovante; a gaveta é tratada na confirmação do pagamento."""
         try:
             self.imprimir_cupom(dados_cupom)
-        except Exception as e:
-            registrar_log(None, "PDV Impressão", "Falha", f"Erro impressão cupom: {e}")
-            erro_impressao = e
+        except Exception as exc:
+            registrar_log(None, "PDV Impressão", "Falha", f"Erro impressão cupom: {exc}")
+            self._set_status(f"Cupom não impresso: {exc}", "#ff6666")
+            return False
 
-        gaveta_acionada, erro_gaveta = self._acionar_gaveta_pos_venda(
-            dados_cupom.get("forma_pagamento")
-        )
-        gaveta_permitida = erro_gaveta is None and gaveta_acionada
-
-        if erro_impressao is None and erro_gaveta is None:
-            self._set_status(
-                "Cupom não fiscal impresso e gaveta acionada."
-                if gaveta_acionada
-                else "Cupom não fiscal impresso.",
-                "#2ecc71",
-            )
-            return
-
-        if erro_impressao is not None and erro_gaveta is not None:
-            self._set_status(f"Falha na automação pós-venda: impressão e gaveta. ({erro_impressao})", "#ff6666")
-            return
-
-        if erro_impressao is not None:
-            if gaveta_permitida:
-                self._set_status(f"Cupom não impresso: {erro_impressao}. Gaveta acionada.", "#ff6666")
-            else:
-                self._set_status(f"Cupom não impresso: {erro_impressao}.", "#ff6666")
-            return
-
-        self._set_status(f"Cupom impresso, mas falha ao abrir gaveta: {erro_gaveta}", "#ff6666")
+        self._set_status("Cupom não fiscal impresso.", "#2ecc71")
+        return True
 
     def exportar_venda_fiscal(self, dados_venda):
         try:
@@ -4152,12 +4208,48 @@ class ModuloPDV(ctk.CTkToplevel):
         # Forma efetivamente usada na venda (agrega pagamentos parciais).
         # Compatível com stubs de teste que não possuem os novos atributos.
         if hasattr(self, "_resolver_forma_pagamento_registro"):
-            forma_pgto = self._resolver_forma_pagamento_registro()
+            forma_pgto = self._resolver_forma_pagamento_registro(forma_pgto)
 
         valor_bruto = round(
             sum(float(i.get("total", round(i["quantidade"] * i["preco"], 2)) or 0.0) for i in self.itens_carrinho),
             2,
         )
+        pagamentos_confirmados = list(getattr(self, "pagamentos_parciais", None) or [])
+        if str(status_pagamento or "").strip().upper() == "PAGO":
+            if pagamentos_confirmados:
+                valor_pago = round(sum(float(valor or 0.0) for _forma, valor in pagamentos_confirmados), 2)
+            elif valor_pago is None and str(forma_pgto or "").strip().upper() in {
+                "PIX", "DEBITO", "CREDITO", "VOUCHER"
+            }:
+                valor_pago = valor_bruto
+
+            try:
+                recebido_confirmado = round(float(valor_pago or 0.0), 2)
+            except (TypeError, ValueError):
+                self._set_status("Valor recebido inválido; venda não finalizada.", "#ff6666")
+                return
+
+            if recebido_confirmado < valor_bruto - _TOLERANCIA_TROCO:
+                self._set_status("Pagamento inferior ao total; venda não finalizada.", "#ff6666")
+                return
+
+            pagamentos_para_validar = pagamentos_confirmados or [(forma_pgto, recebido_confirmado)]
+            permitido, _troco = _avaliar_troco_pagamento(
+                valor_bruto,
+                recebido_confirmado,
+                pagamentos_para_validar,
+            )
+            if not permitido:
+                excesso = round(recebido_confirmado - valor_bruto, 2)
+                self._set_status(
+                    f"Pagamento excede o total em {self._formatar_moeda_br(excesso)}; "
+                    "excesso só é permitido com parcela em dinheiro.",
+                    "#ff6666",
+                )
+                return
+
+            valor_pago = recebido_confirmado
+
         valor_impostos = 0.0
         total_icms = 0.0
         total_pis = 0.0
@@ -4601,17 +4693,6 @@ class ModuloPDV(ctk.CTkToplevel):
                     "pagamentos": list(getattr(self, "pagamentos_parciais", None) or []),
                 }
             )
-        else:
-            # GAVETA INDEPENDENTE DA IMPRESSAO: o operador escolheu "NAO
-            # IMPRIMIR" (F12) e mesmo assim a venda paga em DINHEIRO precisa
-            # abrir o gaveteiro. Reutiliza exatamente a mesma decisao/acao do
-            # fluxo com cupom (`_acionar_gaveta_pos_venda`), sem imprimir nada
-            # e sem tocar em pagamento, troco, vale ou fechamento.
-            _gd_acionada, _gd_erro = self._acionar_gaveta_pos_venda(forma_pgto)
-            if _gd_erro is not None:
-                self._set_status(f"Venda registrada, mas falha ao abrir gaveta: {_gd_erro}", "#ff6666")
-            elif _gd_acionada:
-                self._set_status("Gaveta acionada (sem impressão de comprovante).", "#2ecc71")
 
         # RESÍDUO VISUAL PÓS-VENDA REMOVIDO (regra de exibição): a faixa
         # intermediária NÃO mostra mais o antigo resumo da venda — nem a
@@ -4640,6 +4721,7 @@ class ModuloPDV(ctk.CTkToplevel):
         else:
             self.valor_pago_acumulado = 0.0
             self.pagamentos_parciais = []
+        self._gaveta_solicitada_por_pagamento = False
         self._avaliar_limite_caixa()
         # LIMPEZA FINAL DA FAIXA INTERMEDIÁRIA (somente exibição): venda
         # finalizada, sem resíduo de resumo/automação/status na tela.
@@ -5041,6 +5123,17 @@ class ModuloPDV(ctk.CTkToplevel):
                     # TOTAL DO SISTEMA, VALOR INFORMADO ou DIFERENCA).
                     "total_vales_gerados": round(total_vales_gerados, 2),
                 }
+                # L5: backup de fechamento (tentativa diaria garantida).
+                # Dispara em background; falhar aqui NAO impede o fechamento
+                # nem bloqueia o operador.
+                try:
+                    import backup_service as _backup_service
+                    _backup_service.agendar_backup_de_fechamento(caixa_id=self.caixa_id)
+                except Exception as e_backup:
+                    registrar_log(
+                        None, "Backup Drive", "Aviso",
+                        f"Backup de fechamento nao agendado: {e_backup}",
+                    )
                 try:
                     imprimir_resumo = self._perguntar_impressao_fechamento()
                 except Exception:
@@ -5082,20 +5175,58 @@ class ModuloPDV(ctk.CTkToplevel):
             return False
 
     def _montar_texto_resumo_fechamento(self, dados):
-        """Monta o texto do resumo do fechamento (reutilizado na tela e na impressão)."""
-        largura = 42
+        """Monta o texto do resumo do fechamento (reutilizado na tela e na impressão).
+
+        FASE 7: a largura vem da bobina configurada em ``largura_cupom_mm``
+        (58 mm -> 32, 80 mm -> 48) reutilizando ``_largura_cupom_chars()``; não há
+        regra 58/80 duplicada aqui e ``_largura_cupom_chars()`` não foi alterada.
+        Nada é truncado: quando a linha não cabe na bobina, rótulo e valor saem
+        em linhas separadas.
+        """
+        largura = self._largura_cupom_chars()
         sep = "-" * largura
+        col_mod = 12
+        col_val = 9
+        # A tabela de conferência tem 4 colunas (42). Em bobina mais estreita ela
+        # não cabe sem truncar nome ou cifra: cada modalidade é empilhada.
+        tabela_empilhada = largura < (col_mod + 3 * (col_val + 1))
+
+        def _linha_valor(rotulo, texto, literal=None):
+            """Linha rótulo/valor. Mantém o texto atual sempre que ele cabe."""
+            if literal is None:
+                literal = f"{rotulo}: {texto}"
+            if len(literal) <= largura:
+                return [literal]
+            # Rótulo mais largo que a bobina: quebra por palavra antes do valor,
+            # para não truncar nem o nome do campo nem a cifra.
+            partes = []
+            atual = ""
+            for palavra in rotulo.split():
+                if not atual:
+                    atual = palavra
+                elif len(atual) + 1 + len(palavra) <= largura:
+                    atual = f"{atual} {palavra}"
+                else:
+                    partes.append(atual)
+                    atual = palavra
+            if atual:
+                partes.append(atual)
+            return partes + [f"{texto:>{largura}}"]
+
         linhas = [
             "FECHAMENTO DE CAIXA",
             sep,
-            f"Data/Hora: {dados.get('data_hora', '')}",
-            f"Caixa: {dados.get('caixa_id', '')}",
         ]
+        linhas.extend(_linha_valor("Data/Hora", str(dados.get('data_hora', ''))))
+        linhas.extend(_linha_valor("Caixa", str(dados.get('caixa_id', ''))))
         operador = dados.get("operador")
         if operador:
-            linhas.append(f"Operador: {operador}")
+            linhas.extend(_linha_valor("Operador", str(operador)))
         linhas.append(sep)
-        linhas.append(f"{'MODALIDADE':<12} {'SISTEMA':>9} {'INFORM.':>9} {'DIFER.':>9}")
+        if tabela_empilhada:
+            linhas.extend(["MODALIDADE", "SISTEMA", "INFORMADO", "DIFERENCA"])
+        else:
+            linhas.append(f"{'MODALIDADE':<{col_mod}} {'SISTEMA':>{col_val}} {'INFORM.':>{col_val}} {'DIFER.':>{col_val}}")
         def _fmt_dif_col(_v):
             # Visual apenas: sem "+" em zero; "+" somente em diferenca positiva.
             try:
@@ -5127,22 +5258,38 @@ class ModuloPDV(ctk.CTkToplevel):
                 _sis = float(item.get("calculado", 0.0) or 0.0)
                 _inf = float(item.get("informado", 0.0) or 0.0)
                 _df = float(item.get("diferenca", 0.0) or 0.0)
+            if tabela_empilhada:
+                # Um bloco por modalidade: nome + 3 linhas de valor, sem truncar.
+                linhas.append(str(item.get("modalidade", ""))[:largura])
+                for _rot, _txt in (
+                    ("SISTEMA", f"{_sis:.2f}"),
+                    ("INFORMADO", f"{_inf:.2f}"),
+                    ("DIFERENCA", f"{_df:+.2f}" if _df > 0.0004 else f"{_df:.2f}"),
+                ):
+                    linhas.append(f"{_rot:<9}{_txt:>{largura - 9}}")
+                continue
             linhas.append(
-                f"{str(item.get('modalidade', '')):<12} "
-                f"{_sis:>9.2f} "
-                f"{_inf:>9.2f} "
+                f"{str(item.get('modalidade', '')):<{col_mod}} "
+                f"{_sis:>{col_val}.2f} "
+                f"{_inf:>{col_val}.2f} "
                 f"{_fmt_dif_col(_df)}"
             )
         linhas.append(sep)
-        linhas.append(f"VALOR DE ABERTURA DO CAIXA: R$ {_abertura:>9.2f}")
+        linhas.extend(_linha_valor(
+            "VALOR DE ABERTURA DO CAIXA", f"R$ {_abertura:.2f}",
+            f"VALOR DE ABERTURA DO CAIXA: R$ {_abertura:>9.2f}",
+        ))
         linhas.append(sep)
         # REGRA 1.0.20 — resumo inferior: abertura separada, DINHEIRO somente
         # com a movimentacao do ciclo (sem abertura), TOTAL DO SISTEMA com
         # abertura + movimentacao, e DIFERENCA = INFORMADO x SISTEMA DO CICLO.
-        linhas.append(f"DINHEIRO:                  R$ {_din_sis:>9.2f}")
+        linhas.extend(_linha_valor(
+            "DINHEIRO", f"R$ {_din_sis:.2f}",
+            f"DINHEIRO:                  R$ {_din_sis:>9.2f}",
+        ))
         for _m in ("DEBITO", "CREDITO", "VOUCHER", "PIX"):
             _v = float((_mods.get(_m) or {}).get("calculado", 0.0) or 0.0)
-            linhas.append(f"{_m:<12}                  R$ {_v:>9.2f}")
+            linhas.extend(_linha_valor(_m, f"R$ {_v:.2f}", f"{_m:<12}                  R$ {_v:>9.2f}"))
         linhas.append(sep)
         _sang = list(dados.get("sangrias", []) or [])
         _ref = list(dados.get("reforcos", []) or [])
@@ -5167,13 +5314,22 @@ class ModuloPDV(ctk.CTkToplevel):
         _dif_fmt = _fmt_dif_col(_dif)
         if _dif_fmt.strip().startswith("+"):
             _dif_linha = f"DIFERENCA:                   +R$ {_dif:>8.2f}"
+            _dif_txt = f"+R$ {_dif:.2f}"
         elif _dif < -0.0004:
             _dif_linha = f"DIFERENCA:                   -R$ {abs(_dif):>8.2f}"
+            _dif_txt = f"-R$ {abs(_dif):.2f}"
         else:
             _dif_linha = f"DIFERENCA:                    R$ {_dif:>8.2f}"
-        linhas.append(f"TOTAL DO SISTEMA:            R$ {_total_sis:>9.2f}")
-        linhas.append(f"VALOR INFORMADO:             R$ {_total_inf:>9.2f}")
-        linhas.append(_dif_linha)
+            _dif_txt = f"R$ {_dif:.2f}"
+        linhas.extend(_linha_valor(
+            "TOTAL DO SISTEMA", f"R$ {_total_sis:.2f}",
+            f"TOTAL DO SISTEMA:            R$ {_total_sis:>9.2f}",
+        ))
+        linhas.extend(_linha_valor(
+            "VALOR INFORMADO", f"R$ {_total_inf:.2f}",
+            f"VALOR INFORMADO:             R$ {_total_inf:>9.2f}",
+        ))
+        linhas.extend(_linha_valor("DIFERENCA", _dif_txt, _dif_linha))
         linhas.append(sep)
         # ================================ LINHA SOMENTE INFORMATIVA (pos-totais)
         # TOTAL DE VALE GERADO DURANTE O DIA: informa o total dos Vales GERADOS
@@ -5186,7 +5342,10 @@ class ModuloPDV(ctk.CTkToplevel):
         except Exception:
             _vales = 0.0
         _vales_txt = f"{_vales:,.2f}".replace(",", "#").replace(".", ",").replace("#", ".")
-        linhas.append(f"TOTAL DE VALE GERADO DURANTE O DIA: R$ {_vales_txt}")
+        linhas.extend(_linha_valor(
+            "TOTAL DE VALE GERADO DURANTE O DIA", f"R$ {_vales_txt}",
+            f"TOTAL DE VALE GERADO DURANTE O DIA: R$ {_vales_txt}",
+        ))
         linhas.append(sep)
         return "\n".join(linhas)
 

@@ -2,8 +2,11 @@ import sqlite3
 import customtkinter as ctk
 from tkinter import messagebox
 import hashlib # Para hashing de senhas
-from database_manager import get_db_connection, registrar_log
+from database_manager import get_db_connection, get_db_path, registrar_log
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
+
+
+DB_PATH = get_db_path()
 
 
 def formatar_percentual_inteiro(valor):
@@ -24,7 +27,7 @@ class ModuloUsuario(ctk.CTkToplevel):
             self.destroy()
             return
 
-        self.db_path = 'mercado.db'
+        self.db_path = DB_PATH
         self.editing_user_id = None # Armazena o ID do usuário sendo editado
 
         # Verificação de acesso de administrador

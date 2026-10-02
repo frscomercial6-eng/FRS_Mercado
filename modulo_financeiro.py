@@ -2,10 +2,10 @@ import sqlite3
 import customtkinter as ctk
 from tkinter import messagebox
 from datetime import datetime
-from database_manager import get_db_connection, registrar_log
+from database_manager import get_db_connection, get_db_path, registrar_log
 from validacao_numerica import aplicar_padrao_entrada_numerica, parse_numero
 
-DB_PATH = 'mercado.db'
+DB_PATH = get_db_path()
 
 
 def formatar_percentual_inteiro(valor):

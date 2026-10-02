@@ -13,7 +13,11 @@ from tkinter import messagebox, filedialog
 from urllib.parse import quote
 from database_manager import get_db_connection, get_db_path, obter_caminho_dados, registrar_log
 from license_manager import LicenseManager, operacao_comercial_bloqueada
-from modulo_config import carregar_configuracoes, salvar_configuracoes
+from modulo_config import (
+    ConfiguracaoInvalidaError,
+    carregar_configuracoes,
+    salvar_configuracoes,
+)
 from updater_secure import Updater
 from system_monitor import SystemMonitor
 
@@ -22,7 +26,7 @@ from system_monitor import SystemMonitor
 try:
     from release_info import APP_VERSION as _FRS_APP_VERSION
 except Exception:
-    _FRS_APP_VERSION = "1.0.20"
+    _FRS_APP_VERSION = "1.0.22"
 
 COMPRAR_LICENCA_URL = "https://www.frssolutions.com.br/planos"
 
@@ -161,38 +165,13 @@ class AppPrincipal(ctk.CTk):
         self._backup_executado_no_ciclo_ocioso = True
 
         def _executar_backup_drive():
+            # L5: contrato do pacote ZIP + manifesto + confirmacao + retencao.
+            # O destino e resolvido como FRS Mercado/<market_id>/backups —
+            # nao depende mais de drive_backup_folder_id.
             try:
-                from modulo_config import carregar_configuracoes, obter_status_backup_local
-                from modulo_relatorio import ModuloRelatorio
+                import backup_service as _backup_service
 
-                status_backup = obter_status_backup_local()
-                if not status_backup.get("configurado"):
-                    registrar_log(None, "Backup Drive", "Aviso", status_backup.get("mensagem", "Backup não configurado."))
-                    _log_debug(status_backup.get("mensagem", "Backup não configurado."))
-                    return
-
-                config = carregar_configuracoes()
-                folder_id = config.get("drive_backup_folder_id")
-                pasta_backup = Path(obter_caminho_dados("backups"))
-                pasta_backup.mkdir(parents=True, exist_ok=True)
-
-                origem_db = get_db_path()
-                nome_arquivo = f"backup_db_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-                destino_backup = pasta_backup / nome_arquivo
-
-                origem_conn = sqlite3.connect(origem_db)
-                try:
-                    destino_conn = sqlite3.connect(str(destino_backup))
-                    try:
-                        origem_conn.backup(destino_conn)
-                    finally:
-                        destino_conn.close()
-                finally:
-                    origem_conn.close()
-
-                ModuloRelatorio.upload_para_drive(str(destino_backup), folder_id)
-                registrar_log(None, "Backup Drive", "Sucesso", f"Backup enviado ao Drive: {nome_arquivo}")
-                _log_debug(f"Backup Drive concluido: {nome_arquivo}")
+                _backup_service.backup_por_ociosidade()
             except Exception as e:
                 registrar_log(None, "Backup Drive", "Falha", f"Falha no backup ocioso: {e}")
                 _log_debug("Falha no backup ocioso", e)
@@ -458,6 +437,28 @@ class AppPrincipal(ctk.CTk):
                     self._erro_permissão_em_exibicao.discard(modulo_nome)
 
                 self._registrar_after(1200, _liberar_erro_permissão)
+            return
+        except ConfiguracaoInvalidaError as e:
+            # F-1: config.json inválido é fail-closed. O arquivo já está
+            # preservado (modulo_config não substitui nem recria); aqui só se
+            # interrompe ESTA abertura, com mensagem clara e caminho do arquivo.
+            _log_debug(f"Configuração inválida ao abrir módulo: {modulo_nome}", e)
+            if modulo_nome not in self._erro_abertura_em_exibicao:
+                self._erro_abertura_em_exibicao.add(modulo_nome)
+                self._mostrar_erro_modulo(
+                    "Configuração da Empresa Inválida",
+                    f"O config.json existente está inválido e foi PRESERVADO "
+                    f"(nada foi apagado nem substituído por valores padrão).\n\n"
+                    f"Arquivo: {e.caminho}\n\n"
+                    f"O módulo {modulo_nome} não pode ser aberto até que o "
+                    f"arquivo seja corrigido ou restaurado.\n\n"
+                    f"Detalhe: {e.__cause__ or e}",
+                )
+
+                def _liberar_erro_config():
+                    self._erro_abertura_em_exibicao.discard(modulo_nome)
+
+                self._registrar_after(1200, _liberar_erro_config)
             return
         except Exception as e:
             _log_debug(f"Falha ao abrir módulo: {modulo_nome}", e)

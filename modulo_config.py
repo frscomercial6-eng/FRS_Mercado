@@ -4,7 +4,6 @@ import pickle
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from urllib import error, request
 
 import customtkinter as ctk
 
@@ -36,6 +35,20 @@ def _registrar_erro_fiscal(mensagem: str):
         pass
 
 
+def _registrar_acesso_drive(mensagem: str):
+    """Registra tentativa de acesso ao Drive sem abrir o banco do cliente na UI.
+
+    Import local: modulo_config e importado por fluxos headless e nao deve
+    arrastar database_manager na importacao do modulo.
+    """
+    try:
+        from database_manager import registrar_log
+
+        registrar_log(None, "Backup Drive", "Aviso", mensagem)
+    except Exception:
+        _registrar_erro_fiscal(f"[Drive] {mensagem}")
+
+
 def _garantir_pastas_usuario():
     """Cria pasta de trabalho e subpastas padrão em APPDATA na primeira execução."""
     os.makedirs(obter_caminho_dados("exportacao_fiscal"), exist_ok=True)
@@ -65,11 +78,14 @@ def _config_padrao():
         "email_cliente": "",
         "drive_credentials_path": "",
         "drive_backup_folder_id": "",
+    "google_drive_conta": "",
         "emissor_fiscal_path": "",
         "pasta_entrada_fiscal": obter_caminho_dados("fiscal_in"),
         "pasta_retorno_fiscal": obter_caminho_dados("fiscal_out"),
         "pasta_exportacao_fiscal": obter_caminho_dados("exportacao_fiscal"),
         "limite_sangria_preventiva": 500.0,
+        # Largura da bobina térmica: 58 mm (32 caracteres) ou 80 mm (48).
+        "largura_cupom_mm": 80,
     }
 
 
@@ -133,6 +149,19 @@ def _normalizar_config(dados):
     return cfg
 
 
+class ConfiguracaoInvalidaError(RuntimeError):
+    """config.json existe no diretório de dados, mas não pôde ser lido.
+
+    O arquivo original é PRESERVADO: a falha é fechada de propósito, para que
+    uma configuração padrão nunca seja escrita por cima dos dados do cliente.
+    Subclasse de RuntimeError para não alterar o contrato dos chamadores.
+    """
+
+    def __init__(self, caminho: str):
+        super().__init__(f"config.json existente é inválido e foi preservado: {caminho}")
+        self.caminho = caminho
+
+
 def carregar_configuracoes():
     """Carrega as configurações do arquivo JSON ou retorna valores padrão."""
     _garantir_pastas_usuario()
@@ -141,6 +170,8 @@ def carregar_configuracoes():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 dados = json.load(f)
+            if not isinstance(dados, dict):
+                raise ValueError("config.json deve conter um objeto JSON")
             config = _normalizar_config(dados)
             if config != dados:
                 with open(CONFIG_FILE, "w", encoding="utf-8") as fw:
@@ -148,6 +179,7 @@ def carregar_configuracoes():
             return config
         except Exception as e:
             print(f"Erro ao carregar configurações: {e}")
+            raise ConfiguracaoInvalidaError(CONFIG_FILE) from e
 
     config = _config_padrao()
     try:
@@ -292,13 +324,15 @@ def carregar_config_fiscal():
         with get_db_connection() as conn:
             _garantir_tabela_config_fiscal(conn)
             row = conn.execute(
-                "SELECT api_key, ambiente, webhook_token_hash FROM config_fiscal WHERE id = 1"
+                "SELECT api_key, ambiente FROM config_fiscal WHERE id = 1"
             ).fetchone()
             if row:
                 return {
                     "api_key": row[0] or "",
                     "ambiente": (row[1] or "HOMOLOGACAO").upper(),
-                    "webhook_token_configurado": bool(row[2]),
+                    # O token do webhook tem persistência própria desde a
+                    # desconexão do PlugNotas; perguntamos à fonte correta.
+                    "webhook_token_configurado": webhook_token_configurado(),
                 }
     except Exception as e:
         _registrar_erro_fiscal(f"Falha ao carregar config_fiscal: {e}")
@@ -306,22 +340,19 @@ def carregar_config_fiscal():
     return {"api_key": "", "ambiente": "HOMOLOGACAO", "webhook_token_configurado": webhook_token_configurado()}
 
 
-def salvar_config_fiscal(api_key: str, ambiente: str, webhook_token: str | None = None):
-    """Salva configuração fiscal na tabela config_fiscal."""
+def salvar_config_fiscal(api_key: str = "", ambiente: str = "", webhook_token: str | None = None):
+    """Mantém o schema legado e grava apenas o que ainda é usado.
+
+    A integração PlugNotas foi removida: `api_key`/`ambiente` deixam de ser
+    gravados, mas a tabela e suas colunas permanecem intactas para não quebrar
+    instalações existentes. A função é preservada (assinatura e retorno) para
+    compatibilidade com chamadores antigos.
+    """
     from database_manager import get_db_connection
 
-    ambiente_norm = "PRODUCAO" if str(ambiente).upper() == "PRODUCAO" else "HOMOLOGACAO"
-
     with get_db_connection() as conn:
+        # Garante a estrutura legada sem sobrescrever valores já existentes.
         _garantir_tabela_config_fiscal(conn)
-        conn.execute(
-            """
-            INSERT INTO config_fiscal (id, api_key, ambiente)
-            VALUES (1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET api_key = excluded.api_key, ambiente = excluded.ambiente
-            """,
-            ((api_key or "").strip(), ambiente_norm),
-        )
 
     if webhook_token is not None and str(webhook_token).strip():
         salvar_token_webhook(str(webhook_token).strip())
@@ -386,40 +417,6 @@ def salvar_limite_sangria_preventiva(valor, exibir_alerta=True):
     if exibir_alerta:
         messagebox.showinfo("Sucesso", "Limite de sangria preventiva atualizado.")
     return valor_float
-
-
-def testar_conexao_plugnotas(api_key: str, ambiente: str):
-    """Valida token PlugNotas com requisição simples de leitura."""
-    token = (api_key or "").strip()
-    if not token:
-        return False, "Informe a API Key para testar conexão."
-
-    ambiente_norm = "PRODUCAO" if str(ambiente).upper() == "PRODUCAO" else "HOMOLOGACAO"
-    base_url = "https://api.plugnotas.com.br"
-    endpoint = f"{base_url}/v1/nfce?pagina=1&tamanho=1"
-
-    headers = {
-        "x-api-key": token,
-        "Accept": "application/json",
-        "User-Agent": "FRS-Mercado/1.0",
-    }
-
-    req = request.Request(endpoint, headers=headers, method="GET")
-
-    try:
-        with request.urlopen(req, timeout=12) as resp:
-            if 200 <= resp.status < 300:
-                return True, f"Conexão OK ({ambiente_norm}). Token válido."
-            return False, f"Conexão recebida com status inesperado: {resp.status}."
-    except error.HTTPError as http_err:
-        if http_err.code in (401, 403):
-            return False, "Token inválido ou sem permissão para este ambiente."
-        if http_err.code in (404, 405):
-            return False, "Endpoint PlugNotas indisponível no momento. Tente novamente."
-        return False, f"Falha HTTP ao validar conexão: {http_err.code}."
-    except Exception as e:
-        _registrar_erro_fiscal(f"Erro no teste de conexão PlugNotas ({ambiente_norm}): {e}")
-        return False, f"Erro de conexão com PlugNotas: {e}"
 
 
 def exibir_configuracoes(master=None):
@@ -527,15 +524,28 @@ def exibir_configuracoes(master=None):
     )
     check_fiscal_ativo.grid(row=15, column=0, columnspan=2, padx=10, pady=(2, 8), sticky="w")
 
-    ctk.CTkLabel(frame_geral, text="Google Drive (Credenciais):").grid(row=10, column=0, padx=10, pady=6, sticky="e")
+    # L6: as duas secoes abaixo separam CADASTRO da EMPRESA de BACKUP/DRIVE.
+    # O "ID Pasta Backup" saiu da UI: o destino agora e sempre resolvido como
+    # FRS Mercado/<market_id>/backups. A chave legada continua sendo gravada
+    # (abaixo) apenas para preservar o valor ja existente no config.json.
+    frame_cadastro = ctk.CTkFrame(frame_geral)
+    frame_cadastro.grid(row=0, column=0, columnspan=2, padx=8, pady=(8, 4), sticky="ew")
+    ctk.CTkLabel(
+        frame_cadastro, text="🏢 CADASTRO DA EMPRESA",
+        font=("Arial", 14, "bold"),
+    ).grid(row=0, column=0, columnspan=2, padx=10, pady=(8, 4), sticky="w")
+
+    frame_drive = ctk.CTkFrame(frame_geral)
+    frame_drive.grid(row=1, column=0, columnspan=2, padx=8, pady=(12, 8), sticky="ew")
+    ctk.CTkLabel(
+        frame_drive, text="☁️ BACKUP E GOOGLE DRIVE",
+        font=("Arial", 14, "bold"),
+    ).grid(row=0, column=0, columnspan=2, padx=10, pady=(8, 4), sticky="w")
+
+    ctk.CTkLabel(frame_geral, text="Google Drive (Credenciais):").grid(row=2, column=0, padx=10, pady=6, sticky="e")
     entry_drive_creds = ctk.CTkEntry(frame_geral, width=360)
     entry_drive_creds.insert(0, config_atual.get("drive_credentials_path", ""))
-    entry_drive_creds.grid(row=10, column=1, padx=10, pady=6)
-
-    ctk.CTkLabel(frame_geral, text="ID Pasta Backup:").grid(row=11, column=0, padx=10, pady=6, sticky="e")
-    entry_drive_id = ctk.CTkEntry(frame_geral, width=360)
-    entry_drive_id.insert(0, config_atual.get("drive_backup_folder_id", ""))
-    entry_drive_id.grid(row=11, column=1, padx=10, pady=6)
+    entry_drive_creds.grid(row=2, column=1, padx=10, pady=6)
 
     ctk.CTkLabel(frame_geral, text="Pasta Entrada Fiscal:").grid(row=12, column=0, padx=10, pady=6, sticky="e")
     entry_in = ctk.CTkEntry(frame_geral, width=270)
@@ -553,33 +563,163 @@ def exibir_configuracoes(master=None):
     entry_limite.grid(row=14, column=1, padx=10, pady=6)
     aplicar_padrao_entrada_numerica(entry_limite, inteiro=False, casas_decimais=2)
 
-    lbl_status_backup_drive = ctk.CTkLabel(frame_geral, text="", font=("Arial", 11, "bold"))
-    lbl_status_backup_drive.grid(row=16, column=0, columnspan=2, padx=10, pady=(8, 4), sticky="w")
+    lbl_status_backup_drive = ctk.CTkLabel(
+        frame_drive, text="", font=("Arial", 11, "bold"), justify="left", anchor="w",
+    )
+    lbl_status_backup_drive.grid(row=1, column=0, columnspan=2, padx=10, pady=(2, 6), sticky="w")
+
+    ctk.CTkLabel(frame_drive, text="Gmail para fazer backups:").grid(
+        row=2, column=0, padx=10, pady=6, sticky="e",
+    )
+    entry_gmail_backup = ctk.CTkEntry(
+        frame_drive, width=300, placeholder_text="exemplo@gmail.com",
+    )
+    _conta_ja_conectada = str(config_atual.get("google_drive_conta") or "").strip()
+    if _conta_ja_conectada:
+        entry_gmail_backup.insert(0, _conta_ja_conectada)
+    entry_gmail_backup.grid(row=2, column=1, padx=10, pady=6, sticky="w")
 
     def atualizar_alerta_backup_drive():
-        status = obter_status_backup_local()
-        lbl_status_backup_drive.configure(text=status["mensagem"], text_color=status["cor"])
+        import drive_conexao as _conexao
 
-    def acao_provisionar_cliente_drive():
-        email_cliente = entry_email_cliente.get().strip()
-        if not email_cliente:
-            status_label.configure(text="Informe o e-mail do cliente para provisionar o Drive.", text_color="#ff6666")
+        status = _conexao.status_conexao()
+        lbl_status_backup_drive.configure(text=status["mensagem"], text_color=status["cor"])
+        return status
+
+    def _eh_administrador():
+        """Reaproveita o perfil de usuario JA existente (nao cria RBAC novo)."""
+        try:
+            usuario = getattr(master, "usuario_atual", None) or {}
+            permissao = usuario.get("permissão") or usuario.get("permissao") or ""
+            return str(permissao).strip().lower() in ("administrador", "admin", "administrator")
+        except Exception:
+            return False
+
+    def acao_conectar_drive():
+        if not _eh_administrador():
+            _registrar_acesso_drive("Tentativa de conectar Drive sem perfil de administrador.")
+            status_label.configure(
+                text="Apenas administrador pode conectar o Google Drive.", text_color="#ff6666",
+            )
+            return
+        email = entry_gmail_backup.get().strip()
+        import drive_conexao as _conexao
+
+        ok, motivo = _conexao.validar_gmail(email)
+        if not ok:
+            status_label.configure(text=motivo, text_color="#ff6666")
             return
         try:
-            provisionar_novo_cliente(email_cliente)
+            lbl_status_backup_drive.configure(
+                text="Aguardando autorização no Google…", text_color="#f1c40f",
+            )
+            resultado = _conexao.conectar(email)
+            entry_gmail_backup.delete(0, "end")
+            entry_gmail_backup.insert(0, resultado["conta"])
             atualizar_alerta_backup_drive()
-            status_label.configure(text="Provisionamento do cliente no Drive concluído.", text_color="#2ecc71")
+            if resultado["divergente"]:
+                status_label.configure(
+                    text=(f"Conectado como {resultado['conta']} — não é o Gmail informado "
+                          f"({resultado['email_informado']})."),
+                    text_color="#f1c40f",
+                )
+            else:
+                status_label.configure(
+                    text="Google Drive conectado. Backups automáticos ativados.",
+                    text_color="#2ecc71",
+                )
         except Exception as e:
-            status_label.configure(text=f"Falha no provisionamento Drive: {e}", text_color="#ff6666")
+            atualizar_alerta_backup_drive()
+            status_label.configure(text=f"Falha ao conectar o Drive: {e}", text_color="#ff6666")
+
+    def _escolher_pasta_destino():
+        pasta = filedialog.askdirectory(title="Onde salvar o backup?")
+        if pasta:
+            janela_config.focus_force()
+        return pasta
+
+    def acao_baixar_ultimo():
+        pasta = _escolher_pasta_destino()
+        if not pasta:
+            return
+        try:
+            import backup_download as _download
+
+            resultado = _download.baixar_ultimo_backup(pasta)
+            status_label.configure(
+                text=f"Backup baixado: {resultado['backup_id']}", text_color="#2ecc71",
+            )
+        except Exception as e:
+            status_label.configure(text=f"Falha ao baixar backup: {e}", text_color="#ff6666")
+
+    def acao_escolher_backup():
+        try:
+            import backup_download as _download
+
+            disponiveis = _download.listar_backups_mercado()
+        except Exception as e:
+            status_label.configure(text=f"Falha ao listar backups: {e}", text_color="#ff6666")
+            return
+        if not disponiveis:
+            status_label.configure(
+                text="Nenhum backup encontrado para este mercado.", text_color="#f1c40f",
+            )
+            return
+        janela_lista = ctk.CTkToplevel(janela_config)
+        janela_lista.title("Backups disponíveis")
+        janela_lista.geometry("560x420")
+        lista = ctk.CTkScrollableFrame(janela_lista)
+        lista.pack(fill="both", expand=True, padx=10, pady=10)
+
+        def _baixar(item):
+            pasta = _escolher_pasta_destino()
+            if not pasta:
+                return
+            try:
+                import backup_download as _download
+
+                resultado = _download.baixar_backup(item["backup_id"], pasta)
+                janela_lista.destroy()
+                status_label.configure(
+                    text=f"Backup baixado: {resultado['backup_id']}", text_color="#2ecc71",
+                )
+            except Exception as e:
+                status_label.configure(text=f"Falha ao baixar backup: {e}", text_color="#ff6666")
+
+        for item in disponiveis:
+            linha = ctk.CTkFrame(lista)
+            linha.pack(fill="x", pady=3)
+            ctk.CTkLabel(
+                linha, text=f"{item['data_hora']}  •  {item['tipo']}", anchor="w",
+            ).pack(side="left", padx=8)
+            ctk.CTkButton(
+                linha, text="BAIXAR", width=90, command=lambda i=item: _baixar(i),
+            ).pack(side="right", padx=8)
 
     ctk.CTkButton(
-        frame_geral,
-        text="Provisionar Cliente no Drive",
+        frame_drive,
+        text="CONECTAR AO GOOGLE DRIVE",
         fg_color="#1f6aa5",
         hover_color="#144870",
-        command=acao_provisionar_cliente_drive,
-    ).grid(row=17, column=0, columnspan=2, padx=10, pady=(4, 8), sticky="w")
+        command=acao_conectar_drive,
+    ).grid(row=3, column=0, padx=10, pady=(6, 6), sticky="w")
 
+    ctk.CTkLabel(frame_drive, text="Backups", font=("Arial", 12, "bold")).grid(
+        row=4, column=0, columnspan=2, padx=10, pady=(14, 4), sticky="w",
+    )
+    ctk.CTkButton(
+        frame_drive, text="BAIXAR ÚLTIMO BACKUP", command=acao_baixar_ultimo,
+    ).grid(row=5, column=0, padx=10, pady=4, sticky="w")
+    ctk.CTkButton(
+        frame_drive, text="ESCOLHER BACKUP", command=acao_escolher_backup,
+    ).grid(row=5, column=1, padx=10, pady=4, sticky="w")
+    ctk.CTkLabel(
+        frame_drive,
+        text="Baixar um backup não altera seus dados atuais.",
+        font=("Arial", 10), text_color="#aaaaaa",
+    ).grid(row=6, column=0, columnspan=2, padx=10, pady=(4, 8), sticky="w")
+
+    atualizar_alerta_backup_drive()
     def procurar_exe(entry_widget):
         caminho = filedialog.askopenfilename(
             title="Selecionar Executável",
@@ -601,67 +741,51 @@ def exibir_configuracoes(master=None):
     ctk.CTkButton(frame_geral, text="...", width=40, command=lambda: selecionar_pasta(entry_in)).grid(row=12, column=1, padx=(0, 10), pady=6, sticky="e")
     ctk.CTkButton(frame_geral, text="...", width=40, command=lambda: selecionar_pasta(entry_out)).grid(row=13, column=1, padx=(0, 10), pady=6, sticky="e")
 
-    # --- ABA FISCAL (PlugNotas) ---
-    ctk.CTkLabel(frame_fiscal, text="Integração Fiscal PlugNotas (API v2.4.2)", font=("Arial", 16, "bold")).pack(pady=(12, 14))
+    # Largura da bobina térmica. Fica na row=18 (livre) para não renumerar
+    # os campos existentes. Somente 58 mm e 80 mm nesta versão: qualquer
+    # outro valor é tratado como 80 mm por _largura_cupom_chars().
+    try:
+        largura_atual = int(config_atual.get("largura_cupom_mm") or 80)
+    except (TypeError, ValueError):
+        largura_atual = 80
+    if largura_atual not in (58, 80):
+        largura_atual = 80
+    largura_cupom_var = ctk.StringVar(value=f"{largura_atual} mm")
+
+    ctk.CTkLabel(frame_geral, text="Largura da Bobina:").grid(row=18, column=0, padx=10, pady=6, sticky="e")
+    ctk.CTkOptionMenu(
+        frame_geral,
+        values=["58 mm", "80 mm"],
+        variable=largura_cupom_var,
+        width=140,
+    ).grid(row=18, column=1, padx=10, pady=6, sticky="w")
+
+    # --- ABA FISCAL ---
+    # A emissão fiscal é feita pelo motor ACBrMonitor (configurado na aba Geral).
+    # Aqui resta apenas o token do webhook de pedidos externos, que é uma
+    # funcionalidade ativa e independente do ACBr.
+    ctk.CTkLabel(
+        frame_fiscal,
+        text="Pedidos Externos (Webhook)",
+        font=("Arial", 16, "bold"),
+    ).pack(pady=(12, 14))
 
     form_fiscal = ctk.CTkFrame(frame_fiscal)
     form_fiscal.pack(fill="x", padx=14, pady=8)
 
-    ctk.CTkLabel(form_fiscal, text="API Key:").grid(row=0, column=0, padx=10, pady=10, sticky="e")
-    entry_api_key = ctk.CTkEntry(form_fiscal, width=440)
-    entry_api_key.insert(0, fiscal_atual.get("api_key", ""))
-    entry_api_key.grid(row=0, column=1, padx=10, pady=10)
-
-    ctk.CTkLabel(form_fiscal, text="Webhook Token:").grid(row=1, column=0, padx=10, pady=10, sticky="e")
+    ctk.CTkLabel(form_fiscal, text="Webhook Token:").grid(row=0, column=0, padx=10, pady=10, sticky="e")
     entry_webhook_token = ctk.CTkEntry(form_fiscal, width=440, show="*")
-    entry_webhook_token.grid(row=1, column=1, padx=10, pady=10)
+    entry_webhook_token.grid(row=0, column=1, padx=10, pady=10)
     ctk.CTkLabel(
         form_fiscal,
         text=(
-            "Status token: CONFIGURADO" if fiscal_atual.get("webhook_token_configurado") else "Status token: NÃO CONFIGURADO"
+            "Status token: CONFIGURADO"
+            if fiscal_atual.get("webhook_token_configurado")
+            else "Status token: NÃO CONFIGURADO"
         ),
         text_color="#2ecc71" if fiscal_atual.get("webhook_token_configurado") else "#ff6666",
         font=("Arial", 10, "bold"),
-    ).grid(row=2, column=1, padx=10, pady=(0, 8), sticky="w")
-
-    ctk.CTkLabel(form_fiscal, text="Ambiente:").grid(row=3, column=0, padx=10, pady=10, sticky="e")
-    ambiente_var = ctk.StringVar(value="PRODUCAO" if fiscal_atual.get("ambiente") == "PRODUCAO" else "HOMOLOGACAO")
-    switch_ambiente = ctk.CTkSwitch(
-        form_fiscal,
-        text="Homologação",
-        onvalue="PRODUCAO",
-        offvalue="HOMOLOGACAO",
-        variable=ambiente_var,
-    )
-    if ambiente_var.get() == "PRODUCAO":
-        switch_ambiente.select()
-        switch_ambiente.configure(text="Produção")
-    else:
-        switch_ambiente.deselect()
-        switch_ambiente.configure(text="Homologação")
-    switch_ambiente.grid(row=3, column=1, padx=10, pady=10, sticky="w")
-
-    def atualizar_texto_switch():
-        switch_ambiente.configure(text="Produção" if ambiente_var.get() == "PRODUCAO" else "Homologação")
-
-    switch_ambiente.configure(command=atualizar_texto_switch)
-
-    lbl_teste = ctk.CTkLabel(frame_fiscal, text="", font=("Arial", 11, "bold"), text_color="#3498db")
-    lbl_teste.pack(pady=(6, 8))
-
-    def acao_testar_conexao():
-        ok, msg = testar_conexao_plugnotas(entry_api_key.get(), ambiente_var.get())
-        lbl_teste.configure(text=msg, text_color="#2ecc71" if ok else "#ff6666")
-        janela_config.focus_force()
-        entry_api_key.focus_set()
-
-    ctk.CTkButton(
-        frame_fiscal,
-        text="TESTAR CONEXÃO",
-        fg_color="#1f6aa5",
-        hover_color="#144870",
-        command=acao_testar_conexao,
-    ).pack(pady=(4, 10))
+    ).grid(row=1, column=1, padx=10, pady=(0, 8), sticky="w")
 
     # --- Ações ---
     def acao_salvar():
@@ -698,12 +822,17 @@ def exibir_configuracoes(master=None):
                 "uf": entry_uf.get().strip().upper(),
                 "email_cliente": entry_email_cliente.get(),
                 "drive_credentials_path": entry_drive_creds.get(),
-                "drive_backup_folder_id": entry_drive_id.get(),
+                # L6: a chave legada NAO aparece mais na UI, mas continua
+                # gravada com o valor ja existente para nao apagar o dado do
+                # cliente. O fluxo novo nao a utiliza.
+                "drive_backup_folder_id": config_atual.get("drive_backup_folder_id", ""),
+                "google_drive_conta": config_atual.get("google_drive_conta", ""),
                 "emissor_fiscal_path": entry_emissor.get(),
                 "fiscal_ativo": bool(fiscal_ativo_var.get()),
                 "pasta_entrada_fiscal": entry_in.get(),
                 "pasta_retorno_fiscal": entry_out.get(),
                 "limite_sangria_preventiva": entry_limite.get(),
+                "largura_cupom_mm": int(str(largura_cupom_var.get()).split("mm")[0].strip() or 80),
             }
 
             ok_geral, msg_geral = salvar_configuracoes(novos_dados, exibir_alerta=False)
@@ -712,12 +841,12 @@ def exibir_configuracoes(master=None):
                 janela_config.focus_force()
                 return
 
+            # A integração PlugNotas foi removida: api_key/ambiente legados
+            # permanecem no banco apenas para compatibilidade e NÃO são
+            # gravados aqui. O que se salva é o token do webhook.
             token_digitado = entry_webhook_token.get().strip()
-            salvar_config_fiscal(
-                entry_api_key.get(),
-                ambiente_var.get(),
-                webhook_token=token_digitado if token_digitado else None,
-            )
+            if token_digitado:
+                salvar_token_webhook(token_digitado)
             status_label.configure(text="Configurações gerais e fiscais salvas com sucesso.", text_color="#2ecc71")
             atualizar_alerta_backup_drive()
             janela_config.focus_force()

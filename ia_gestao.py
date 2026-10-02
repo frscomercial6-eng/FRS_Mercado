@@ -1,6 +1,8 @@
 import sqlite3
 from datetime import datetime, timedelta
-from database_manager import get_db_connection, registrar_log
+from database_manager import get_db_connection, get_db_path, registrar_log
+
+DB_PATH = get_db_path()
 
 def verificar_alertas():
     """
@@ -8,7 +10,7 @@ def verificar_alertas():
     A lista de exemplos é limitada para manter o painel leve com milhares de itens.
     """
     alertas = []
-    db_path = 'mercado.db'
+    db_path = DB_PATH
     conn = None
     try:
         with get_db_connection() as conn:

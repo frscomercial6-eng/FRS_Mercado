@@ -1,11 +1,16 @@
 import json
 import re
 import unicodedata
+import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 from app_paths import obter_caminho_dados
+
+# Marcador de identidade PROVISÓRIA (base ainda sem CNPJ/razão social).
+# O prefixo é reconhecido por app_paths._config_tem_dados_usuario(): um
+# market_id com este prefixo NÃO conta como dado comercial do cliente.
+PREFIXO_MARKET_LOCAL = "market-local-"
 
 
 @dataclass
@@ -27,21 +32,46 @@ def _config_path() -> Path:
     return Path(obter_caminho_dados("config.json"))
 
 
+def _config_invalida(caminho: Path):
+    """Mesmo erro de modulo_config, importado sob demanda.
+
+    O import é local para não arrastar customtkinter/tkinter para os fluxos
+    headless (firebase/Drive) que usam este módulo sem interface aberta.
+    """
+    from modulo_config import ConfiguracaoInvalidaError
+
+    return ConfiguracaoInvalidaError(str(caminho))
+
+
 def _load_config() -> dict:
     path = _config_path()
     if not path.exists():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    except Exception as exc:
+        raise _config_invalida(path) from exc
+    if not isinstance(data, dict):
+        raise _config_invalida(path)
+    return data
 
 
 def _save_config(config: dict) -> None:
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config, indent=4, ensure_ascii=False), encoding="utf-8")
+
+
+def _identificador_local_estavel() -> str:
+    """Gera a identidade provisória de uma base ainda sem dado comercial.
+
+    L4: antes este valor usava datetime.now(), então uma base vazia recebia
+    um market_id diferente a cada reinstalação — quebrando licença e pasta do
+    Drive. Agora é gerado UMA vez e persistido em config.json por
+    ensure_local_market_id(), que nunca o regenera. Não depende de horário,
+    de nome de arquivo nem do banco.
+    """
+    return f"{PREFIXO_MARKET_LOCAL}{uuid.uuid4().hex[:12]}"
 
 
 def derive_market_id(config: dict) -> str:
@@ -57,9 +87,9 @@ def derive_market_id(config: dict) -> str:
     if razao:
         return f"market-{_slugify(razao)}"
 
-    # Fallback seguro para bases vazias no primeiro bootstrap.
-    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    return f"market-local-{stamp}"
+    # Sem dado comercial: identidade provisória estável, persistida e nunca
+    # promovida silenciosamente a identidade comercial.
+    return _identificador_local_estavel()
 
 
 def ensure_local_market_id() -> str:

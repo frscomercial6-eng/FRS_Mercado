@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app_paths import obter_caminho_dados
+from app_paths import e_compilado, executavel_atual, obter_caminho_dados
 from updater_secure import (
     PUBLIC_KEYS_FILE,
     UpdateSecurityError,
@@ -41,6 +41,8 @@ FORBIDDEN_ASSETS = {
     "credentials.json",
     "google-services.json",
     "token.pickle",
+    "client_credentials.sec.json",
+    "firebase-admin-key.json",
     "firebase-adminsdk.json",
 }
 PROTECTED_DATA_NAMES = (
@@ -49,11 +51,60 @@ PROTECTED_DATA_NAMES = (
     "mercado.db-shm",
     "mercado.db-journal",
     "config.json",
+    "update_state.json",
     "licensing",
     "token.pickle",
     "credentials.json",
     "google-services.json",
+    "client_credentials.sec.json",
     "firebase-admin-key.json",
+    "firebase-adminsdk.json",
+    "log_debug.txt",
+    "config_mentora.json",
+    "log_integracao.txt",
+    "error_log.txt",
+    "FRS_Mercado_runtime_error.log",
+    "acbrmonitor/ACBrMonitor.ini",
+    "assets/produtos",
+    "backups",
+    "exportacao_fiscal",
+    "fiscal_in",
+    "fiscal_out",
+    "logs",
+    "relatorios",
+    "templates",
+)
+PROTECTED_HASH_FILES = (
+    "mercado.db",
+    "mercado.db-wal",
+    "mercado.db-shm",
+    "mercado.db-journal",
+    "config.json",
+    "client_credentials.sec.json",
+    "token.pickle",
+    "credentials.json",
+    "google-services.json",
+    "firebase-admin-key.json",
+    "firebase-adminsdk.json",
+    "log_debug.txt",
+    "config_mentora.json",
+    "log_integracao.txt",
+    "error_log.txt",
+    "FRS_Mercado_runtime_error.log",
+    "logs/fiscal_config_error.log",
+    "acbrmonitor/ACBrMonitor.ini",
+    "licensing/license.json",
+    "licensing/installation_id",
+    "licensing/challenge.json",
+    "licensing/clock.json",
+    "assets/produtos",
+    "backups",
+    "exportacao_fiscal",
+    "fiscal_in",
+    "fiscal_out",
+    "logs",
+    "relatorios",
+    "templates",
 )
 
 
@@ -240,9 +291,10 @@ def _health_check(executable: Path, expected_version: str | None = None, timeout
 
 def _portable_root() -> Path:
     """Resolve a raiz do Portable mesmo quando o helper vive em data/updates/bin."""
-    if getattr(sys, "frozen", False):
-        current = Path(sys.executable).resolve().parent
-        for parent in current.parents:
+    if e_compilado():
+        executavel = executavel_atual()
+        current = executavel.parent if executavel is not None else Path(sys.executable).resolve().parent
+        for parent in (current, *current.parents):
             if (parent / "runtime").is_dir() and (parent / "data").is_dir():
                 return parent
         return current
@@ -359,9 +411,11 @@ def run_job(job_path: Path, reopen: bool = True) -> int:
         previous_pointer = pointer.read_text(encoding="utf-8") if pointer.exists() else None
         installed_runtime = None
         traditional_backup = None
+        data_backup_complete = False
         _set_state(UpdateState.BACKING_UP, version=release.get("version"), error="")
-        _backup_protected_data(data_dir, data_backup)
         try:
+            _backup_protected_data(data_dir, data_backup)
+            data_backup_complete = True
             if str(release.get("asset_type")) == "portable_zip":
                 executable = _install_portable(release, asset, app_root, data_dir)
                 installed_runtime = executable.parent
@@ -397,7 +451,8 @@ def run_job(job_path: Path, reopen: bool = True) -> int:
                         shutil.copytree(item, target, symlinks=False)
                     else:
                         shutil.copy2(item, target)
-            _restore_protected_data(data_dir, data_backup)
+            if data_backup_complete:
+                _restore_protected_data(data_dir, data_backup)
             shutil.rmtree(data_backup, ignore_errors=True)
             _set_state(UpdateState.ROLLED_BACK, version=release.get("version"), error=str(exc))
             raise
@@ -436,17 +491,20 @@ def _exclusive_lock(path: Path):
 
 
 def _protected_hashes(data_dir: Path) -> dict[str, str]:
-    targets = [
-        data_dir / "mercado.db",
-        data_dir / "config.json",
-        data_dir / "licensing" / "license.json",
-        data_dir / "licensing" / "installation_id",
-    ]
-    return {
-        str(path.relative_to(data_dir)): _sha256(path)
-        for path in targets
-        if path.is_file()
-    }
+    hashes = {}
+    for name in PROTECTED_HASH_FILES:
+        path = data_dir / name
+        if path.is_symlink():
+            hashes[str(path.relative_to(data_dir))] = "SYMLINK"
+        elif path.is_file():
+            hashes[str(path.relative_to(data_dir))] = _sha256(path)
+        elif path.is_dir():
+            for child in path.rglob("*"):
+                if child.is_symlink():
+                    hashes[str(child.relative_to(data_dir))] = "SYMLINK"
+                elif child.is_file():
+                    hashes[str(child.relative_to(data_dir))] = _sha256(child)
+    return hashes
 
 
 def _backup_protected_data(data_dir: Path, backup_dir: Path) -> None:
@@ -459,9 +517,13 @@ def _backup_protected_data(data_dir: Path, backup_dir: Path) -> None:
         source = data_dir / name
         if not source.exists():
             continue
+        if source.is_symlink():
+            raise HelperError(f"Arquivo protegido é symlink e não pode ser snapshotado: {name}.")
         target = backup_dir / name
         if source.is_dir():
-            shutil.copytree(source, target, symlinks=False)
+            if any(child.is_symlink() for child in source.rglob("*")):
+                raise HelperError(f"Diretório protegido contém symlink: {name}.")
+            shutil.copytree(source, target, symlinks=True)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)

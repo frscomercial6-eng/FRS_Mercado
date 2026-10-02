@@ -114,6 +114,61 @@ def _garantir_tabela_config_fiscal():
 
 _garantir_tabela_config_fiscal()
 
+
+def _garantir_tabela_config_webhook():
+    """Garante config_webhook e herda o token legado, sem perder dado algum.
+
+    Não substitui um token existente: a migração só ocorre quando o destino
+    está vazio, o que a torna segura para rodar em toda inicialização.
+    """
+    db_path = get_db_path()
+    if not os.path.exists(db_path):
+        return
+
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS config_webhook (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                token_hash TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        row = cur.execute("SELECT token_hash FROM config_webhook WHERE id = 1").fetchone()
+        if row is None:
+            cur.execute("INSERT INTO config_webhook (id, token_hash) VALUES (1, '')")
+            row = ("",)
+        if str(row[0] or "").strip():
+            conn.commit()
+            return
+
+        legado = ""
+        tabelas = {
+            linha[0]
+            for linha in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "config_fiscal" in tabelas:
+            colunas = [linha[1] for linha in cur.execute("PRAGMA table_info(config_fiscal)")]
+            if "webhook_token_hash" in colunas:
+                antigo = cur.execute(
+                    "SELECT webhook_token_hash FROM config_fiscal WHERE id = 1"
+                ).fetchone()
+                legado = str(antigo[0] or "") if antigo else ""
+        if legado.strip():
+            cur.execute(
+                "UPDATE config_webhook SET token_hash = ? WHERE id = 1",
+                (legado,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_garantir_tabela_config_webhook()
+
+
 def init_db():
     """
     Inicializa o banco de dados principal e cria as tabelas necessárias
@@ -617,6 +672,15 @@ def init_db():
         fiscal_cols = [row[1] for row in cursor.fetchall()]
         if "webhook_token_hash" not in fiscal_cols:
             cursor.execute("ALTER TABLE config_fiscal ADD COLUMN webhook_token_hash TEXT NOT NULL DEFAULT ''")
+
+        # Configuração do webhook de pedidos externos (tabela própria).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS config_webhook (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                token_hash TEXT NOT NULL DEFAULT ''
+            )
+        ''')
+        cursor.execute("INSERT OR IGNORE INTO config_webhook (id, token_hash) VALUES (1, '')")
 
         # Tabela de Itens da Venda (Detalhes)
         cursor.execute('''

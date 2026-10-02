@@ -50,7 +50,14 @@ class SystemMonitor:
 
     def _loop(self):
         while not self._stop_event.is_set():
-            status = self.collect_status()
+            try:
+                status = self.collect_status()
+            except Exception as exc:
+                # F-1: nenhuma exceção pode encerrar a thread de monitoração
+                # em silêncio; o próximo ciclo tenta novamente.
+                self._ultimo_motivo_acbr = str(exc)
+                time.sleep(self.interval_seconds)
+                continue
             if callable(self.on_status):
                 try:
                     self.on_status(status)
@@ -60,7 +67,46 @@ class SystemMonitor:
 
     def collect_status(self):
         lic = self._license_manager.get_status()
-        cfg = carregar_configuracoes()
+        try:
+            cfg = carregar_configuracoes()
+        except Exception as exc:
+            # F-1: config.json inválido falha fechado. A monitoração roda em
+            # background e não pode morrer em silêncio, mas também não pode
+            # inventar uma configuração padrão: reportamos o erro e seguimos
+            # apenas com o estado de licença já obtido acima.
+            status_txt = "Fiscal: Configuração inválida"
+            cor = "#ff6666"
+            alerta = (
+                "Configuração da empresa inválida e preservada. "
+                "O fiscal foi desativado nesta sessão até o config.json ser corrigido."
+            )
+            lic_text = str(lic.get("message") or "Licença: Indisponível")
+            lic_color = str(lic.get("color") or "#f1c40f")
+            lic_expirada = bool(lic.get("is_expired", False))
+            lic_alerta = bool(lic.get("is_warning", False))
+            header_color = lic_color if (lic_expirada or lic_alerta) else cor
+            self._ultimo_motivo_acbr = str(exc)
+            return {
+                "fiscal_ativo": False,
+                "acbr_running": False,
+                "fiscal_ok": False,
+                "status_text": status_txt,
+                "status_color": cor,
+                "license_text": lic_text,
+                "license_color": lic_color,
+                "license_expired": lic_expirada,
+                "license_warning": lic_alerta,
+                "license_days_left": lic.get("days_left"),
+                "license_source": lic.get("source"),
+                "license_restricted": bool(lic.get("restricted", lic_expirada)),
+                "renewal_url": lic.get("renewal_url"),
+                "header_text": f"{lic_text} | {status_txt}",
+                "header_color": header_color,
+                "alerta": alerta,
+                "iniciou_servico": False,
+                "acbr_detalhe": self._ultimo_motivo_acbr,
+            }
+
         fiscal_ativo = bool(cfg.get("fiscal_ativo", False))
 
         acbr_running = self._is_acbr_running()
