@@ -4,26 +4,26 @@
     "assets": [
       {
         "asset_type": "portable_zip",
-        "name": "FRS_Mercado_Portable_1.0.21.zip",
-        "sha256": "95d34e3613034ceac6b20261cd0b406abfed24540240a191cf5ce332b28488e7",
-        "size": 147814962,
-        "url": "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v1.0.21/FRS_Mercado_Portable_1.0.21.zip"
+        "name": "FRS_Mercado_Portable_1.0.22.zip",
+        "sha256": "49cb2023d8477a6e0b3306d2501993f7d64b9056bffc5901bf7e8e17fa8eaef2",
+        "size": 169133688,
+        "url": "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v1.0.22/FRS_Mercado_Portable_1.0.22.zip"
       },
       {
         "asset_type": "installer_exe",
         "name": "FRS_Mercado_Setup.exe",
-        "sha256": "bdb79c3e6db9fa2a65e917e7ca77ba0c119b87e19727c6b31b2c664770d24e53",
-        "size": 93021020,
-        "url": "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v1.0.21/FRS_Mercado_Setup.exe"
+        "sha256": "9ed2c65305ba5c4ad3905a2c8dea711e557b1afc931b3fe2dee45dde9718921f",
+        "size": 113997457,
+        "url": "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v1.0.22/FRS_Mercado_Setup.exe"
       }
     ],
     "auto_update": true,
     "channel": "stable",
-    "issued_at": "2026-09-29T02:47:21.885740+00:00",
+    "issued_at": "2026-10-10T14:47:39.608241+00:00",
     "product": "FRS-Mercado",
-    "sequence": 2,
-    "version": "1.0.21"
+    "sequence": 3,
+    "version": "1.0.22"
   },
   "schema": "FRS-MERCADO-UPDATE-MANIFEST-V1",
-  "signature": "gM6rRg6zOzXwUg1KUNPgAyp/rHXG4BR95XcPUU6RjSw1ZtHa0dyamVnvuehagiPm7n9aWkYBUFJjT6fUEfiEBQ=="
+  "signature": "tMi9GK3ltDa7CphgznyTaSdyYvr0TgIVGDe+4kVS42KPJaLDzxyGrRsTBPCJRSvpFOK753PjMmsRNaVhwtZIDw=="
 }
