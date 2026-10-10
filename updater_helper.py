@@ -21,7 +21,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app_paths import e_compilado, executavel_atual, obter_caminho_dados
+from app_paths import (
+    definir_raiz_dados_explícita,
+    e_compilado,
+    executavel_atual,
+    obter_caminho_dados,
+    raiz_dados_explícita,
+)
 from updater_secure import (
     PUBLIC_KEYS_FILE,
     UpdateSecurityError,
@@ -30,6 +36,8 @@ from updater_secure import (
     _set_state,
     normalize_version,
     read_update_state,
+    read_version_marker,
+    redefinir_caminhos_apos_raiz,
     verify_manifest,
 )
 
@@ -52,6 +60,14 @@ PROTECTED_DATA_NAMES = (
     "mercado.db-journal",
     "config.json",
     "update_state.json",
+    # Item 13 / R1: estado do cliente que existia na máquina do Mário mas não
+    # estava listado. `integracoes_cofre.json` guarda o cofre de credenciais e
+    # `integracoes_config.json` as configurações de iFood/99Entrega; `conversion_backup`
+    # preserva conversões de pedido. Entram na proteção — apenas o NOME é
+    # listado; conteúdo, formato e credenciais não são tocados.
+    "integracoes_cofre.json",
+    "integracoes_config.json",
+    "conversion_backup",
     "licensing",
     "token.pickle",
     "credentials.json",
@@ -80,6 +96,9 @@ PROTECTED_HASH_FILES = (
     "mercado.db-shm",
     "mercado.db-journal",
     "config.json",
+    # Item 13 / R1: espelho de PROTECTED_DATA_NAMES na verificação por hash.
+    "integracoes_cofre.json",
+    "integracoes_config.json",
     "client_credentials.sec.json",
     "token.pickle",
     "credentials.json",
@@ -132,6 +151,54 @@ def _read_json(path: Path) -> dict:
     if not isinstance(value, dict):
         raise HelperError(f"Job inválido: {path.name}")
     return value
+
+
+def _log_diag_helper(etapa: str, versao, mensagem: str,
+                     health_check: str = "", rollback: str = "") -> None:
+    """Diagnóstico local do helper. Sanitizado: SEM dados sensíveis.
+
+    Reaproveita o formato de ``updater_secure._log_diagnostico_atualizacao``
+    sem importá-lo (evita acoplamento): grava apenas metadados do processo de
+    atualização em ``update_diagnostics.log`` dentro da raiz de dados REAL.
+    Nunca inclui banco, vendas, cadastro, senhas, tokens ou segredos.
+    """
+    stamp = _utc_now()
+    linha = (
+        f"[{stamp}] etapa={etapa} versao={versao} origem=helper\n"
+        f"  mensagem: {mensagem}\n"
+    )
+    if health_check:
+        linha += f"  health_check: {health_check}\n"
+    if rollback:
+        linha += f"  rollback: {rollback}\n"
+    try:
+        caminho = Path(obter_caminho_dados("update_diagnostics.log"))
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        with caminho.open("a", encoding="utf-8") as fh:
+            fh.write(linha + ("-" * 60) + "\n")
+    except Exception:
+        # Diagnóstico jamais pode interromper o fluxo de atualização.
+        pass
+
+
+def _tentar_registrar_falha_raiz(mensagem: str) -> None:
+    """Grava falha de raiz de forma segura quando possível.
+
+    Se a raiz explícita foi fixada (caso raro: validação tardia), grava nela.
+    Nunca deriva raiz do caminho do executável para registrar erro de raiz —
+    é exatamente essa derivação que causa o bug de "data fantasma".
+    """
+    raiz = raiz_dados_explícita()
+    if raiz is None:
+        return
+    try:
+        _log_diag_helper("falha_raiz", None, mensagem)
+        estado = Path(obter_caminho_dados("update_state.json"))
+        estado.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_json_write(estado, {"state": UpdateState.FAILED.value,
+                                    "error": mensagem, "updated_at": _utc_now()})
+    except Exception:
+        pass
 
 
 def _process_alive(pid: int) -> bool:
@@ -231,17 +298,14 @@ def _safe_extract_zip(archive: Path, destination: Path) -> None:
 
 
 def _version_marker(root: Path) -> str:
-    """Lê a versão do runtime extraído sem depender do nome do pacote."""
-    for name in ("version.txt", "version.json"):
-        path = root / name
-        if not path.is_file():
-            continue
-        raw = path.read_text(encoding="utf-8").strip()
-        if name.endswith(".json"):
-            raw = str(json.loads(raw).get("latest_version") or "")
-        if raw:
-            return normalize_version(raw)
-    return "0.0.0"
+    """Lê a versão do runtime extraído sem depender do nome do pacote.
+
+    Item 12: usa o MESMO leitor e a MESMA precedência de
+    `updater_secure.get_local_version`. Antes este método e aquele discordavam
+    quando `version.txt` e `version.json` divergiam — o app via uma versão e o
+    helper validava outra, o que podia reprovar um runtime correto.
+    """
+    return read_version_marker(root, allow_release_info=False)
 
 
 def _write_runtime_pointer(pointer: Path, version: str, runtime: Path) -> None:
@@ -257,16 +321,8 @@ def _write_runtime_pointer(pointer: Path, version: str, runtime: Path) -> None:
 
 
 def _installed_version(app_root: Path) -> str:
-    for name in ("version.txt", "version.json"):
-        path = app_root / name
-        if not path.is_file():
-            continue
-        raw = path.read_text(encoding="utf-8").strip()
-        if name.endswith(".json"):
-            raw = str(json.loads(raw).get("latest_version") or "")
-        if raw:
-            return normalize_version(raw)
-    return "0.0.0"
+    """Item 12: mesma precedência de `_version_marker` e `get_local_version`."""
+    return read_version_marker(app_root, allow_release_info=False)
 
 
 def _health_check(executable: Path, expected_version: str | None = None, timeout: int = 45) -> None:
@@ -290,7 +346,19 @@ def _health_check(executable: Path, expected_version: str | None = None, timeout
 
 
 def _portable_root() -> Path:
-    """Resolve a raiz do Portable mesmo quando o helper vive em data/updates/bin."""
+    """Resolve a raiz do Portable mesmo quando o helper vive em data/updates/bin.
+
+    1.0.22: a raiz EXPLÍCITA transmitida pelo aplicativo (--data-root) tem
+    prioridade absoluta. A heurística por ``runtime/``+``data/`` só roda em
+    modo legado (helper chamado sem raiz transmitida).
+    """
+    raiz = raiz_dados_explícita()
+    if raiz is not None:
+        # raiz de dados == <app_root>/data (portátil) ou AppData (instalado).
+        # A raiz do app é o PAI quando o diretório se chama "data".
+        if raiz.name.lower() == "data":
+            return raiz.parent
+        return raiz
     if e_compilado():
         executavel = executavel_atual()
         current = executavel.parent if executavel is not None else Path(sys.executable).resolve().parent
@@ -462,8 +530,58 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Helper seguro de atualização FRS Mercado")
     parser.add_argument("--job", required=True)
     parser.add_argument("--no-reopen", action="store_true")
+    parser.add_argument(
+        "--data-root",
+        default="",
+        help="Raiz de dados canônica do aplicativo. Tem prioridade sobre qualquer "
+        "heurística baseada no caminho deste executável.",
+    )
     args = parser.parse_args(argv)
+
+    # ------------------------------------------------------------------
+    # Raiz de dados explícita (correção 1.0.22).
+    # Deve ocorrer ANTES de qualquer chamada a obter_caminho_dados() para que
+    # estado, lock, staging, rollback e diagnóstico caiam na MESMA raiz do app.
+    # ------------------------------------------------------------------
+    origem = "argumento"
+    candidato = str(args.data_root or "").strip()
+    if not candidato:
+        candidato = os.environ.get("FRS_MERCADO_DATA_ROOT", "").strip()
+        origem = "ambiente"
+    raiz_transmitida = candidato
     try:
+        if candidato:
+            raiz = definir_raiz_dados_explícita(candidato, origem=origem)
+            # Reajusta os caminhos de estado/lock que foram congelados no import
+            # de updater_secure ANTES da raiz explícita ser conhecida.
+            redefinir_caminhos_apos_raiz()
+        else:
+            # Compatibilidade: app antigo que não transmite a raiz. Adota a
+            # heurística, mas REGISTRA o risco para diagnóstico.
+            raiz = None
+    except ValueError as exc:
+        # Raiz inconsistente: NÃO prosseguir. Grava falha de forma segura na
+        # raiz real do aplicativo quando ela puder ser determinada sem heurística
+        # derivada do executável; caso contrário apenas reporta no stderr.
+        mensagem = f"Raiz de dados transmitida inválida: {exc}"
+        _tentar_registrar_falha_raiz(mensagem)
+        sys.stderr.write(f"ERRO: {mensagem}\n")
+        return 1
+
+    try:
+        if raiz is not None:
+            _log_diag_helper(
+                "raiz_validada",
+                None,
+                f"origem={origem}; raiz={raiz}; transmitida={raiz_transmitida}",
+            )
+        else:
+            _log_diag_helper(
+                "raiz_nao_transmitida",
+                None,
+                "helper chamado sem --data-root/FRS_MERCADO_DATA_ROOT; "
+                "usando heurística do executável (modo legado).",
+            )
         return run_job(Path(args.job).resolve(), reopen=not args.no_reopen)
     except Exception as exc:
         _set_state(UpdateState.FAILED, error=str(exc))

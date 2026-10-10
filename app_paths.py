@@ -142,6 +142,11 @@ _ARQUIVOS_PERSISTENTES = (
     "config_mentora.json",
     "log_integracao.txt",
     "error_log.txt",
+    # Item 13 / R1: estado do cliente que já existia na máquina do Mário e não
+    # estava na lista de persistência. Apenas o NOME entra aqui: o conteúdo,
+    # o formato e as credenciais não são alterados por esta entrada.
+    "integracoes_cofre.json",
+    "integracoes_config.json",
     "FRS_Mercado_runtime_error.log",
     "logs/fiscal_config_error.log",
     "acbrmonitor/ACBrMonitor.ini",
@@ -166,6 +171,8 @@ _DIRETORIOS_PERSISTENTES = (
     ("logs", {".log", ".txt"}),
     ("relatorios", {".pdf", ".csv"}),
     ("templates", {".db"}),
+    # Item 13 / R1: backup de conversão de pedidos do cliente.
+    ("conversion_backup", {".json", ".db", ".txt"}),
 )
 
 
@@ -820,6 +827,96 @@ def _garantir_escrita(path_base: str) -> None:
     os.remove(tmp_path)
 
 
+# ---------------------------------------------------------------------------
+# Raiz de dados explícita (correção 1.0.22)
+# ---------------------------------------------------------------------------
+# O aplicativo e o helper DEVEM usar exatamente a mesma raiz de dados. Antes,
+# o helper compilado resolvia a raiz a partir do próprio executável: quando
+# vivia em ``<dados>/updates/bin`` caía no fallback ``base_exe / "data"`` e
+# criava ``<dados>/updates/bin/data`` — escrevendo estado, jobs, locks, staging,
+# rollback e diagnóstico num diretório "fantasma" que o aplicativo nunca lê.
+#
+# Agora o aplicativo resolve a raiz UMA vez por execução e a TRANSMITE ao helper
+# por argumento ``--data-root`` (ou variável ``FRS_MERCADO_DATA_ROOT``). O helper
+# adota essa raiz ANTES de qualquer heurística de caminho do próprio executável.
+# A raiz é normalizada e validada; argumentos inconsistentes são rejeitados.
+_ENV_RAIZ_EXPLICITA = "FRS_MERCADO_DATA_ROOT"
+_RAIZ_EXPLICITA = None  # Path|None — fixada por processo, nunca reavaliada.
+_RAIZ_JA_RESOLVIDA = None  # Cache da raiz canônica do app nesta execução.
+
+
+def _normalizar_raiz_explicita(candidato) -> Path:
+    """Normaliza e valida uma raiz de dados transmitida explicitamente.
+
+    Regras de validação (fail-closed — qualquer dúvida rejeita):
+    * precisa ser um caminho absoluto existente como diretório (ou criável);
+    * não pode apontar para dentro de ``updates`` nem para ``updates/bin``;
+    * não pode ser um arquivo.
+    """
+    bruto = str(candidato or "").strip().strip('"')
+    if not bruto:
+        raise ValueError("Raiz de dados explícita vazia.")
+    caminho = Path(bruto).expanduser()
+    if not caminho.is_absolute():
+        raise ValueError(f"Raiz de dados explícita deve ser absoluta: {bruto!r}")
+    try:
+        caminho = caminho.resolve()
+    except OSError:
+        caminho = caminho.absolute()
+    if caminho.exists() and not caminho.is_dir():
+        raise ValueError(f"Raiz de dados explícita não é um diretório: {caminho}")
+    partes = {p.lower() for p in caminho.parts}
+    if "updates" in partes:
+        raise ValueError(
+            f"Raiz de dados explícita não pode estar dentro de 'updates': {caminho}"
+        )
+    return caminho
+
+
+def definir_raiz_dados_explícita(candidato, origem: str = "argumento") -> Path:
+    """Fixa a raiz de dados deste processo. Idempotente e imutável por processo.
+
+    ``candidato`` pode vir de ``--data-root`` (``origem="argumento"``) ou de
+    ``FRS_MERCADO_DATA_ROOT`` (``origem="ambiente"``). Uma vez fixada, chamadas
+    posteriores com o MESMO caminho são aceitas; com caminho DIFERENTE levanta
+    ``ValueError`` (impede que processos disputem raízes divergentes).
+    """
+    global _RAIZ_EXPLICITA
+    validada = _normalizar_raiz_explicita(candidato)
+    if _RAIZ_EXPLICITA is not None:
+        if os.path.normcase(str(_RAIZ_EXPLICITA)) != os.path.normcase(str(validada)):
+            raise ValueError(
+                f"Raiz de dados já fixada em {_RAIZ_EXPLICITA}; "
+                f"tentativa divergente ({origem}) rejeitada: {validada}"
+            )
+        return _RAIZ_EXPLICITA
+    _RAIZ_EXPLICITA = validada
+    return _RAIZ_EXPLICITA
+
+
+def raiz_dados_explícita() -> Path | None:
+    """Devolve a raiz explícita fixada, se houver."""
+    return _RAIZ_EXPLICITA
+
+
+def limpar_raiz_dados_explícita() -> None:
+    """Restaura o modo heurístico (uso em testes; não chamado pelo produto)."""
+    global _RAIZ_EXPLICITA, _RAIZ_JA_RESOLVIDA
+    _RAIZ_EXPLICITA = None
+    _RAIZ_JA_RESOLVIDA = None
+
+
+def _raiz_do_ambiente() -> Path | None:
+    """Lê e valida ``FRS_MERCADO_DATA_ROOT``; inválida = ausente (fail-closed)."""
+    valor = os.environ.get(_ENV_RAIZ_EXPLICITA, "").strip()
+    if not valor:
+        return None
+    try:
+        return _normalizar_raiz_explicita(valor)
+    except ValueError:
+        return None
+
+
 def _versioned_portable_data_base():
     """Resolve data/ compartilhada, inclusive quando executado pelo helper."""
     if not e_compilado():
@@ -837,7 +934,21 @@ def _versioned_portable_data_base():
 
 
 def _raiz_dados_preferida():
-    """Raiz canônica por modo: AppData para source/instalação, data/ para Portable."""
+    """Raiz canônica por modo: AppData para source/instalação, data/ para Portable.
+
+    1.0.22: raiz EXPLÍCITA fixada (``definir_raiz_dados_explícita``) tem prioridade
+    absoluta — é o contrato app↔helper. Em seguida, ``FRS_MERCADO_DATA_ROOT`` (se
+    válido). Só então a heurística histórica por caminho do executável.
+    """
+    # Nota: a raiz NÃO é memoizada aqui para preservar o contrato testável de
+    # reavaliação com ``e_compilado``/``_base_appdata`` patchados. A garantia de
+    # "uma única vez por execução" vem de ``definir_raiz_dados_explícita``.
+    global _RAIZ_JA_RESOLVIDA
+    if _RAIZ_EXPLICITA is not None:
+        return _RAIZ_EXPLICITA
+    ambiente = _raiz_do_ambiente()
+    if ambiente is not None:
+        return ambiente
     if e_compilado():
         base_exe = Path(_base_executavel()).resolve()
         if not _esta_em_program_files(str(base_exe)):

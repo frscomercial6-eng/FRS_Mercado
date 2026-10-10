@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,8 @@ from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from updater_ui import JanelaProgressoAtualizacao, mensagem_fechamento_reabertura
+
 from app_paths import e_compilado, executavel_atual, obter_caminho_dados
 from licensing.canonical_json import canonical_json_bytes
 
@@ -38,6 +41,20 @@ UPDATE_STATE_FILE = Path(obter_caminho_dados("update_state.json"))
 UPDATE_ROOT = Path(obter_caminho_dados("updates"))
 UPDATE_LOCK_FILE = UPDATE_ROOT / "update.lock"
 PUBLIC_KEYS_FILE = Path(__file__).with_name("updater_public_keys.json")
+
+
+def redefinir_caminhos_apos_raiz() -> None:
+    """Recalcula caminhos de estado/lock a partir da raiz de dados VIGENTE.
+
+    Importar ``updater_secure`` resolve os caminhos no momento do import. Quando
+    o helper adota uma raiz EXPLÍCITA (``--data-root``) DEPOIS do import, este
+    reajuste garante que estado, lock e staging caiam na mesma raiz do app em
+    vez do "data fantasma" derivado do caminho do executável.
+    """
+    global UPDATE_STATE_FILE, UPDATE_ROOT, UPDATE_LOCK_FILE
+    UPDATE_STATE_FILE = Path(obter_caminho_dados("update_state.json"))
+    UPDATE_ROOT = Path(obter_caminho_dados("updates"))
+    UPDATE_LOCK_FILE = UPDATE_ROOT / "update.lock"
 
 
 class UpdateState(str, Enum):
@@ -116,29 +133,59 @@ def compare_versions(a: str, b: str) -> int:
     return (pa > pb) - (pa < pb)
 
 
+# Item 12: precedência ÚNICA de leitura de versão.
+# Antes, `get_local_version` lia version.json antes de version.txt, enquanto
+# `_version_marker`/`_installed_version` do helper liam version.txt primeiro.
+# Com as duas fontes divergentes, o app e o helper discordavam sobre a versão
+# do mesmo runtime. Uma ordem única e determinística elimina a divergência:
+# quando os arquivos divergem, a escolha é sempre a mesma dos dois lados.
+VERSION_MARKER_FILES = ("version.txt", "version.json")
+RELEASE_INFO_FILE = "release_info.py"
+_APP_VERSION_RE = re.compile(r"APP_VERSION\s*=\s*[\"']([^\"']+)")
+
+
+def read_version_marker(root: Path, allow_release_info: bool = False) -> str:
+    """Lê a versão de um diretório obeying uma precedência única e fixa.
+
+    Ordem: `version.txt` -> `version.json` -> `release_info.py` (opcional).
+    `release_info.py` só entra quando permitido: num build compilado ele pode
+    estar embutido no executável e não existir em disco.
+
+    Devolve "0.0.0" quando nenhum marcador válido é encontrado — nunca levanta.
+    """
+    nomes = list(VERSION_MARKER_FILES)
+    if allow_release_info:
+        nomes.append(RELEASE_INFO_FILE)
+    for nome in nomes:
+        path = Path(root) / nome
+        try:
+            if not path.is_file():
+                continue
+            texto = path.read_text(encoding="utf-8")
+            if nome.endswith(".json"):
+                valor = json.loads(texto).get("latest_version", "")
+            elif nome.endswith(".py"):
+                achado = _APP_VERSION_RE.search(texto)
+                valor = achado.group(1) if achado else ""
+            else:
+                valor = texto.strip()
+            versao = normalize_version(valor)
+            if versao != "0.0.0":
+                return versao
+        except Exception:
+            continue
+    return "0.0.0"
+
+
 def get_local_version() -> str:
     roots = [Path(__file__).resolve().parent]
     if getattr(sys, "frozen", False):
         roots.insert(0, Path(sys.executable).resolve().parent)
     roots.append(Path.cwd())
     for root in roots:
-        for filename in ("version.json", "version.txt", "release_info.py"):
-            path = root / filename
-            if not path.exists():
-                continue
-            try:
-                if filename == "version.json":
-                    value = json.loads(path.read_text(encoding="utf-8")).get("latest_version", "")
-                elif filename == "version.txt":
-                    value = path.read_text(encoding="utf-8").strip()
-                else:
-                    import re
-                    match = re.search(r"APP_VERSION\s*=\s*[\"']([^\"']+)", path.read_text(encoding="utf-8"))
-                    value = match.group(1) if match else ""
-                if value:
-                    return normalize_version(value)
-            except Exception:
-                continue
+        versao = read_version_marker(root, allow_release_info=True)
+        if versao != "0.0.0":
+            return versao
     return "0.0.0"
 
 
@@ -179,6 +226,34 @@ def _set_state(state: UpdateState, **values) -> dict:
     payload["updated_at"] = datetime_now_iso()
     write_update_state(payload)
     return payload
+
+
+def _log_diagnostico_atualizacao(etapa: str, versao: str, mensagem: str,
+                                 health_check: str = "", rollback: str = "") -> None:
+    """Registra localmente um diagnóstico de atualização (metadados apenas).
+
+    Escreve em ``update_diagnostics.log`` dentro da raiz de dados REAL do
+    aplicativo. NUNCA inclui banco de dados, vendas, cadastro de clientes,
+    senhas, tokens ou segredos de integração — apenas metadados do processo.
+    Diagnóstico jamais interrompe o fluxo de atualização.
+    """
+    stamp = datetime_now_iso()
+    linha = (
+        f"[{stamp}] etapa={etapa} versao={versao} "
+        f"app={get_local_version()}\n"
+        f"  mensagem: {mensagem}\n"
+    )
+    if health_check:
+        linha += f"  health_check: {health_check}\n"
+    if rollback:
+        linha += f"  rollback: {rollback}\n"
+    try:
+        caminho = Path(obter_caminho_dados("update_diagnostics.log"))
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        with caminho.open("a", encoding="utf-8") as fh:
+            fh.write(linha + ("-" * 60) + "\n")
+    except Exception:
+        pass
 
 
 def _manifest_urls(repo: str, manifest_name: str = MANIFEST_NAMES[0]) -> list[str]:
@@ -433,6 +508,83 @@ class Updater:
         self._check_running = False
         self._release_pendente = None
         self.last_error = ""
+        self._progresso = None
+
+    # ------------------------------------------------------------------
+    # Janela de progresso (Etapa 4C)
+    # ------------------------------------------------------------------
+    def _abrir_progresso(self, versao_destino: str):
+        """Abre (uma única vez) a janela de progresso e devolve a instância.
+
+        Thread-safe (Etapa 4D): ``_stage_release`` pode rodar na thread de
+        fundo do download automático OU na thread da interface (encerramento
+        seguro). Criar um widget Tk só é seguro na thread da interface:
+          * já na thread principal -> cria diretamente;
+          * em thread de fundo -> agenda via ``_run_on_ui`` e aguarda um
+            ``Event`` com tempo limite (o mainloop processa o ``after``).
+
+        Sem interface Tk (headless/testes) ou se a criação falhar/esgotar o
+        tempo, devolve ``None`` e o download/validação seguem normalmente,
+        apenas sem UI - nunca bloqueia a atualização.
+        """
+        if self._progresso is not None and not self._progresso.fechada:
+            return self._progresso
+        if self.parent is None:
+            return None
+
+        def _criar():
+            try:
+                return JanelaProgressoAtualizacao(
+                    self.parent,
+                    versao_origem=get_local_version(),
+                    versao_destino=versao_destino,
+                )
+            except Exception:
+                return None
+
+        if threading.current_thread() is threading.main_thread():
+            self._progresso = _criar()
+            return self._progresso
+
+        holder = {}
+        pronto = threading.Event()
+
+        def _criar_na_ui():
+            holder["janela"] = _criar()
+            pronto.set()
+
+        try:
+            self._run_on_ui(_criar_na_ui)
+        except Exception:
+            self._progresso = None
+            return None
+        pronto.wait(timeout=5.0)
+        self._progresso = holder.get("janela")
+        return self._progresso
+
+    def _fechar_progresso(self):
+        if self._progresso is not None:
+            try:
+                self._progresso.fechar()
+            except Exception:
+                pass
+            self._progresso = None
+
+    def _callback_progresso(self, janela):
+        """Cria o callback de bytes para ``_download_asset``.
+
+        Roda na thread de download e só delega à janela, que agenda a
+        atualização dos widgets na thread da interface. Nunca toca em widgets
+        diretamente.
+        """
+        def _cb(recebido, total):
+            try:
+                if janela is None or janela.fechada:
+                    return
+                janela.atualizar_bytes(recebido, total)
+            except Exception:
+                pass
+        return _cb
 
     def _gate(self) -> tuple[bool, str]:
         if callable(self.gate_provider):
@@ -482,12 +634,34 @@ class Updater:
         except Exception as exc:
             self.last_error = str(exc)
             _set_state(UpdateState.FAILED, error=str(exc))
+            _log_diagnostico_atualizacao("checagem_falhou", "", str(exc))
             return None
         if release is None or not release.auto_update:
+            # Transição terminal coerente (correção 1.0.22): nenhum retorno
+            # antecipado deixa CHECKING gravado. Sem atualização -> AVAILABLE
+            # sem versão pendente (estado "ocioso" que a UI já entende).
+            _set_state(UpdateState.AVAILABLE, version="", error="")
             return None
         if compare_versions(release.version, get_local_version()) <= 0:
+            _set_state(UpdateState.AVAILABLE, version="", error="")
             return None
         if considerar_adiamento and self._should_defer(release.version):
+            # Adiamento do usuário: grava DEFERRED (não CHECKING abandonado) e
+            # preserva os campos da release para _release_pendente_atual().
+            _set_state(
+                UpdateState.DEFERRED,
+                version=release.version,
+                asset_url=release.asset_url,
+                asset_name=release.asset_name,
+                asset_type=release.asset_type,
+                size=release.size,
+                sha256=release.sha256,
+                key_id=release.key_id,
+                sequence=release.sequence,
+                issued_at=release.issued_at,
+                manifest=release.manifest,
+                error="",
+            )
             return None
         self._release_pendente = release
         _set_state(
@@ -570,6 +744,11 @@ class Updater:
             return False
         destino = UPDATE_ROOT / release.version / release.asset_name
         destino.parent.mkdir(parents=True, exist_ok=True)
+        janela = self._abrir_progresso(release.version)
+        if janela is not None:
+            janela.definir_estado("baixando")
+            if not release.size:
+                janela.indeterminado()
         _set_state(
             UpdateState.DOWNLOADING,
             version=release.version,
@@ -584,7 +763,9 @@ class Updater:
             error="",
         )
         try:
-            _download_asset(release, destino)
+            _download_asset(release, destino, progress=self._callback_progresso(janela))
+            if janela is not None:
+                janela.definir_estado("verificando")
             self._validate_asset_content(destino, release)
             job = destino.parent / "update-job.json"
             _atomic_json_write(
@@ -619,8 +800,14 @@ class Updater:
             destino.unlink(missing_ok=True)
             destino.with_suffix(destino.suffix + ".part").unlink(missing_ok=True)
             _set_state(UpdateState.FAILED, error=str(exc))
+            if janela is not None:
+                janela.falhar(str(exc))
             messagebox.showerror("Atualização", f"Falha ao preparar a atualização: {exc}", parent=self.parent)
             return False
+        finally:
+            # Fecha a janela de progresso em qualquer ramo (sucesso ou falha);
+            # a confirmação final continua sendo feita por messagebox.
+            self._fechar_progresso()
 
     def _show_update_dialog(self, release: ReleaseInfo, remind_hours: int = 24) -> None:
         if self.parent is not None and hasattr(self.parent, "winfo_exists"):
@@ -673,7 +860,12 @@ class Updater:
         ``FRS_Mercado_UpdateHelper.exe`` — primeiro na pasta do executável real
         e depois em ``<dados>/updates/bin``. Nunca procura o ``updater_helper.py``
         de código-fonte, pois esse arquivo não é embarcado em builds.
+
+        1.0.22: valida que o helper escolhido partilhará a MESMA raiz de dados
+        do aplicativo (via ``--data-root``). A validação e o caminho escolhido
+        são registrados em ``update_diagnostics.log`` da raiz real.
         """
+        raiz_app = Path(obter_caminho_dados()).resolve()
         if e_compilado():
             candidatos = []
             executavel = executavel_atual()
@@ -684,7 +876,19 @@ class Updater:
             )
             for helper in candidatos:
                 if helper.is_file():
-                    return [str(helper)]
+                    escolhido = str(helper.resolve())
+                    # O helper precisa cair na mesma raiz. Um helper que vivesse
+                    # fora de um contexto resolvível seria rejeitado.
+                    _log_diagnostico_atualizacao(
+                        "helper_escolhido",
+                        get_local_version(),
+                        f"helper={escolhido}; raiz_app={raiz_app}; "
+                        f"raiz_transmitida={raiz_app}",
+                    )
+                    return [escolhido]
+            _log_diagnostico_atualizacao(
+                "helper_ausente", get_local_version(), f"candidatos={[str(c) for c in candidatos]}"
+            )
             return None
         helper = Path(__file__).resolve().with_name("updater_helper.py")
         return [sys.executable, str(helper)] if helper.is_file() else None
@@ -694,6 +898,9 @@ class Updater:
         if not command:
             self.last_error = "Helper de atualização não está disponível neste build."
             _set_state(UpdateState.FAILED, error=self.last_error)
+            _log_diagnostico_atualizacao(
+                "launch_helper_falhou", get_local_version(), self.last_error
+            )
             messagebox.showerror(
                 "Atualização",
                 "O componente seguro de atualização não está disponível. O sistema atual continuará funcionando.",
@@ -703,43 +910,60 @@ class Updater:
         payload = json.loads(job_path.read_text(encoding="utf-8"))
         payload["parent_pid"] = os.getpid()
         _atomic_json_write(job_path, payload)
+        # Raiz de dados canônica do app, transmitida de forma explícita ao helper
+        # para eliminar qualquer heurística baseada no caminho do executável.
+        raiz_app = str(Path(obter_caminho_dados()).resolve())
         flags = 0
         if os.name == "nt":
             flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         try:
             subprocess.Popen(
-                [*command, "--job", str(job_path)],
+                [*command, "--job", str(job_path), "--data-root", raiz_app],
                 cwd=str(Path(command[-1]).resolve().parent),
                 close_fds=True,
                 creationflags=flags,
+                env={**os.environ, "FRS_MERCADO_DATA_ROOT": raiz_app},
             )
             _set_state(UpdateState.WAITING_FOR_EXIT, job_path=str(job_path), error="")
+            _log_diagnostico_atualizacao(
+                "launch_helper",
+                str(payload.get("release", {}).get("version", "")),
+                f"helper={command[-1]}; raiz_transmitida={raiz_app}; job={job_path}",
+            )
             return True
         except Exception as exc:
             self.last_error = str(exc)
             _set_state(UpdateState.FAILED, error=str(exc))
+            _log_diagnostico_atualizacao("launch_helper_falhou", "", str(exc))
             return False
 
     def preparar_instalacao_no_encerramento(self) -> bool:
         release = self._release_pendente_atual()
         if release is None:
             return False
+        # Gate operacional ANTES de qualquer promessa de fechamento: se houver
+        # caixa aberto, carrinho, pagamento, backup ou operação fiscal, não
+        # força o encerramento — adia e informa o motivo.
+        permitido, motivo = self._gate()
+        if not permitido:
+            messagebox.showwarning(
+                "Atualização adiada",
+                f"Não é possível encerrar e atualizar agora: {motivo}\n\n"
+                "Conclua a operação em andamento e tente encerrar novamente.",
+                parent=self.parent,
+            )
+            return None
+        # Aviso explícito de fechamento e reabertura. Reflete o comportamento
+        # real (helper aguarda a saída, faz health-check e reabre no login) e
+        # NÃO promete reabertura incondicional.
         confirmado = messagebox.askyesno(
-            "Atualização pendente",
-            f"A versão {release.version} está disponível. Deseja instalar agora ao encerrar?",
+            "Atualização ao encerrar",
+            mensagem_fechamento_reabertura(release.version) + "\n\nDeseja continuar?",
             parent=self.parent,
         )
         if not confirmado:
             self._save_defer(release, 24)
             return False
-        permitido, motivo = self._gate()
-        if not permitido:
-            messagebox.showwarning(
-                "Atualização adiada",
-                f"Não é possível encerrar e atualizar agora: {motivo}",
-                parent=self.parent,
-            )
-            return None
         estado = read_update_state()
         job_path = Path(str(estado.get("job_path") or ""))
         staged_path = Path(str(estado.get("staged_path") or ""))
