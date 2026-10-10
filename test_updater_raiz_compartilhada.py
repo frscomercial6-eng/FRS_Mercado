@@ -194,16 +194,38 @@ class TestMaquinaDeEstados(BaseRaiz):
         self.assertEqual(self._estado(), secure.UpdateState.AVAILABLE.value)
 
     def test_release_igual_a_local_nao_fica_checking(self):
+        # Versão igual JÁ INSTALADA (sequence <= installed_sequence): não vira
+        # atualização e transiciona para estado terminal (AVAILABLE), nunca
+        # fica preso em CHECKING. É o caso de "cliente já atualizado".
         u = self._updater()
         release = secure.ReleaseInfo(
             version="1.0.22", asset_name="a.zip", asset_url="http://x/a.zip",
             sequence=3, issued_at="2026-01-01T00:00:00Z", size=1,
             sha256="ab", key_id="k", manifest={})
+        secure.write_update_state({"state": secure.UpdateState.COMMITTED.value,
+                                   "version": "1.0.22", "installed_sequence": 3})
         with patch.object(secure, "fetch_update_manifest", return_value=release), \
              patch.object(secure, "compare_versions", return_value=0), \
              patch.object(secure, "get_local_version", return_value="1.0.22"):
             self.assertIsNone(u.checar_atualizacao("owner/repo"))
         self.assertNotEqual(self._estado(), secure.UpdateState.CHECKING.value)
+
+    def test_release_igual_com_sequencia_maior_e_revisao_disponivel(self):
+        # Versão igual com sequence MAIOR que a instalada: aceita como revisão
+        # (gatilho por sequência) e sai de CHECKING com release pendente.
+        u = self._updater()
+        release = secure.ReleaseInfo(
+            version="1.0.22", asset_name="a.zip", asset_url="http://x/a.zip",
+            sequence=4, issued_at="2026-01-01T00:00:00Z", size=1,
+            sha256="ab", key_id="k", manifest={})
+        secure.write_update_state({"state": secure.UpdateState.COMMITTED.value,
+                                   "version": "1.0.22", "installed_sequence": 3})
+        with patch.object(secure, "fetch_update_manifest", return_value=release), \
+             patch.object(secure, "compare_versions", return_value=0), \
+             patch.object(secure, "get_local_version", return_value="1.0.22"):
+            self.assertIsNotNone(u.checar_atualizacao("owner/repo"))
+        self.assertNotEqual(self._estado(), secure.UpdateState.CHECKING.value)
+
 
     def test_adiamento_grava_deferred_e_permite_released_pendente(self):
         u = self._updater()

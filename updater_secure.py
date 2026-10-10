@@ -228,6 +228,21 @@ def _set_state(state: UpdateState, **values) -> dict:
     return payload
 
 
+def read_installed_sequence() -> int:
+    """Sequência da última atualização efetivamente COMMITTED (instalada).
+
+    Diferente de ``read_update_state()["sequence"]`` (última sequência apenas
+    OBSERVADA em checagem/AVAILABLE), este valor só avança quando o helper
+    conclui a instalação com sucesso. É o parâmetro que permite aceitar uma
+    revisão de MESMA versão com sequência maior sem repetir atualização
+    indevidamente.
+    """
+    try:
+        return int(read_update_state().get("installed_sequence") or 0)
+    except Exception:
+        return 0
+
+
 def _log_diagnostico_atualizacao(etapa: str, versao: str, mensagem: str,
                                  health_check: str = "", rollback: str = "") -> None:
     """Registra localmente um diagnóstico de atualização (metadados apenas).
@@ -642,9 +657,21 @@ class Updater:
             # sem versão pendente (estado "ocioso" que a UI já entende).
             _set_state(UpdateState.AVAILABLE, version="", error="")
             return None
-        if compare_versions(release.version, get_local_version()) <= 0:
+        local_version = get_local_version()
+        comparacao = compare_versions(release.version, local_version)
+        if comparacao < 0:
+            # Downgrade de número de versão: sempre recusado.
             _set_state(UpdateState.AVAILABLE, version="", error="")
             return None
+        if comparacao == 0:
+            # Mesma versão: só aceita uma REVISÃO com sequência estritamente
+            # maior que a já instalada (gatilho por sequência, 1.0.22). A
+            # validação de assinatura/Integridade/anti-downgrade do manifesto
+            # já ocorreu em verify_manifest; aqui evita-se apenas repetir a
+            # mesma revisão ou reoferecer uma já aplicada.
+            if int(release.sequence or 0) <= read_installed_sequence():
+                _set_state(UpdateState.AVAILABLE, version="", error="")
+                return None
         if considerar_adiamento and self._should_defer(release.version):
             # Adiamento do usuário: grava DEFERRED (não CHECKING abandonado) e
             # preserva os campos da release para _release_pendente_atual().

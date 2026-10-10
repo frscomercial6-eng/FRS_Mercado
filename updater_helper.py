@@ -490,7 +490,12 @@ def run_job(job_path: Path, reopen: bool = True) -> int:
             else:
                 executable, traditional_backup = _install_traditional(release, asset, app_root)
             _assert_protected_data_unchanged(protected_before, data_dir)
-            _set_state(UpdateState.COMMITTED, version=release.get("version"), error="")
+            _set_state(
+                UpdateState.COMMITTED,
+                version=release.get("version"),
+                installed_sequence=int(release.get("sequence") or 0),
+                error="",
+            )
             _cleanup_job(validated_job, app_root, data_dir)
             shutil.rmtree(data_backup, ignore_errors=True)
             if traditional_backup is not None:
