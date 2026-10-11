@@ -33,6 +33,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from database_manager import get_db_connection
 from licensing import LicenseService
+from licensing import chave_curta, formats
 from licensing.storage import LicenseStorage
 from modulo_config import carregar_configuracoes, salvar_configuracoes
 
@@ -43,6 +44,57 @@ TRIAL_DIAS = 30
 FRS_ATIVACAO_2026 = "FRS_ATIVACAO_2026"
 PREFIXO_LEGADO = "LICENCA_FRS:"
 PADRAO_CHAVE_ATIVACAO = re.compile(r"^FRS-(\d{8})-([A-F0-9]{12})$")
+
+# Ruídos de area de transferência que precedem o texto colado na tela de
+# ativação. O Notepad, o Excel e o Word gravam UTF-8/UTF-16 com BOM, e a
+# Internet/formatadores podem envolver o texto em aspas tipográficas. Sem esta
+# normalização o envelope assinado era recusado como "Formato inválido",
+# embora a licença estivesse correta.
+_PREFIXOS_NAO_LIDOS = ("\ufeff", "\ufffe")
+_ASPAS_TIPOGRAFICAS = {
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+}
+
+
+def _decodificar_chave_curta(texto: str) -> str:
+    """Chave curta de ativação -> envelope JSON assinado (canônico).
+
+    Recodifica no formato EXATO que o `LicenseVerifier` já validava. A
+    assinatura NÃO é recalculada nem reescrita aqui: ela veio dentro da
+    chave, assinada pela FRS. Só o transporte muda.
+    """
+    return formats.encode_envelope(chave_curta.ler_chave_ativacao(texto))
+
+
+def normalizar_texto_ativacao(texto: str) -> str:
+    """Remove BOM, aspas tipográficas e espaços em volta do texto colado.
+
+    Não altera o conteúdo do envelope: apenas remove caracteres que não fazem
+    parte da licença. A validação continua sendo a Ed25519 oficial; a chave
+    legada ``FRS-AAAAMMDD-XXXXXXXXXXXX`` segue apenas como interface
+    histórica, encaminhada ao mesmo validador.
+    """
+    resultado = str(texto or "")
+    for _ in range(4):
+        anterior = resultado
+        for prefixo in _PREFIXOS_NAO_LIDOS:
+            if resultado.startswith(prefixo):
+                resultado = resultado[len(prefixo):]
+        resultado = resultado.strip()
+        if resultado == anterior:
+            break
+    # Aspas tipográficas abraçantes/cnjuntantes viram aspas simples antes de
+    # qualquer decisão de formato; um par envolvendo o texto também é removido.
+    resultado = resultado.replace("\u201d", '"').replace("\u201c", '"')
+    resultado = resultado.replace("\u201f", '"').replace("\u201e", '"')
+    resultado = resultado.replace("\u2019", "'").replace("\u2018", "'")
+    resultado = resultado.replace("\u201b", "'").replace("\u201a", "'")
+    if len(resultado) >= 2 and resultado[0] == '"' and resultado[-1] == '"':
+        resultado = resultado[1:-1]
+    elif resultado.startswith('"'):
+        resultado = resultado[1:]
+    return resultado.strip()
 
 # Operações comerciais bloqueadas quando a licença está vencida. Exportação,
 # relatórios, usuários, configurações e a própria ativação permanecem liberados
@@ -316,6 +368,44 @@ class LicenseManager:
         return _status_from_expiration(expira_em, is_trial=(modo_licenca == "trial"))
 
     # ------------------------------------------------------------------
+    # Chave curta (Item 10) — camada de transporte sobre a segurança atual
+    # ------------------------------------------------------------------
+    def chave_instalacao_curta(self) -> str:
+        """Gera a CHAVE CURTA DE INSTALAÇÃO que o cliente envia à FRS.
+
+        Ela embrulha o challenge oficial (`FRS-MERCADO-CHALLENGE`), que já
+        contém `installation_id` e o `machine_binding`. O cliente não precisa
+        saber disso: ele apenas copia e envia a chave.
+
+        Nenhuma segredo é gerado aqui — a chave é um PEDIDO de licença, não
+        uma concessão. Ela não habilita nada sozinha.
+        """
+        try:
+            challenge = self.service.create_challenge()
+        except Exception:
+            # Sem identidade de máquina (fora do Windows, por exemplo), ainda
+            # entregamos uma chave: a FRS confirma o que falta na emissão.
+            challenge = {}
+        try:
+            return chave_curta.gerar_chave_instalacao(challenge)
+        except chave_curta.ErroChaveCurta:
+            return ""
+
+    @staticmethod
+    def _e_chave_curta_ativacao(texto: str) -> bool:
+        return chave_curta.parece_chave_curta(texto)
+
+    def _envelope_da_chave_curta(self, texto: str) -> str:
+        """Chave curta de ativação -> envelope JSON assinado.
+
+        Recodifica no formato canônico EXATO que o `LicenseVerifier` já
+        valida hoje. A assinatura não é recalculada nem reescrita aqui: ela
+        veio dentro da chave, assinada pela FRS.
+        """
+        envelope = chave_curta.ler_chave_ativacao(texto)
+        return formats.encode_envelope(envelope)
+
+    # ------------------------------------------------------------------
     # Ativação (fluxo histórico comprovado)
     # ------------------------------------------------------------------
     def identificador_ativacao(self) -> str:
@@ -343,13 +433,23 @@ class LicenseManager:
     def validar_chave(self, chave: str):
         """Valida a chave digitada sem persistir.
 
-        Retorna ``(ok, mensagem, data_expiracao)``. Aceita a chave do fluxo
-        histórico (``FRS-AAAAMMDD-XXXXXXXXXXXX``) e, quando o texto digitado for
-        um envelope assinado (Stage 1), a licença Ed25519 correspondente.
+        Retorna ``(ok, mensagem, data_expiracao)``. Aceita, na ordem:
+
+        - a **chave curta de ativação** (`FRS-A-...`, Item 10);
+        - o envelope assinado (Stage 1, já existente);
+        - a chave histórica ``FRS-AAAAMMDD-XXXXXXXXXXXX``.
         """
-        texto = str(chave or "").strip()
+        texto = normalizar_texto_ativacao(chave)
         if not texto:
             return False, "Informe a chave de ativação.", None
+
+        # Item 10: chave curta vira envelope assinado antes de qualquer
+        # verificação. A segurança é a MESMA — só muda o transporte.
+        if chave_curta.parece_chave_curta(texto):
+            try:
+                texto = _decodificar_chave_curta(texto)
+            except chave_curta.ErroChaveCurta as exc:
+                return False, exc.mensagem, None
 
         if self._e_documento_assinado(texto):
             try:
@@ -409,8 +509,19 @@ class LicenseManager:
         """Ativa a chave digitada e persiste o resultado.
 
         Retorna ``(ok, mensagem, status)``.
+
+        Aceita a chave curta de ativação (`FRS-A-...`), o envelope assinado e
+        a chave histórica. Nos três casos a decisão de validade é a mesma: a
+        chave curta é decodificada antes e entregue ao verificador já existente.
         """
-        texto = str(chave or "").strip()
+        texto = normalizar_texto_ativacao(chave)
+
+        # Item 10: chave curta -> envelope assinado, antes de qualquer coisa.
+        if chave_curta.parece_chave_curta(texto):
+            try:
+                texto = _decodificar_chave_curta(texto)
+            except chave_curta.ErroChaveCurta as exc:
+                return False, exc.mensagem, None
 
         if self._e_documento_assinado(texto):
             try:

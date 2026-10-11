@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 import subprocess
 import sys
@@ -904,24 +905,178 @@ class FiscalManager:
         )
 
         return "\n".join(linhas)
+    def gerar_comando_cancelamento(self, chave_acesso, justificativa, protocolo=""):
+        """Monta o comando de cancelamento de NFC-e para o ACBrMonitor.
+
+        O cancelamento de NFC-e e feito pelo ACBr junto a SEFAZ. Aqui so
+        montamos o comando - quem transmite e o ACBr.
+
+        DEPENDENCIA EXTERNA (nao resolvivel sem homologacao):
+        a assinatura exata de `NFE.Cancelar` varia entre versoes do ACBr.
+        O comando abaixo segue o mesmo estilo `NFE.*` ja usado na emissao
+        (gerar_comando_nfce). Antes de usar em producao, conferir a
+        assinatura na documentacao da versao instalada do ACBr.
+
+        A justificativa e OBRIGATORIA por regra fiscal: sem texto, nao ha
+        cancelamento, e o documento continua autorizado.
+        """
+        chave = str(chave_acesso or "").strip()
+        texto = str(justificativa or "").strip()
+        if not chave:
+            raise ValueError("Cancelamento exige a chave de acesso do documento.")
+        if not texto:
+            raise ValueError("Cancelamento exige justificativa.")
+
+        # Aspas e quebras de linha na justificativa quebrariam o comando.
+        seguro = texto.replace('"', "'").replace("\r", " ").replace("\n", " ")
+
+        linhas = [
+            "NFE.LimparLista",
+            'NFE.ConsultarNFe("' + chave + '")',
+            f'NFE.Cancelar("{chave}","{seguro}")',
+        ]
+        if protocolo:
+            linhas.insert(1, f'NFE.SetProtocolo("{chave}","{str(protocolo).strip()}")')
+        return "\n".join(linhas)
+
+    def marcar_contingencia_comando(self, justificativa, uf=""):
+        """Comando de emissao em contingencia para o ACBr.
+
+        A contingencia da NFC-e e responsabilidade do ACBr (o FRS nao assina
+        nem transmite). Este metodo apenas monta o comando no mesmo estilo
+        TXT dos demais.
+
+        DEPENDENCIA EXTERNA: o comando de contingencia e a autorizacao de
+        contingencia variam por UF, por ambiente e por versao do ACBr, e
+        exigem certificado do CLIENTE. Nao ha valor fixo valido para todas
+        as UF, por isso nada e inventado aqui: o comando fica parametrizado
+        por `justificativa` e `uf`, e a liberacao real depende de
+        homologacao.
+        """
+        texto = str(justificativa or "").strip()
+        if not texto:
+            raise ValueError("Contingencia exige justificativa.")
+        seguro = texto.replace('"', "'").replace("\r", " ").replace("\n", " ")
+        linhas = ["NFE.LimparLista", f'NFE.Contingencia("{seguro}")']
+        if uf:
+            linhas.insert(1, f'NFE.SetCampo("Contingencia.UF={str(uf).strip().upper()}")')
+        return "\n".join(linhas)
+
+    @staticmethod
+    def extrair_dados_documento(retorno_txt):
+        """Extrai chave e protocolo do texto de RETORNO.TXT do ACBr.
+
+        A chave de acesso NF-e tem 44 digitos; o protocolo de autorizacao, 15
+        digitos comecados por 1. Buscamos por esses formatos estruturados
+        do padrao fiscal - nao por palavra solta no texto.
+
+        A chave so e aceita quando o DV (ultimo digito, modulo 11) confere.
+        Devolve sempre as duas chaves; vazio significa "o retorno nao trouxe".
+        """
+        texto = str(retorno_txt or "")
+
+        def dv_confere(bloco):
+            soma = 0
+            peso = 2
+            for digito in bloco[:43]:
+                soma += int(digito) * peso
+                peso += 1
+                if peso > 9:
+                    peso = 2
+            return str((soma % 11) % 10) == bloco[43]
+
+        # 1) Token contiguo de 44 digitos, como o ACBr escreve a chave.
+        #    Preferimos este caminho: varrer a linha inteira acha falsos
+        #    positivos remontando CNPJ + serie + numero colados.
+        chave = ""
+        for token in re.split(r"[^0-9A-Za-z]+", texto):
+            digitos = re.sub(r"\D", "", token)
+            if len(digitos) == 44 and dv_confere(digitos):
+                chave = digitos
+                break
+
+        # 2) Sem token exato, tenta a chave colada no meio de outros digitos.
+        if not chave:
+            digitos = re.sub(r"\D", "", texto)
+            for i in range(0, max(0, len(digitos) - 43)):
+                bloco = digitos[i:i + 44]
+                if len(bloco) != 44:
+                    break
+                if dv_confere(bloco):
+                    chave = bloco
+                    break
+
+        # Protocolo: token de 15 digitos comecado por 1.
+        protocolo = ""
+        for token in re.split(r"[^0-9A-Za-z]+", texto):
+            digitos = re.sub(r"\D", "", token)
+            if len(digitos) == 15 and digitos.startswith("1"):
+                protocolo = digitos
+                break
+        if not protocolo:
+            digitos = re.sub(r"\D", "", texto)
+            for i in range(0, max(0, len(digitos) - 14)):
+                bloco = digitos[i:i + 15]
+                if len(bloco) == 15 and bloco.startswith("1"):
+                    protocolo = bloco
+                    break
+
+        return {"chave_acesso": chave, "protocolo": protocolo}
 
     def interpretar_retorno(self, retorno_txt):
         retorno = str(retorno_txt or "").strip()
         if not retorno:
             return {"sucesso": False, "mensagem": "Sem retorno do ACBrMonitor.", "retorno": retorno}
 
+        # Os dados estruturados do documento sao lidos primeiro, porque vem
+        # do padrao fiscal e nao de palpite de texto.
+        dados = self.extrair_dados_documento(retorno)
+
         lower = retorno.lower()
-        sucesso_tokens = ["autorizado o uso", "autorizada", "ok", "100"]
-        erro_tokens = ["erro", "rejeicao", "falha", "exception", "deneg", "nao autorizado"]
+        # Erro tem PRECEDENCIA sobre sucesso. Antes, quem continha "erro" e
+        # "autorizada" no mesmo texto era lido como sucesso.
+        erro_tokens = [
+            "erro", "rejeicao", "rejeitada", "falha", "exception",
+            "deneg", "denegado", "nao autorizado", "não autorizado",
+            "nao Autorizado", "invalid", "cancelad",
+        ]
+        sucesso_tokens = [
+            "autorizado o uso", "autorizado o uso da nf-e",
+            "autorizada com sucesso", "autorizado com sucesso",
+            "sucesso", "protocolo de autorizacao",
+        ]
 
         encontrou_erro = any(token in lower for token in erro_tokens)
         encontrou_sucesso = any(token in lower for token in sucesso_tokens)
 
-        if encontrou_erro and not encontrou_sucesso:
-            primeira_linha = retorno.splitlines()[0].strip() if retorno.splitlines() else retorno
-            return {"sucesso": False, "mensagem": primeira_linha, "retorno": retorno}
+        # "100" e "ok" foram REMOVIDOS: apareciam em qualquer numero do
+        # retorno (CNPJ, protocolo, horario) e davam falso sucesso.
+        if encontrou_erro:
+            primeira = retorno.splitlines()[0].strip() if retorno.splitlines() else retorno
+            return {
+                "sucesso": False,
+                "mensagem": primeira,
+                "retorno": retorno,
+                **dados,
+            }
 
-        return {"sucesso": True, "mensagem": "Emissao processada pelo ACBr.", "retorno": retorno}
+        if encontrou_sucesso or dados["chave_acesso"]:
+            return {
+                "sucesso": True,
+                "mensagem": "Emissao processada pelo ACBr.",
+                "retorno": retorno,
+                **dados,
+            }
+
+        # Sem marcador e sem chave: nao afirmar sucesso. O ACBr pode ter
+        # emitido texto vazio ou um aviso que nao sabemos ler.
+        return {
+            "sucesso": False,
+            "mensagem": "Retorno do ACBr nao reconhecido; documento nao confirmado.",
+            "retorno": retorno,
+            "reconhecido": False,
+            **dados,
+        }
 
     def iniciar_acbr(self):
         """Verifica se o ACBrMonitor esta ativo nos processos do Windows."""
@@ -1106,9 +1261,28 @@ class FiscalManager:
                 chave_nfe = str(node.attrib.get("Id", "")).replace("NFe", "")
                 break
 
+        # QR Code da NFC-e: fica em <infNFeSupl><qrCode>, grupo opcional do
+        # padrao NF-e/NFC-e. Nao inventamos o valor: lemos o texto do XML.
+        # Sem infNFeSupl (ou sem qrCode) devolvemos string vazia, e quem
+        # imprime decide o que fazer - nunca fabricamos um QR Code.
+        qr_code = ""
+        for node in raiz.iter():
+            if _tag_local(node.tag) == "qrCode":
+                qr_code = str(node.text or "").strip()
+                break
+
+        # Protocolo de autorizacao: <protNFe><infProt><nProt>.
+        protocolo = ""
+        for node in raiz.iter():
+            if _tag_local(node.tag) == "nProt":
+                protocolo = str(node.text or "").strip()
+                break
+
         return {
             "arquivo_origem": str(caminho),
             "chave_nfe": chave_nfe,
+            "qr_code": qr_code,
+            "protocolo": protocolo,
             "itens": itens,
             "total_itens": len(itens),
             "total_impostos": round(total_impostos, 2),

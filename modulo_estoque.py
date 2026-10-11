@@ -2057,19 +2057,83 @@ class ModuloEstoque(ctk.CTkToplevel):
         self.lbl_preview_img.configure(text="Imagem API", text_color="green")
 
     def baixar_imagem(self, url, barcode):
-        """Faz o download da imagem e salva na pasta de dados do usuário."""
+        """Baixa a imagem do produto e a normaliza para JPEG na pasta de dados.
+
+        O arquivo final e SEMPRE `<barcode>.jpg`: e o padrao deterministico ja
+        usado pelo PDV (`_salvar_imagem_produto_por_ean`) e o unico lido por
+        `buscar_imagem_produto`. A extensao da URL nao nomeia o arquivo --
+        antes `url.split(".")[-1]` quebrava com query string (ex.: `.jpg?width=200`)
+        e com URL sem extensao (o caminho inteiro virava "extensao").
+
+        A URL e lida com `urlparse` apenas para reconhecer a extensao
+        declarada. A gravacao depende da validacao real dos bytes pelo PIL:
+        HTML, JSON ou pagina de erro nunca viram um `.jpg`. Content-Type sozinho
+        nao e confiavel (servidores o enviam como `application/octet-stream`),
+        enquanto o PIL confere a assinatura real do arquivo.
+
+        Falha alguma devolve "" e NAO interrompe o cadastro.
+        """
+        import io
+        from urllib.parse import urlparse
+
         import requests
+        from PIL import Image, UnidentifiedImageError
+
+        url = str(url or "").strip()
+        barcode = str(barcode or "").strip()
+        if not url or not barcode:
+            return ""
+
+        # Extensao DECLARADA pela URL (query string e fragmento ignorados).
+        # Apenas informativa: a decisao de gravar depende dos bytes.
+        try:
+            declarada = os.path.splitext(urlparse(url).path)[1].lower().lstrip(".")
+        except Exception:
+            declarada = ""
+        if declarada and declarada not in ("jpg", "jpeg", "png"):
+            declarada = f"{declarada} (nao suportada; validando pelo conteudo)"
 
         try:
-            ext = url.split(".")[-1]
-            nome_img = f"{barcode}.{ext}"
-            caminho_completo = os.path.join(self.pasta_imagens, nome_img)
-            
-            img_data = requests.get(url, timeout=8).content
-            with open(caminho_completo, 'wb') as handler:
-                handler.write(img_data)
-            return caminho_completo
-        except:
+            resposta = requests.get(url, timeout=8)
+            resposta.raise_for_status()
+            conteudo = resposta.content
+
+            buffer = io.BytesIO()
+            with Image.open(io.BytesIO(conteudo)) as img:
+                if img.mode in ("RGB", "L"):
+                    img.save(buffer, format="JPEG", quality=92)
+                else:
+                    convertida = img.convert("RGB")
+                    try:
+                        convertida.save(buffer, format="JPEG", quality=92)
+                    finally:
+                        convertida.close()
+            jpeg = buffer.getvalue()
+
+            os.makedirs(self.pasta_imagens, exist_ok=True)
+            destino = os.path.join(self.pasta_imagens, f"{barcode}.jpg")
+            with open(destino, "wb") as handler:
+                handler.write(jpeg)
+            return destino
+        except (
+            requests.RequestException,
+            UnidentifiedImageError,
+            OSError,
+            ValueError,
+            SyntaxError,
+        ) as exc:
+            try:
+                registrar_log(
+                    None,
+                    "Estoque Imagem",
+                    "Aviso",
+                    f"Imagem nao baixada para {barcode} "
+                    f"(extensao declarada: {declarada or 'sem'}): {exc}",
+                )
+            except Exception:
+                # A rastreabilidade e acessoria: jamais pode desfazer a falha
+                # segura que permite ao cadastro seguir sem imagem.
+                pass
             return ""
 
     def salvar_produto(self):

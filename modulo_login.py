@@ -1,6 +1,8 @@
 import customtkinter as ctk
 import hashlib
 import os
+import queue
+import threading
 import webbrowser
 from datetime import datetime
 from tkinter import messagebox
@@ -21,6 +23,120 @@ COMPRAR_LICENCA_URL = "https://www.frssolutions.com.br/planos"
 
 
 _USUARIO_LOGADO = None
+
+
+def copiar_chave_instalacao_ui(janela_pai, rotulo_feedback=None):
+    """Copia a chave de instalação sem travar a interface.
+
+    Fluxo único e reutilizável por modulo_login e modulo_main (evita duas
+    implementações divergentes):
+
+      1. Gera a chave em uma thread secundária — o trabalho pesado (I/O e
+         hash de hardware) sai da thread da UI, mantendo a janela responsiva
+         e fechável.
+      2. Confirma o resultado REAL da cópia lendo a área de transferência de
+         volta (clipboard_get) antes de declarar sucesso.
+      3. Atualiza widgets SOMENTE na thread principal, via janela.after — a
+         thread secundária nunca toca em Tk (que não é thread-safe); ela
+         apenas aquece a geração da chave.
+      4. Exibe mensagem clara de sucesso apenas se a cópia foi confirmada;
+         em caso de falha, informa o problema e mostra a chave para cópia
+         manual, sem travar.
+
+    Não altera geração, assinatura, verificação, installation_id nem
+    machine_binding da licença — apenas apresenta o resultado de forma
+    responsiva e confiável.
+    """
+    resultado_q = queue.Queue()
+
+    def _trabalho():
+        # Roda fora da thread da UI: apenas lógica pura (sem Tk).
+        try:
+            chave = LicenseManager().chave_instalacao_curta()
+        except Exception as exc:
+            registrar_log(None, "Ativação de Licença", "Falha",
+                          f"Falha ao gerar chave: {exc}")
+            resultado_q.put(("erro_geracao", str(exc)))
+            return
+        if not chave:
+            resultado_q.put(("sem_chave", ""))
+            return
+        resultado_q.put(("chave", chave))
+
+    def _mostrar(texto, cor):
+        if rotulo_feedback is not None:
+            try:
+                rotulo_feedback.configure(text=texto, text_color=cor)
+            except Exception:
+                pass
+
+    def _processar():
+        estado, valor = resultado_q.get()
+        if estado == "erro_geracao":
+            _mostrar("", "#f1c40f")
+            messagebox.showerror(
+                "Chave da instalação",
+                "Não foi possível gerar a chave desta instalação.\n"
+                "Tente novamente; se persistir, contate o suporte.",
+                parent=janela_pai,
+            )
+            return
+        if estado == "sem_chave":
+            _mostrar("", "#f1c40f")
+            messagebox.showerror(
+                "Chave da instalação",
+                "Não foi possível identificar esta instalação.\n"
+                "Contate o suporte para regularizar.",
+                parent=janela_pai,
+            )
+            return
+
+        chave = valor
+        # Clipboard e widgets rodam na thread principal (aqui, via after).
+        copiou = False
+        try:
+            janela_pai.clipboard_clear()
+            janela_pai.clipboard_append(chave)
+            janela_pai.update()
+            try:
+                conteudo = janela_pai.clipboard_get()
+            except Exception:
+                conteudo = None
+            copiou = (conteudo == chave)
+        except Exception:
+            copiou = False
+
+        if copiou:
+            _mostrar("Chave copiada! Envie para o FRS pelo WhatsApp.",
+                     "#66ff99")
+            messagebox.showinfo(
+                "Chave da instalação",
+                "Chave copiada para a área de transferência.\n"
+                "Envie para o FRS pelo WhatsApp.",
+                parent=janela_pai,
+            )
+        else:
+            # Falha ao copiar: exibe a chave para cópia manual, sem travar.
+            _mostrar(chave, "#9ad1ff")
+            messagebox.showinfo(
+                "Chave da instalação",
+                "Não foi possível copiar automaticamente.\n"
+                "Copie a chave exibida e envie para o FRS pelo WhatsApp.",
+                parent=janela_pai,
+            )
+
+    # Feedback imediato de que o processamento começou (janela responsiva).
+    _mostrar("Gerando a chave desta instalação...", "#f1c40f")
+    threading.Thread(target=_trabalho, daemon=True).start()
+
+    def _aguardar():
+        if resultado_q.empty():
+            janela_pai.after(80, _aguardar)
+            return
+        _processar()
+
+    janela_pai.after(80, _aguardar)
+
 
 class ModuloLogin(ctk.CTkToplevel):
     def __init__(self, parent, callback_sucesso, auto_update_repo: str | None = None):
@@ -262,7 +378,8 @@ class ModuloLogin(ctk.CTkToplevel):
         ).pack(anchor="w", padx=34, pady=(12, 0))
 
         self.ent_codigo = ctk.CTkEntry(
-            self.frame_ativacao, width=420, placeholder_text="FRS-AAAAMMDD-XXXXXXXXXXXX",
+            self.frame_ativacao, width=420,
+            placeholder_text="Cole aqui a chave enviada pelo FRS",
         )
         self.ent_codigo.pack(padx=34, pady=(6, 10))
         self.ent_codigo.bind("<Return>", lambda _evento: self._validar_ativacao_chave())
@@ -273,11 +390,23 @@ class ModuloLogin(ctk.CTkToplevel):
         )
         self.lbl_feedback_ativacao.pack(anchor="w", padx=34)
 
+        # Item 10 — o passo 1 do cliente é enviar a chave da instalação.
         ctk.CTkLabel(
             self.frame_ativacao,
-            text="A chave é enviada pelo FRS após a contratação do plano.",
-            wraplength=440,
+            text="1º passo: copie a chave desta instalação e envie para o FRS pelo WhatsApp.",
+            wraplength=440, justify="left",
         ).pack(pady=(12, 4))
+        ctk.CTkButton(
+            self.frame_activacao,
+            text="COPIAR CHAVE DA INSTALAÇÃO", fg_color="#0f766e", hover_color="#115e59",
+            command=self._copiar_chave_instalacao,
+        ).pack(fill="x", padx=34, pady=4)
+
+        ctk.CTkLabel(
+            self.frame_ativacao,
+            text="2º passo: cole aqui a chave de ativação devolvida pelo FRS.",
+            wraplength=440, justify="left",
+        ).pack(pady=(10, 4))
 
         ctk.CTkButton(
             self.frame_ativacao,
@@ -299,6 +428,17 @@ class ModuloLogin(ctk.CTkToplevel):
             webbrowser.open(COMPRAR_LICENCA_URL, new=2)
         except Exception as exc:
             messagebox.showerror("Licença", f"Não foi possível abrir a página de planos: {exc}", parent=self)
+
+    def _copiar_chave_instalacao(self):
+        """[ Copiar chave da instalação ] — Item 10.
+
+        Delega ao fluxo único e responsivo `copiar_chave_instalacao_ui`
+        (geração em thread secundária, confirmação real do clipboard e
+        atualização de widgets só na thread principal). Não altera geração,
+        assinatura, verificação, installation_id nem machine_binding.
+        """
+        copiar_chave_instalacao_ui(self, self.lbl_feedback_ativacao)
+
 
     def _validar_ativacao_chave(self):
         """Valida a chave digitada pelo fluxo histórico e persiste a licença."""

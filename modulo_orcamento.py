@@ -11,6 +11,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfgen import canvas as pdf_canvas
 
 import modulo_financeiro
+import venda_fonte_unica
 from database_manager import get_db_connection, registrar_log
 from modulo_config import carregar_configuracoes
 from modulo_estoque import aplicar_baixa_fefo
@@ -511,15 +512,21 @@ class ModuloOrcamento(ctk.CTkToplevel):
                     )
 
                 valor_impostos = round(valor_impostos, 2)
-                valor_liquido = round(valor_bruto - valor_impostos, 2)
 
-                taxas = modulo_financeiro.obter_taxas()
-                taxa_aplicada = 0.0
-                if forma_pgto in ["DEBITO", "CREDITO"]:
-                    taxa_aplicada = float(taxas.get(forma_pgto, 0.0) or 0.0)
-                    valor_liquido = round(valor_liquido - (valor_bruto * (taxa_aplicada / 100.0)), 2)
-                if valor_liquido < 0:
-                    valor_liquido = 0.0
+                # ITEM 9 — FONTE ÚNICA: o cálculo de totais agora é o mesmo
+                # do PDV. Antes esta tela reimplementava a regra e ainda
+                # gravava a venda SEM `origem`, SEM status e SEM tributos.
+                totais = venda_fonte_unica.calcular_totais(
+                    valor_bruto, valor_impostos, forma_pgto,
+                    modulo_financeiro.obter_taxas(),
+                )
+                taxa_aplicada = totais["taxa_aplicada"]
+                # `valor_liquido` é reaproveitado adiante (UPDATE do orçamento
+                # e mensagem de confirmação), então continua disponível.
+                valor_liquido = totais["valor_liquido"]
+                # O orçamento não traz o rateio por tributo; fica 0.0 e a
+                # gravação usa a MESMA coluna do PDV, agora preenchida.
+                tributos_conversao = {tributo: 0.0 for tributo in venda_fonte_unica.TRIBUTOS}
 
                 valor_pago = self._ler_valor_pago()
                 if forma_pgto == "DINHEIRO" and valor_pago > 0 and valor_pago < valor_bruto:
@@ -560,93 +567,27 @@ class ModuloOrcamento(ctk.CTkToplevel):
                             f"A tabela {tabela} não possui caixa_operacao_id; conversão cancelada."
                         )
 
-                cursor.execute(
-                    """
-                    INSERT INTO vendas (
-                        valor_total, valor_impostos_retidos, valor_liquido,
-                        forma_pagamento, caixa_operacao_id
-                    )
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (valor_bruto, valor_impostos, valor_liquido, forma_pgto, caixa_operacao_id),
-                )
-                venda_id = cursor.lastrowid
-
-                cursor.execute(
-                    """
-                    INSERT INTO vendas_dia (
-                        valor_total, valor_impostos_retidos, valor_liquido,
-                        forma_pagamento, caixa_operacao_id
-                    )
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (valor_bruto, valor_impostos, valor_liquido, forma_pgto, caixa_operacao_id),
-                )
-
-                descricao_fin = f"Venda convertida de orçamento #{orcamento_id} ({forma_pgto})"
-                cursor.execute(
-                    """
-                    INSERT INTO financeiro (
-                        valor, tipo, valor_bruto, valor_impostos_retidos,
-                        taxa_aplicada, descricao, caixa_operacao_id
-                    )
-                    VALUES (?, 'Entrada', ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        valor_liquido,
-                        valor_bruto,
-                        valor_impostos,
-                        taxa_aplicada,
-                        descricao_fin,
-                        caixa_operacao_id,
+                # ITEM 9 — FONTE ÚNICA: a gravação de `vendas`, `vendas_dia` e
+                # `financeiro` é a mesma do PDV. Este bloco substitui ~90
+                # linhas duplicadas que gravavam um subconjunto de campos.
+                venda_id = venda_fonte_unica.gravar_venda(
+                    cursor,
+                    valor_total=totais["valor_total"],
+                    valor_impostos_retidos=totais["valor_impostos_retidos"],
+                    valor_liquido=totais["valor_liquido"],
+                    forma_pagamento=forma_pgto,
+                    caixa_operacao_id=caixa_operacao_id,
+                    origem="LOJA_FISICA",
+                    status_pedido="APROVADO",
+                    status_pagamento="PAGO",
+                    tributos=tributos_conversao,
+                    taxa_aplicada=taxa_aplicada,
+                    descricao_financeiro=(
+                        f"Venda convertida de orçamento #{orcamento_id} ({forma_pgto})"
                     ),
                 )
 
-                for item in itens_fiscais:
-                    produto_id = item.get("id")
-                    quantidade = round(float(item.get("quantidade", 0) or 0), 3)
-                    if not produto_id or quantidade <= 0:
-                        continue
-
-                    # Baixa FEFO: 1 linha por lote consumido, rateando o
-                    # subtotal proporcionalmente (última parcela fecha o total
-                    # do item). Sem lotes: caminho legado preservado.
-                    lotes_dist = aplicar_baixa_fefo(cursor, produto_id, quantidade)
-                    if lotes_dist:
-                        total_item = float(item.get("total", 0.0))
-                        restante_subtotal = total_item
-                        for idx, (lote_id, qtd_parcela) in enumerate(lotes_dist):
-                            if idx == len(lotes_dist) - 1:
-                                sub_parcela = round(restante_subtotal, 2)
-                            else:
-                                sub_parcela = round(total_item * (qtd_parcela / quantidade), 2)
-                                restante_subtotal -= sub_parcela
-                            cursor.execute(
-                                """
-                                INSERT INTO itens_venda (venda_id, produto_id, quantidade, subtotal, lote_id, quantidade_lote)
-                                VALUES (?, ?, ?, ?, ?, ?)
-                                """,
-                                (venda_id, int(produto_id), qtd_parcela, sub_parcela, lote_id, float(qtd_parcela)),
-                            )
-                    else:
-                        cursor.execute(
-                            """
-                            INSERT INTO itens_venda (venda_id, produto_id, quantidade, subtotal)
-                            VALUES (?, ?, ?, ?)
-                            """,
-                            (venda_id, int(produto_id), quantidade, float(item.get("total", 0.0))),
-                        )
-                        cursor.execute(
-                            """
-                            UPDATE produtos
-                            SET quantidade_atual = CASE
-                                WHEN quantidade_atual - ? < 0 THEN 0
-                                ELSE quantidade_atual - ?
-                            END
-                            WHERE id = ?
-                            """,
-                            (quantidade, quantidade, int(produto_id)),
-                        )
+                venda_fonte_unica.gravar_itens(cursor, venda_id, itens_fiscais)
 
                 cursor.execute(
                     """

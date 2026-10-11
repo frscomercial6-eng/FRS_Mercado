@@ -715,8 +715,12 @@ def exibir_configuracoes(master=None):
     ).grid(row=5, column=1, padx=10, pady=4, sticky="w")
     ctk.CTkLabel(
         frame_drive,
-        text="Baixar um backup não altera seus dados atuais.",
-        font=("Arial", 10), text_color="#aaaaaa",
+        text=(
+            "☁️ BACKUP OPERACIONAL (LEVE) — apenas BAIXA o arquivo do Drive.\n"
+            "Baixar um backup não altera seus dados atuais. Para aplicar esses "
+            "dados no sistema, use 'Restaurar do Google Drive' abaixo."
+        ),
+        font=("Arial", 10), text_color="#9aa5b1", wraplength=520, justify="left",
     ).grid(row=6, column=0, columnspan=2, padx=10, pady=(4, 8), sticky="w")
 
     atualizar_alerta_backup_drive()
@@ -759,6 +763,399 @@ def exibir_configuracoes(master=None):
         variable=largura_cupom_var,
         width=140,
     ).grid(row=18, column=1, padx=10, pady=6, sticky="w")
+
+    # --- L7: BACKUP / RESTAURAÇÃO (seção própria; a UI só confirma, o motor fica em backup_restore.py) ---
+    def _status_l7(mensagem, cor="#aaaaaa"):
+        status_label.configure(text=mensagem, text_color=cor)
+        janela_config.update_idletasks()
+
+    def _executar_restauracao_drive(item, aceitar_novos=False):
+        import backup_restore as restore
+
+        def _prog(mensagem):
+            _status_l7(f"Restauração do Drive: {mensagem}", "#f1c40f")
+
+        try:
+            resultado = restore.restaurar_do_drive(
+                item["backup_id"], confirmado=True,
+                aceitar_dados_mais_novos=aceitar_novos, ao_atualizar=_prog,
+            )
+        except restore.ErroRestauracao as erro:
+            mensagem = str(erro)
+            if "mais novos" in mensagem and not aceitar_novos:
+                if messagebox.askyesno(
+                    "Dados locais mais novos",
+                    mensagem + "\n\nSubstituir os dados locais mesmo assim?",
+                ):
+                    _executar_restauracao_drive(item, aceitar_novos=True)
+                    return
+                _status_l7("Restauração cancelada pelo usuário.", "#f1c40f")
+                return
+            messagebox.showerror("Restauração do Google Drive", mensagem)
+            _status_l7(f"Falha na restauração: {mensagem}", "#ff6666")
+            return
+        except Exception as erro:
+            messagebox.showerror("Restauração do Google Drive", str(erro))
+            _status_l7(f"Falha na restauração: {erro}", "#ff6666")
+            return
+        _status_l7(f"Restauração concluída: {', '.join(resultado['arquivos'])}.", "#2ecc71")
+        messagebox.showinfo(
+            "Restauração concluída",
+            "Backup restaurado com sucesso.\n\n"
+            f"Arquivos: {', '.join(resultado['arquivos'])}\n"
+            f"Cópia de segurança do estado anterior:\n{resultado['seguranca'] or 'não criada'}\n\n"
+            "Reinicie o FRS Mercado para aplicar integralmente.",
+        )
+
+    def acao_restaurar_drive():
+        import backup_restore as restore
+
+        try:
+            disponiveis = restore.listar_backups()
+        except Exception as erro:
+            _status_l7(f"Falha ao listar backups: {erro}", "#ff6666")
+            return
+        if not disponiveis:
+            messagebox.showinfo(
+                "Restaurar do Google Drive",
+                "Nenhum backup encontrado para este mercado.",
+            )
+            return
+        janela_lista = ctk.CTkToplevel(janela_config)
+        janela_lista.title("Restaurar backup do Google Drive")
+        janela_lista.geometry("580x440")
+        janela_lista.transient(janela_config)
+        janela_lista.grab_set()
+        ctk.CTkLabel(
+            janela_lista,
+            text="ATENÇÃO: restaurar SUBSTITUI os dados atuais pelo backup.",
+            font=("Arial", 12, "bold"), text_color="#f1c40f",
+        ).pack(padx=10, pady=(10, 8))
+        lista = ctk.CTkFrame(janela_lista)
+        lista.pack(fill="both", expand=True, padx=10, pady=10)
+
+        def _escolher(item):
+            janela_lista.destroy()
+            if not messagebox.askyesno(
+                "Confirmar restauração",
+                f"Restaurar o backup?\n\n"
+                f"Identificação: {item['backup_id']}\n"
+                f"Data: {item['data_hora']}  |  Tipo: {item['tipo']}\n\n"
+                "Seus dados atuais serão SUBSTITUÍDOS pelos dados do backup.\n"
+                "Uma cópia de segurança do estado atual será criada antes.",
+            ):
+                _status_l7("Restauração cancelada pelo usuário.", "#f1c40f")
+                return
+            _executar_restauracao_drive(item)
+
+        for item in disponiveis:
+            linha = ctk.CTkFrame(lista)
+            linha.pack(fill="x", pady=3)
+            ctk.CTkLabel(
+                linha, text=f"{item['data_hora']}  •  {item['tipo']}", anchor="w",
+            ).pack(side="left", padx=8)
+            ctk.CTkButton(
+                linha, text="RESTAURAR", width=110, fg_color="#aa3333",
+                hover_color="#772222", command=lambda i=item: _escolher(i),
+            ).pack(side="right", padx=8)
+
+    def _popup_explicativo_backup_geral() -> bool:
+        dialogo = ctk.CTkToplevel(janela_config)
+        dialogo.title("Backup Geral")
+        dialogo.geometry("620x460")
+        dialogo.transient(janela_config)
+        dialogo.grab_set()
+        texto = (
+            "BACKUP GERAL — backup completo para migração ou recuperação.\n\n"
+            "• Este é um backup COMPLETO do ambiente do FRS Mercado, para "
+            "migração de computador, recuperação total ou cópia de segurança.\n"
+            "• NÃO é o mesmo backup leve do Google Drive.\n"
+            "• NÃO é enviado ao Google Drive.\n"
+            "• Deve ser gravado em uma mídia física removível: recomendamos "
+            "pendrive, HD ou SSD externo.\n"
+            "• O próprio FRS Mercado vai compactar e validar o backup.\n"
+            "• Você não precisa compactar nada manualmente.\n"
+            "• Ao terminar, o sistema informará que o backup está pronto.\n\n"
+            "Deseja continuar?"
+        )
+        ctk.CTkLabel(
+            dialogo, text=texto, justify="left", wraplength=560, font=("Arial", 13),
+        ).pack(padx=22, pady=20, fill="both", expand=True)
+        resultado = {"seguir": False}
+
+        def _continuar():
+            resultado["seguir"] = True
+            dialogo.destroy()
+
+        barra = ctk.CTkFrame(dialogo)
+        barra.pack(pady=(0, 18))
+        ctk.CTkButton(
+            barra, text="Continuar", command=_continuar, width=150,
+        ).pack(side="left", padx=12)
+        ctk.CTkButton(
+            barra, text="Cancelar", command=dialogo.destroy, width=150,
+            fg_color="#aa3333", hover_color="#772222",
+        ).pack(side="left", padx=12)
+        dialogo.wait_window()
+        return resultado["seguir"]
+
+    def _listar_unidades_para_backup() -> list:
+        import backup_geral as geral
+
+        try:
+            unidades = geral.listar_unidades_removiveis()
+        except Exception as erro:
+            _status_l7(f"Falha ao detectar mídias: {erro}", "#ff6666")
+            return []
+        if not unidades and messagebox.askyesno(
+            "Nenhum pendrive detectado",
+            "Nenhuma mídia removível foi detectada.\n\n"
+            "Deseja listar discos fixos (ex.: HD/SSD externo que o Windows "
+            "classifica como disco fixo)?",
+        ):
+            try:
+                unidades = geral.listar_unidades_removiveis(incluir_fixas=True)
+            except Exception as erro:
+                _status_l7(f"Falha ao detectar mídias: {erro}", "#ff6666")
+                return []
+        return unidades
+
+    def _selecionar_unidade(unidades, titulo):
+        janela_un = ctk.CTkToplevel(janela_config)
+        janela_un.title(titulo)
+        janela_un.geometry("660x340")
+        janela_un.transient(janela_config)
+        janela_un.grab_set()
+        ctk.CTkLabel(janela_un, text="Selecione a mídia de destino:", font=("Arial", 13, "bold")).pack(padx=14, pady=(14, 8), anchor="w")
+        escolhida = {"raiz": None}
+
+        def _escolher(raiz, win):
+            escolhida["raiz"] = raiz
+            win.destroy()
+
+        for unidade in unidades:
+            livre_gb = unidade.get("espaco_livre", 0) / (1024 ** 3)
+            rotulo = unidade.get("rotulo") or "sem rótulo"
+            legenda = (
+                f"{unidade['raiz']}  —  {rotulo}  —  tipo {unidade.get('tipo_nome', '?')}  —  "
+                f"{livre_gb:.1f} GB livres"
+            )
+            ctk.CTkButton(
+                janela_un, text=legenda, anchor="w", height=34,
+                command=lambda r=unidade["raiz"], w=janela_un: _escolher(r, w),
+            ).pack(fill="x", padx=14, pady=3)
+        ctk.CTkButton(
+            janela_un, text="Cancelar", command=janela_un.destroy, width=120,
+            fg_color="#aa3333", hover_color="#772222",
+        ).pack(pady=12)
+        janela_un.wait_window()
+        return escolhida["raiz"]
+
+    def acao_backup_geral():
+        if not _popup_explicativo_backup_geral():
+            _status_l7("Backup Geral cancelado.", "#f1c40f")
+            return
+        import backup_geral as geral
+
+        unidades = _listar_unidades_para_backup()
+        if not unidades:
+            messagebox.showinfo(
+                "Backup Geral",
+                "Nenhuma mídia disponível detectada.\n\nNenhum backup foi criado.",
+            )
+            return
+        raiz = _selecionar_unidade(unidades, "Backup Geral — selecione a mídia")
+        if not raiz:
+            _status_l7("Backup Geral cancelado.", "#f1c40f")
+            return
+        unidade = next((u for u in unidades if u["raiz"].lower() == raiz.lower()), None)
+        if unidade is None:
+            messagebox.showerror("Backup Geral", "Mídia selecionada inválida.")
+            return
+        try:
+            necessario = geral.estimar_tamanho(geral.obter_raiz_dados())
+        except Exception as erro:
+            messagebox.showerror("Backup Geral", f"Falha ao estimar tamanho: {erro}")
+            return
+        livre = int(unidade.get("espaco_livre") or 0)
+        if livre < necessario:
+            messagebox.showerror(
+                "Espaço insuficiente",
+                f"Espaço insuficiente na mídia {unidade['raiz']}:\n"
+                f"necessário ~{geral._formatar_bytes(necessario)}\n"
+                f"disponível {geral._formatar_bytes(livre)}",
+            )
+            return
+        if not messagebox.askyesno(
+            "Confirmar Backup Geral",
+            f"Destino: {unidade['raiz']} — {unidade.get('rotulo') or 'sem rótulo'}\n"
+            f"Espaço livre: {geral._formatar_bytes(livre)}\n"
+            f"Espaço necessário (estimado): {geral._formatar_bytes(necessario)}\n\n"
+            "Gravar o Backup Geral nesta mídia?",
+        ):
+            _status_l7("Backup Geral cancelado.", "#f1c40f")
+            return
+
+        def _prog(mensagem):
+            _status_l7(f"Backup Geral: {mensagem}", "#f1c40f")
+
+        try:
+            resultado = geral.criar_backup_geral(raiz, unidades=unidades, ao_atualizar=_prog)
+        except geral.ErroBackupGeral as erro:
+            messagebox.showerror("Backup Geral", str(erro))
+            _status_l7(f"Falha no Backup Geral: {erro}", "#ff6666")
+            return
+        except Exception as erro:
+            messagebox.showerror("Backup Geral", f"Falha inesperada: {erro}")
+            _status_l7(f"Falha no Backup Geral: {erro}", "#ff6666")
+            return
+        _status_l7(f"Backup Geral concluído: {resultado['nome']}", "#2ecc71")
+        messagebox.showinfo(
+            "BACKUP GERAL CONCLUÍDO COM SUCESSO",
+            f"Arquivo: {resultado['nome']}\n"
+            f"Destino: {resultado['unidade']}\n"
+            f"Tamanho: {geral._formatar_bytes(resultado['tamanho'])}\n"
+            f"Arquivos: {resultado['arquivos']}\n\n"
+            "O pacote foi validado depois de gravado. Guarde a mídia em local seguro.",
+        )
+
+    def acao_restaurar_backup_geral():
+        import backup_geral as geral
+        from market_identity import ensure_local_market_id
+
+        candidatos = []
+        try:
+            for unidade in geral.listar_unidades_removiveis():
+                raiz = Path(unidade["raiz"])
+                candidatos.extend(sorted(raiz.glob("FRS_Mercado_*.zip")))
+        except Exception as erro:
+            _status_l7(f"Falha ao varrer mídias: {erro}", "#ff6666")
+        if not candidatos:
+            caminho = filedialog.askopenfilename(
+                title="Localizar Backup Geral (.zip)",
+                filetypes=[("Backup Geral", "*.zip"), ("Todos os arquivos", "*.*")],
+            )
+            if not caminho:
+                return
+            candidatos = [Path(caminho)]
+
+        alvo = candidatos[0]
+        if len(candidatos) > 1:
+            janela_zips = ctk.CTkToplevel(janela_config)
+            janela_zips.title("Selecione o Backup Geral")
+            janela_zips.geometry("640x380")
+            janela_zips.transient(janela_config)
+            janela_zips.grab_set()
+            ctk.CTkLabel(
+                janela_zips, text="Múltiplos backups encontrados. Escolha um:", font=("Arial", 13, "bold"),
+            ).pack(padx=14, pady=(14, 8), anchor="w")
+            escolhida = {"caminho": None}
+
+            def _escolher(p, win):
+                escolhida["caminho"] = p
+                win.destroy()
+
+            for p in candidatos:
+                ctk.CTkButton(
+                    janela_zips, text=str(p), anchor="w", height=34,
+                    command=lambda pp=p, w=janela_zips: _escolher(pp, w),
+                ).pack(fill="x", padx=14, pady=3)
+            ctk.CTkButton(
+                janela_zips, text="Cancelar", command=janela_zips.destroy, width=120,
+                fg_color="#aa3333", hover_color="#772222",
+            ).pack(pady=12)
+            janela_zips.wait_window()
+            alvo = escolhida["caminho"]
+            if not alvo:
+                janela_zips.destroy()
+                return
+        # A variável janela_zips só existe se houve múltiplos; destruí-la aqui
+        # é seguro (no else ela não existe).
+        try:
+            resumo = geral.inspecionar_pacote_geral(alvo)
+        except geral.ErroBackupGeral as erro:
+            messagebox.showerror("Restaurar Backup Geral", str(erro))
+            _status_l7(f"Arquivo inválido: {erro}", "#ff6666")
+            return
+
+        try:
+            market_local = str(ensure_local_market_id() or "")
+        except Exception:
+            market_local = ""
+        divergente = bool(resumo.get("market_id") and market_local and resumo["market_id"] != market_local)
+        ambiente = resumo.get("ambiente") or {}
+        texto_resumo = (
+            f"Arquivo: {alvo.name}\n"
+            f"Gerado em: {resumo['gerado_em']}  |  FRS {resumo['app_version']}\n"
+            f"Market do backup: {resumo['market_id']}\n"
+            f"Market desta máquina: {market_local or '(não configurado)'}\n"
+            f"Origem: {ambiente.get('hostname', '?')} ({ambiente.get('sistema', '?')})\n"
+            f"Arquivos: {len(resumo['arquivos'])}  |  Tamanho: {geral._formatar_bytes(resumo['tamanho'])}\n\n"
+            "ISTO VAI SUBSTITUIR os dados atuais pelos dados do backup.\n"
+            "Uma cópia de segurança do estado atual será criada antes."
+        )
+        if divergente and not messagebox.askyesno(
+            "Migração entre máquinas",
+            texto_resumo + f"\n\nO backup é do mercado {resumo['market_id']!r}, "
+            f"mas esta máquina está em {market_local!r}. Prosseguir com a migração?",
+        ):
+            _status_l7("Restauração de Backup Geral cancelada.", "#f1c40f")
+            return
+        if not messagebox.askyesno("Confirmar restauração destrutiva", texto_resumo):
+            _status_l7("Restauração de Backup Geral cancelada.", "#f1c40f")
+            return
+
+        def _prog(mensagem):
+            _status_l7(f"Restauração Geral: {mensagem}", "#f1c40f")
+
+        try:
+            resultado = geral.restaurar_backup_geral(
+                alvo, confirmado=True, aceitar_market_diferente=divergente, ao_atualizar=_prog,
+            )
+        except geral.ErroBackupGeral as erro:
+            messagebox.showerror("Restaurar Backup Geral", str(erro))
+            _status_l7(f"Falha na restauração: {erro}", "#ff6666")
+            return
+        except Exception as erro:
+            messagebox.showerror("Restaurar Backup Geral", f"Falha inesperada: {erro}")
+            _status_l7(f"Falha na restauração: {erro}", "#ff6666")
+            return
+        _status_l7(f"Restauração concluída: {resultado['arquivos']}", "#2ecc71")
+        messagebox.showinfo(
+            "RESTAURAR BACKUP GERAL CONCLUÍDO",
+            f"Backup restaurado de: {alvo.name}\n\n"
+            f"Arquivos restaurados: {len(resultado['arquivos'])}\n"
+            f"Cópia de segurança do estado anterior: {resultado['seguranca']}\n\n"
+            "Reinicie o FRS Mercado para aplicar integralmente.",
+        )
+
+    frame_l7 = ctk.CTkFrame(frame_geral)
+    frame_l7.grid(row=19, column=0, columnspan=2, padx=8, pady=(12, 16), sticky="ew")
+    ctk.CTkLabel(
+        frame_l7, text="💾 MIGRAÇÃO / RECUPERAÇÃO COMPLETA (mídia física)",
+        font=("Arial", 14, "bold"),
+    ).grid(row=0, column=0, columnspan=3, padx=10, pady=(8, 4), sticky="w")
+
+    ctk.CTkButton(
+        frame_l7, text="RESTAURAR DO GOOGLE DRIVE", command=acao_restaurar_drive,
+    ).grid(row=2, column=0, padx=8, pady=6, sticky="ew")
+    ctk.CTkButton(
+        frame_l7, text="BACKUP GERAL", command=acao_backup_geral,
+    ).grid(row=2, column=1, padx=8, pady=6, sticky="ew")
+    ctk.CTkButton(
+        frame_l7, text="RESTAURAR BACKUP GERAL", command=acao_restaurar_backup_geral,
+    ).grid(row=2, column=2, padx=8, pady=6, sticky="ew")
+
+    ctk.CTkLabel(
+        frame_l7,
+        text=(
+            "Backup Geral: pacote COMPLETO para migrar/recuperar o sistema, gravado "
+            "em mídia física removível (pendrive/HD/SSD) — não vai para o Google Drive. "
+            "As opções acima RESTAURAM (aplicam dados no sistema). Para apenas baixar "
+            "o arquivo do Drive, use 'Baixar último backup' / 'Escolher backup'."
+        ),
+        font=("Arial", 10), text_color="#9aa5b1", wraplength=560, justify="left",
+    ).grid(row=3, column=0, columnspan=3, padx=10, pady=(4, 8), sticky="w")
 
     # --- ABA FISCAL ---
     # A emissão fiscal é feita pelo motor ACBrMonitor (configurado na aba Geral).

@@ -130,3 +130,18 @@
 - PDV: melhoria da navegação e do foco — campo de QTD ocultado visualmente, mantido funcional internamente, removido do TAB e ciclo principal Campo de Produto → Valor Informado → Campo de Produto.
 - Atualização: preservação dos dados operacionais existentes durante o processo de atualização.
 
+## 1.0.22 - 02/10/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.22 - 05/10/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.22 - 08/10/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.22 - 10/10/2026
+- Release automatizada gerada pelo Mestre de Release.
+
+## 1.0.22 - 11/10/2026
+- Release automatizada gerada pelo Mestre de Release.
+

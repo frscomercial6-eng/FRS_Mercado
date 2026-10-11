@@ -118,6 +118,9 @@ class _FakePDV:
     def _normalizar_origem_venda(self, _payload):
         return "DELIVERY", "Delivery"
 
+    def _extrair_id_pedido_externo(self, _payload):
+        return "PED-TESTE-1"
+
     def _alertar_novo_pedido(self, _origem):
         return None
 

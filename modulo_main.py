@@ -314,7 +314,7 @@ class AppPrincipal(ctk.CTk):
         """
         janela = ctk.CTkToplevel(self)
         janela.title("Ativação de Sistema")
-        janela.geometry("540x300")
+        janela.geometry("540x430")
         janela.transient(self)
         janela.grab_set()
 
@@ -322,22 +322,47 @@ class AppPrincipal(ctk.CTk):
             janela, text="ATIVAÇÃO DE SISTEMA", font=("Roboto", 18, "bold"),
         ).pack(pady=(18, 6))
 
-        ctk.CTkLabel(
-            janela,
-            text="Insira a Chave de Ativação:",
-            font=("Roboto", 12, "bold"),
-        ).pack(anchor="w", padx=28)
-
-        entry_chave = ctk.CTkEntry(
-            janela, width=470, placeholder_text="FRS-AAAAMMDD-XXXXXXXXXXXX",
-        )
-        entry_chave.pack(padx=28, pady=(6, 10))
-
         lbl_feedback = ctk.CTkLabel(
             janela, text="", text_color="#f1c40f", font=("Roboto", 11, "bold"),
             wraplength=470, justify="left",
         )
-        lbl_feedback.pack(anchor="w", padx=28)
+        lbl_feedback.pack(anchor="w", padx=28, pady=(0, 8))
+
+        def _copiar_chave_instalacao():
+            """[ Copiar chave da instalação ] — Item 10 (passo 1 do cliente).
+
+            Delega ao fluxo único e responsivo `copiar_chave_instalacao_ui`
+            (mesma implementação usada por modulo_login): geração da chave em
+            thread secundária, confirmação REAL da cópia na área de
+            transferência e atualização de widgets só na thread principal.
+            Evita duas implementações divergentes e não altera geração,
+            assinatura, verificação, installation_id nem machine_binding.
+            """
+            from modulo_login import copiar_chave_instalacao_ui
+            copiar_chave_instalacao_ui(janela, lbl_feedback)
+
+        ctk.CTkLabel(
+            janela,
+            text="1º passo: copie a chave desta instalação e envie para o FRS.",
+            wraplength=470, justify="left",
+        ).pack(anchor="w", padx=28, pady=(10, 2))
+        ctk.CTkButton(
+            janela, text="COPIAR CHAVE DA INSTALAÇÃO",
+            fg_color="#0f766e", hover_color="#115e59",
+            command=_copiar_chave_instalacao,
+        ).pack(fill="x", padx=28, pady=4)
+
+        ctk.CTkLabel(
+            janela,
+            text="Insira aqui a chave de ativação devolvida pelo FRS:",
+            font=("Roboto", 12, "bold"), wraplength=470, justify="left",
+        ).pack(anchor="w", padx=28, pady=(12, 0))
+
+        entry_chave = ctk.CTkEntry(
+            janela, width=470,
+            placeholder_text="Cole aqui a chave de ativação do FRS",
+        )
+        entry_chave.pack(padx=28, pady=(6, 10))
 
         def _validar_licenca():
             try:
@@ -947,6 +972,7 @@ class AppPrincipal(ctk.CTk):
             ("🏭 FORNECEDORES", "#6d28d9", self.abrir_fornecedores),
             ("👤 USUÁRIOS", "#e67e22", self.abrir_usuarios),
             ("⚙️ CONFIGS", "#7f8c8d", self.abrir_configuracoes),
+            ("🔗 INTEGRAÇÕES", "#16a085", self.abrir_integracoes),
             ("💰 TAXAS", "#8e44ad", self.abrir_financeiro),
             ("🔐 ATIVAÇÃO DE SISTEMA", "#1d4ed8", self.abrir_tela_ativacao_sistema),
             ("📱 APP DE CELULAR", "#0b7285", self.abrir_fluxo_app_celular),
@@ -1359,6 +1385,20 @@ class AppPrincipal(ctk.CTk):
     def abrir_configuracoes(self):
         self._abrir_modulo_seguro("CONFIGURAÇÕES", self._abrir_configuracoes_impl)
 
+    def abrir_integracoes(self):
+        """Central de Integracoes (iFood, 99Food, 99Entrega, Keeta).
+
+        Abre pelo mesmo caminho seguro dos demais modulos, para herdar a
+        protecao de licenca, o tratamento de `ConfiguracaoInvalidaError` e o
+        reaproveitamento de janela ja aberta.
+        """
+        self._abrir_modulo_seguro("INTEGRAÇÕES", self._abrir_integracoes_impl)
+
+    def _abrir_integracoes_impl(self):
+        from modulo_integracoes import JanelaIntegracoes
+
+        return JanelaIntegracoes(self, ao_abrir_config_empresa=self.abrir_configuracoes)
+
     def _abrir_configuracoes_impl(self):
         from modulo_config import exibir_configuracoes
         return exibir_configuracoes(self)
@@ -1395,9 +1435,12 @@ class AppPrincipal(ctk.CTk):
     def abrir_fluxo_app_celular(self):
         apk_path = self._resolver_apk_embutido()
         if apk_path is None:
-            messagebox.showwarning(
-                "APK não encontrado",
-                "Não foi possível localizar o mercado.apk nesta instalação. Reinstale usando o setup completo all-in-one.",
+            # 1.0.22 não distribui o APK do app mobile. Mensagem amigável, sem
+            # sugerir reinstalação, sem prometer data e sem ativar Firebase/FCM.
+            messagebox.showinfo(
+                "FRS Mercado Mobile",
+                "Estamos trabalhando no desenvolvimento do aplicativo "
+                "FRS Mercado Mobile. Ele ainda não está disponível nesta versão.",
             )
             return
 

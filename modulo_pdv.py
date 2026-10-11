@@ -13,6 +13,7 @@ import customtkinter as ctk
 from PIL import Image
 
 import modulo_financeiro
+import venda_fonte_unica
 from calculadora_tributaria import CalculadoraTributaria
 from database_manager import get_db_connection, obter_caminho_dados, registrar_log
 from modulo_config import carregar_configuracoes, obter_limite_sangria_preventiva
@@ -167,6 +168,26 @@ class ModuloPDV(ctk.CTkToplevel):
             )
         except Exception as e:
             registrar_log(None, "Webhook Delivery", "Falha", f"Erro ao iniciar webhook interno: {e}")
+
+        # Integracoes de marketplace (Item 7): polling em thread daemon que
+        # apenas enfileira o pedido normalizado na MESMA fila do webhook. Nao
+        # ha venda, estoque, caixa ou financeiro aqui: a thread da UI continua
+        # sendo a unica que chama o PDV. Sem credencial no cofre, nada
+        # acontece e o PDV abre normalmente.
+        try:
+            from integracoes import servico as servico_integracoes
+
+            info_integracoes = servico_integracoes.iniciar_ifood(
+                self._enfileirar_pedido_delivery
+            )
+            if info_integracoes is not None:
+                registrar_log(
+                    None, "Integracoes", "Sucesso",
+                    f"Polling iFood ativo a cada {info_integracoes.intervalo:.0f}s "
+                    f"({servico_integracoes.status_ifood().get('ambiente', '')})",
+                )
+        except Exception as e:
+            registrar_log(None, "Integracoes", "Falha", f"iFood nao iniciado: {e}")
 
         # Desenha a interface base imediatamente para evitar janela preta/vazia.
         self.configurar_interface_pdv()
@@ -1290,6 +1311,19 @@ class ModuloPDV(ctk.CTkToplevel):
         except Exception as e:
             self._set_status(f"Erro ao abrir orçamentos: {e}", "#ff6666")
 
+    def _extrair_id_pedido_externo(self, payload):
+        """Identificador do pedido na plataforma, normalizado para texto.
+
+        Ordem de aceitacao: `id_pedido`, `id`, `order_id`. Nao se inventa
+        hash do corpo nem id aleatorio: sem identificador nao ha como provar
+        idempotencia, e o pedido precisa ser tratado como nao automatico.
+        """
+        for chave in ("id_pedido", "id", "order_id"):
+            valor = str((payload or {}).get(chave) or "").strip()
+            if valor:
+                return valor
+        return ""
+
     def _aplicar_pedido_delivery(self, payload):
         if not isinstance(payload, dict):
             self._set_status("Webhook delivery recebido em formato inválido.", "#ff6666")
@@ -1300,9 +1334,28 @@ class ModuloPDV(ctk.CTkToplevel):
         valor_total_informado = payload.get("valor", None)
         pagamento_aprovado = self._normalizar_bool(payload.get("pagamento_aprovado"))
         origem_canal, origem_label = self._normalizar_origem_venda(payload)
+        id_pedido_externo = self._extrair_id_pedido_externo(payload)
 
         if not isinstance(itens, list) or not itens:
             self._set_status("Pedido delivery ignorado: sem itens.", "#ff6666")
+            return
+
+        # Sem identificador externo nao ha como provar idempotencia. O pedido
+        # NAO vira venda automatica: fica para conferencia manual do operador,
+        # que evita a duplicidade na origem em vez de fingir garantia.
+        if not id_pedido_externo:
+            self._set_status(
+                f"Pedido {origem_label} sem identificador externo; "
+                "nao processado automaticamente.",
+                "#f1c40f",
+            )
+            registrar_log(
+                None,
+                "Webhook Delivery",
+                "Aviso",
+                f"Pedido da origem {origem_canal} recusado por ausencia de "
+                f"id_pedido/id/order_id. Cliente: {cliente}",
+            )
             return
 
         self._alertar_novo_pedido(origem_label)
@@ -1364,7 +1417,12 @@ class ModuloPDV(ctk.CTkToplevel):
                     origem_venda=origem_canal,
                     status_pedido="APROVADO",
                     status_pagamento="PAGO",
+                    id_pedido_externo=id_pedido_externo,
                 )
+                if getattr(self, "_ultimo_pedido_duplicado", False):
+                    # Reenvio do MESMO pedido: transacao revertida, nada foi
+                    # gravado. Nao e falha nem sucesso de novo pedido.
+                    return
                 self._set_status(f"Novo Pedido {origem_label} Chegou | Venda registrada automaticamente.", "#2ecc71")
                 registrar_log(
                     None,
@@ -1610,65 +1668,6 @@ class ModuloPDV(ctk.CTkToplevel):
             return "break"
         self.processar_entrada_produto()
         return "break"
-
-    def _unidade_do_produto(self, produto):
-        """Unidade canônica do produto (UN/KG) com fallback legado."""
-        try:
-            if isinstance(produto, (tuple, list)) and len(produto) > 10:
-                uni = str(produto[10] or "").strip().upper()
-                if uni in ("UN", "KG"):
-                    return uni
-        except Exception:
-            pass
-        try:
-            variacao = produto[8] if isinstance(produto, (tuple, list)) and len(produto) > 8 else ""
-            categoria = produto[9] if isinstance(produto, (tuple, list)) and len(produto) > 9 else ""
-            nome = produto[2] if isinstance(produto, (tuple, list)) and len(produto) > 2 else ""
-        except Exception:
-            return "UN"
-        try:
-            from modulo_estoque import produto_e_vendido_por_kg
-            if produto_e_vendido_por_kg(nome, variacao, categoria):
-                return "KG"
-        except Exception:
-            pass
-        return "UN"
-
-    def _reconfigurar_mascara_qtd_pdv(self, unidade):
-        """Máscara do campo Qtd do PDV coerente com a unidade (FASE 1 UN/KG).
-
-        UN: inteiro (comportamento histórico — multiplicador 12* inclusive).
-        KG: decimal até 3 casas (1,250).
-
-        Só reaplica os bindings quando o modo MUDA: evita acumular
-        <KeyRelease>/<FocusOut> a cada bipagem.
-        """
-        if not hasattr(self, "ent_quantidade"):
-            return
-        desejado = "KG" if str(unidade).strip().upper() == "KG" else "UN"
-        if getattr(self, "_mascara_qtd_pdv", None) == desejado:
-            return
-        self._mascara_qtd_pdv = desejado
-        try:
-            self.ent_quantidade.unbind("<KeyRelease>")
-            self.ent_quantidade.unbind("<FocusOut>")
-        except Exception:
-            pass
-        try:
-            if desejado == "KG":
-                aplicar_padrao_entrada_numerica(self.ent_quantidade, inteiro=False, casas_decimais=3)
-                try:
-                    self.ent_quantidade.configure(placeholder_text="Qtd/Peso (KG)")
-                except Exception:
-                    pass
-            else:
-                aplicar_padrao_entrada_numerica(self.ent_quantidade, inteiro=True)
-                try:
-                    self.ent_quantidade.configure(placeholder_text="Qtd")
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
     def _adicionar_item_produto(self, produto, qtd_item):
         if hasattr(self, "_unidade_do_produto"):
@@ -3322,7 +3321,6 @@ class ModuloPDV(ctk.CTkToplevel):
             except Exception:
                 pass
 
-        # 3. Limpa o contexto documental temporário (Vale/Orçamento carregado)
         if hasattr(self, "_limpar_contexto_documental"):
             self._limpar_contexto_documental()
         else:
@@ -4130,36 +4128,162 @@ class ModuloPDV(ctk.CTkToplevel):
         return self.fiscal_manager.gerar_comando_nfce(venda_id, forma_pgto, itens)
 
     def _enviar_comando_nfce(self, venda_id, forma_pgto, itens):
+        """Envia a NFC-e ao ACBr e PERSISTE o documento ligado a venda.
+
+        Antes, o retorno era so True/False e nada era gravado: chave de
+        acesso, protocolo e XML se perdiam. Agora o documento fiscal fica em
+        `documentos_fiscais`, permitindo consultar, cancelar e recuperar.
+        """
         if not hasattr(self, "fiscal_manager") or self.fiscal_manager is None:
             return False
 
-        comando = self._gerar_comando_nfce_acbr(venda_id, forma_pgto, itens)
+        from modulo_fiscal_documentos import (
+            ErroDocumentoFiscal, marcar_autorizado, marcar_rejeitado,
+            registrar_emissao,
+        )
+
+        # 1) Estado duravel ANTES de falar com o ACBr: se o processo cair no
+        #    meio, a venda fica PENDENTE e pode ser retomada.
+        try:
+            info = registrar_emissao(venda_id)
+            documento = info["registro"]
+            if not info["nova_tentativa"] and documento["status"] in (
+                "AUTORIZADO", "CANCELADO"
+            ):
+                # Documento ja encerrado: reenviar duplicaria documento.
+                registrar_log(
+                    None, "PDV Fiscal", "Aviso",
+                    f"Venda {venda_id}: documento ja em {documento['status']}; "
+                    "reemissao nao realizada.",
+                )
+                return documento["status"] == "AUTORIZADO"
+        except ErroDocumentoFiscal as e:
+            registrar_log(None, "PDV Fiscal", "Falha", f"Documento fiscal: {e}")
+            return False
+
+    def _localizar_xml_autorizado(self, venda_id, chave=""):
+        """Procura o XML da venda nas pastas fiscais do APPDATA.
+
+        Nao move nem cria documento: apenas localiza o arquivo ja gravado
+        pelo ACBr, para ligar o XML a venda. Devolve string vazia se nao
+        achar - quem chama decide o que fazer com a ausencia.
+        """
+        from pathlib import Path
+
+        alvo = str(chave or "").strip()
+        padroes = []
+        if alvo:
+            padroes.append(f"{alvo}-*.xml")
+            padroes.append(f"{alvo}.xml")
+        padroes.append(f"*{venda_id}*.xml")
+        pastas = [self.fiscal_manager.pasta_fiscal_out]
+        try:
+            pastas.append(Path(obter_caminho_dados("")).resolve())
+        except Exception:
+            pass
+        for pasta in pastas:
+            for padrao in padroes:
+                try:
+                    achados = sorted(Path(pasta).glob(padrao))
+                except Exception:
+                    continue
+                if achados:
+                    return str(achados[-1])
+        return ""
+
+    def _extrair_qr_code_xml(self, xml_path):
+        """Le o QR Code fiscal do XML autorizado. Vazio se nao houver.
+
+        Nunca fabricamos QR Code: o valor vem de <infNFeSupl><qrCode> do
+        proprio XML autorizado.
+        """
+        from pathlib import Path
+
+        caminho = str(xml_path or "").strip()
+        if not caminho or not Path(caminho).exists():
+            return ""
+        try:
+            dados = self.fiscal_manager.processar_xml_entrada(caminho)
+        except Exception:
+            return ""
+        return str(dados.get("qr_code") or "")
 
         try:
-            acbr_ativo = self.fiscal_manager.iniciar_acbr()
-            if not acbr_ativo:
+            comando = self._gerar_comando_nfce_acbr(venda_id, forma_pgto, itens)
+        except Exception as e:
+            try:
+                marcar_rejeitado(venda_id, "ERRO_MONTAGEM", str(e))
+            except Exception:
+                pass
+            self._set_status(f"Erro ao montar NFC-e: {e}", "#ff6666")
+            registrar_log(None, "PDV Fiscal", "Falha", f"Erro ao montar NFC-e: {e}")
+            return False
+
+        try:
+            if not self.fiscal_manager.iniciar_acbr():
                 registrar_log(
-                    None,
-                    "PDV Fiscal",
-                    "Aviso",
-                    "ACBrMonitor nao identificado em execucao. Comando NFC-e sera mantido para tentativa posterior.",
+                    None, "PDV Fiscal", "Aviso",
+                    "ACBrMonitor nao identificado em execucao. Comando NFC-e sera "
+                    "mantido para tentativa posterior.",
                 )
 
             resposta = self.fiscal_manager.enviar_comando(comando)
             analise = self.fiscal_manager.interpretar_retorno(resposta)
+            chave = str(analise.get("chave_acesso") or "").strip()
+
             if not analise.get("sucesso"):
                 mensagem_erro = analise.get("mensagem") or "Falha desconhecida no ACBrMonitor."
+                marcar_rejeitado(venda_id, "", mensagem_erro)
                 self._set_status(f"Erro na emissão: {mensagem_erro}", "#ff6666")
                 try:
-                    messagebox.showerror("Erro Fiscal", f"Erro na emissão: {mensagem_erro}", parent=self)
+                    messagebox.showerror(
+                        "Erro Fiscal", f"Erro na emissão: {mensagem_erro}", parent=self)
                 except Exception:
                     pass
                 registrar_log(None, "PDV Fiscal", "Falha", f"Erro na emissão: {mensagem_erro}")
                 return False
 
-            registrar_log(None, "PDV Fiscal", "Sucesso", f"Comando NFC-e enviado. Retorno: {resposta[:200]}")
+            if not chave:
+                # Sucesso sem chave NAO e documento: fica PENDENTE em vez de
+                # afirmar protocolo que nao existe.
+                registrar_log(
+                    None, "PDV Fiscal", "Aviso",
+                    f"Venda {venda_id}: ACBr respondeu sem chave de acesso; "
+                    "documento mantido PENDENTE para conferencia.",
+                )
+                return False
+
+            xml_path = self._localizar_xml_autorizado(venda_id, chave)
+            qr_code = self._extrair_qr_code_xml(xml_path)
+            try:
+                marcar_autorizado(
+                    venda_id, chave_acesso=chave,
+                    protocolo=analise.get("protocolo", ""),
+                    xml_path=xml_path, qr_code=qr_code,
+                )
+            except ErroDocumentoFiscal as e:
+                registrar_log(None, "PDV Fiscal", "Falha", f"Documento fiscal: {e}")
+                return False
+
+            registrar_log(
+                None, "PDV Fiscal", "Sucesso",
+                f"NFC-e autorizada. Venda {venda_id} chave {chave} "
+                f"protocolo {analise.get('protocolo', '')}.",
+            )
             return True
+        except TimeoutError as e:
+            # Timeout NAO e rejeicao: o ACBr pode ainda processar.
+            registrar_log(
+                None, "PDV Fiscal", "Aviso",
+                f"Venda {venda_id}: timeout aguardando ACBr; documento PENDENTE. {e}",
+            )
+            self._set_status("Fiscal: aguardando retorno do ACBr...", "#f1c40f")
+            return False
         except Exception as e:
+            try:
+                marcar_rejeitado(venda_id, "ERRO_COMUNICACAO", str(e))
+            except Exception:
+                pass
             self._set_status(f"Erro na emissão: {e}", "#ff6666")
             try:
                 messagebox.showerror("Erro Fiscal", f"Erro na emissão: {e}", parent=self)
@@ -4201,7 +4325,13 @@ class ModuloPDV(ctk.CTkToplevel):
         origem_venda="LOJA_FISICA",
         status_pedido="APROVADO",
         status_pagamento="PAGO",
+        id_pedido_externo=None,
     ):
+        # Identidade do pedido na plataforma externa. Junto com `origem_venda`
+        # forma a chave de idempotencia: o mesmo id em canais diferentes nao
+        # colide. Venda de balcao mantem None (NULL) e nunca conflita.
+        id_pedido_externo = str(id_pedido_externo or "").strip() or None
+        self._ultimo_pedido_duplicado = False
         if not self.itens_carrinho:
             return
 
@@ -4294,22 +4424,20 @@ class ModuloPDV(ctk.CTkToplevel):
         total_cofins = round(total_cofins, 2)
         total_ibs = round(total_ibs, 2)
         total_cbs = round(total_cbs, 2)
-        taxas = modulo_financeiro.obter_taxas()
-        valor_liquido = round(valor_bruto - valor_impostos, 2)
-        taxa_aplicada = 0.0
-
-        if forma_pgto in ["DEBITO", "CREDITO"]:
-            taxa_aplicada = taxas.get(forma_pgto, 0.0)
-            valor_liquido = round(valor_liquido - (valor_bruto * (taxa_aplicada / 100)), 2)
-        if valor_liquido < 0:
-            valor_liquido = 0.0
+        # ITEM 9 — FONTE ÚNICA: total, impostos e taxa passam a ser calculados
+        # pelo mesmo módulo usado na conversão de orçamento.
+        totais = venda_fonte_unica.calcular_totais(
+            valor_bruto, valor_impostos, forma_pgto, modulo_financeiro.obter_taxas(),
+        )
+        valor_liquido = totais["valor_liquido"]
+        taxa_aplicada = totais["taxa_aplicada"]
 
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                cols_v = {r[1] for r in cursor.execute("PRAGMA table_info(vendas)").fetchall()}
-                cols_d = {r[1] for r in cursor.execute("PRAGMA table_info(vendas_dia)").fetchall()}
-                cols_fin = {r[1] for r in cursor.execute("PRAGMA table_info(financeiro)").fetchall()}
+                # ITEM 9: a introspecção de colunas migrou para
+                # `venda_fonte_unica` (com cache por transação). Aqui não há
+                # mais ramificação por schema — é esse o ganho do Item 9.
                 cx_id = getattr(self, "caixa_id", None)
                 vales_para_quitar = list(dict.fromkeys(
                     int(vale_id) for vale_id in (getattr(self, "_vales_para_quitar", None) or [])
@@ -4323,251 +4451,33 @@ class ModuloPDV(ctk.CTkToplevel):
                     ).fetchone()
                     if not caixa_vale or str(caixa_vale[0] or "").upper() != "ABERTO":
                         raise RuntimeError("O caixa do Vale não está aberto para a operação atual.")
-                if "caixa_operacao_id" in cols_v:
-                    cursor.execute(
-                        """
-                        INSERT INTO vendas (
-                            valor_total, valor_impostos_retidos, valor_liquido,
-                            origem, status_pedido, status_pagamento, forma_pagamento,
-                            valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs,
-                            caixa_operacao_id
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            valor_bruto,
-                            valor_impostos,
-                            valor_liquido,
-                            str(origem_venda or "LOJA_FISICA").upper(),
-                            str(status_pedido or "APROVADO").upper(),
-                            str(status_pagamento or "PAGO").upper(),
-                            forma_pgto,
-                            total_icms,
-                            total_pis,
-                            total_cofins,
-                            total_ibs,
-                            total_cbs,
-                            cx_id,
-                        ),
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        INSERT INTO vendas (
-                            valor_total, valor_impostos_retidos, valor_liquido,
-                            origem, status_pedido, status_pagamento, forma_pagamento,
-                            valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            valor_bruto,
-                            valor_impostos,
-                            valor_liquido,
-                            str(origem_venda or "LOJA_FISICA").upper(),
-                            str(status_pedido or "APROVADO").upper(),
-                            str(status_pagamento or "PAGO").upper(),
-                            forma_pgto,
-                            total_icms,
-                            total_pis,
-                            total_cofins,
-                            total_ibs,
-                            total_cbs,
-                        ),
-                    )
-                venda_id = cursor.lastrowid
-                if "caixa_operacao_id" in cols_d:
-                    cursor.execute(
-                        """
-                        INSERT INTO vendas_dia (
-                            valor_total, valor_impostos_retidos, valor_liquido,
-                            origem, status_pedido, status_pagamento, forma_pagamento,
-                            valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs,
-                            caixa_operacao_id
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            valor_bruto,
-                            valor_impostos,
-                            valor_liquido,
-                            str(origem_venda or "LOJA_FISICA").upper(),
-                            str(status_pedido or "APROVADO").upper(),
-                            str(status_pagamento or "PAGO").upper(),
-                            forma_pgto,
-                            total_icms,
-                            total_pis,
-                            total_cofins,
-                            total_ibs,
-                            total_cbs,
-                            cx_id,
-                        ),
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        INSERT INTO vendas_dia (
-                            valor_total, valor_impostos_retidos, valor_liquido,
-                            origem, status_pedido, status_pagamento, forma_pagamento,
-                            valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            valor_bruto,
-                            valor_impostos,
-                            valor_liquido,
-                            str(origem_venda or "LOJA_FISICA").upper(),
-                            str(status_pedido or "APROVADO").upper(),
-                            str(status_pagamento or "PAGO").upper(),
-                            forma_pgto,
-                            total_icms,
-                            total_pis,
-                            total_cofins,
-                            total_ibs,
-                            total_cbs,
-                        ),
-                    )
 
-                desc = f"Venda PDV #{venda_id} ({forma_pgto}) [{str(origem_venda or 'LOJA_FISICA').upper()}]"
-                if "caixa_operacao_id" in cols_fin:
-                    cursor.execute(
-                        """
-                        INSERT INTO financeiro (
-                            valor, tipo, valor_bruto, valor_impostos_retidos,
-                            taxa_aplicada, descricao, caixa_operacao_id
-                        )
-                        VALUES (?, 'Entrada', ?, ?, ?, ?, ?)
-                        """,
-                        (valor_liquido, valor_bruto, valor_impostos, taxa_aplicada, desc, cx_id),
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        INSERT INTO financeiro (
-                            valor, tipo, valor_bruto, valor_impostos_retidos,
-                            taxa_aplicada, descricao
-                        )
-                        VALUES (?, 'Entrada', ?, ?, ?, ?)
-                        """,
-                        (valor_liquido, valor_bruto, valor_impostos, taxa_aplicada, desc),
-                    )
-                cursor.execute(
-                    """
-                    UPDATE financeiro
-                    SET valor_icms = ?, valor_pis = ?, valor_cofins = ?, valor_ibs = ?, valor_cbs = ?
-                    WHERE id = last_insert_rowid()
-                    """,
-                    (total_icms, total_pis, total_cofins, total_ibs, total_cbs),
+                # ITEM 9 — FONTE ÚNICA: `vendas`, `vendas_dia` e `financeiro`
+                # passam a ser gravados pelo mesmo módulo do orçamento. As
+                # ramificações por schema (`caixa_operacao_id` presente ou
+                # ausente) e o rateio de tributos por item viviam aqui em
+                # código próprio; agora vivem num lugar só.
+                venda_id = venda_fonte_unica.gravar_venda(
+                    cursor,
+                    valor_total=valor_bruto,
+                    valor_impostos_retidos=valor_impostos,
+                    valor_liquido=valor_liquido,
+                    forma_pagamento=forma_pgto,
+                    caixa_operacao_id=cx_id,
+                    origem=origem_venda,
+                    status_pedido=status_pedido,
+                    status_pagamento=status_pagamento,
+                    tributos={
+                        "icms": total_icms, "pis": total_pis, "cofins": total_cofins,
+                        "ibs": total_ibs, "cbs": total_cbs,
+                    },
+                    taxa_aplicada=taxa_aplicada,
+                    id_pedido_externo=id_pedido_externo,
                 )
 
-                for item in self.itens_carrinho:
-                    unidade_item = str(item.get("unidade") or "UN").strip().upper() or "UN"
-                    try:
-                        produto_id = int(item.get("id"))
-                        if unidade_item == "KG":
-                            # KG: quantidade é PESO decimal (até 3 casas) — nunca int().
-                            quantidade_vendida = round(float(item.get("quantidade", 0) or 0), 3)
-                        else:
-                            quantidade_vendida = int(item.get("quantidade", 0))
-                    except (TypeError, ValueError):
-                        continue
-
-                    if quantidade_vendida <= 0:
-                        continue
-
-                    # Baixa FEFO: 1 linha em itens_venda por lote consumido,
-                    # com rateio proporcional de subtotal/impostos (a última
-                    # parcela fecha o total do item). Sem lotes: caminho legado.
-                    lotes_dist = aplicar_baixa_fefo(cursor, produto_id, quantidade_vendida)
-                    if lotes_dist:
-                        subtotal_item = float(item.get("total", 0.0))
-                        valores_item = {
-                            k: float(item.get("valores_impostos", {}).get(k, 0.0) or 0.0)
-                            for k in ("icms", "pis", "cofins", "ibs", "cbs")
-                        }
-                        restante_subtotal = subtotal_item
-                        restantes_valores = dict(valores_item)
-                        for idx, (lote_id, qtd_parcela) in enumerate(lotes_dist):
-                            if idx == len(lotes_dist) - 1:
-                                sub_parcela = round(restante_subtotal, 2)
-                                val_parcela = {k: round(v, 2) for k, v in restantes_valores.items()}
-                            else:
-                                fator = qtd_parcela / quantidade_vendida
-                                sub_parcela = round(subtotal_item * fator, 2)
-                                val_parcela = {k: round(v * fator, 2) for k, v in valores_item.items()}
-                                restante_subtotal -= sub_parcela
-                                for k in restantes_valores:
-                                    restantes_valores[k] -= val_parcela[k]
-                            cursor.execute(
-                                """
-                                INSERT INTO itens_venda (
-                                    venda_id, produto_id, quantidade, subtotal,
-                                    regime_tributario,
-                                    aliquota_icms, aliquota_pis, aliquota_cofins, aliquota_ibs, aliquota_cbs,
-                                    valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs,
-                                    lote_id, quantidade_lote
-                                )
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """,
-                                (
-                                    venda_id,
-                                    produto_id,
-                                    qtd_parcela,
-                                    sub_parcela,
-                                    str(item.get("regime_tributario", regime_venda)),
-                                    float(item.get("aliquotas", {}).get("icms", 0.0) or 0.0),
-                                    float(item.get("aliquotas", {}).get("pis", 0.0) or 0.0),
-                                    float(item.get("aliquotas", {}).get("cofins", 0.0) or 0.0),
-                                    float(item.get("aliquotas", {}).get("ibs", 0.0) or 0.0),
-                                    float(item.get("aliquotas", {}).get("cbs", 0.0) or 0.0),
-                                    val_parcela["icms"], val_parcela["pis"], val_parcela["cofins"],
-                                    val_parcela["ibs"], val_parcela["cbs"],
-                                    lote_id,
-                                    float(qtd_parcela),
-                                ),
-                            )
-                    else:
-                        cursor.execute(
-                            """
-                            INSERT INTO itens_venda (
-                                venda_id, produto_id, quantidade, subtotal,
-                                regime_tributario,
-                                aliquota_icms, aliquota_pis, aliquota_cofins, aliquota_ibs, aliquota_cbs,
-                                valor_icms, valor_pis, valor_cofins, valor_ibs, valor_cbs
-                            )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                venda_id,
-                                produto_id,
-                                quantidade_vendida,
-                                float(item.get("total", 0.0)),
-                                str(item.get("regime_tributario", regime_venda)),
-                                float(item.get("aliquotas", {}).get("icms", 0.0) or 0.0),
-                                float(item.get("aliquotas", {}).get("pis", 0.0) or 0.0),
-                                float(item.get("aliquotas", {}).get("cofins", 0.0) or 0.0),
-                                float(item.get("aliquotas", {}).get("ibs", 0.0) or 0.0),
-                                float(item.get("aliquotas", {}).get("cbs", 0.0) or 0.0),
-                                float(item.get("valores_impostos", {}).get("icms", 0.0) or 0.0),
-                                float(item.get("valores_impostos", {}).get("pis", 0.0) or 0.0),
-                                float(item.get("valores_impostos", {}).get("cofins", 0.0) or 0.0),
-                                float(item.get("valores_impostos", {}).get("ibs", 0.0) or 0.0),
-                                float(item.get("valores_impostos", {}).get("cbs", 0.0) or 0.0),
-                            ),
-                        )
-
-                        cursor.execute(
-                            """
-                            UPDATE produtos
-                            SET quantidade_atual = CASE
-                                WHEN quantidade_atual - ? < 0 THEN 0
-                                ELSE quantidade_atual - ?
-                            END
-                            WHERE id = ?
-                            """,
-                            (quantidade_vendida, quantidade_vendida, produto_id),
-                        )
+                venda_fonte_unica.gravar_itens(
+                    cursor, venda_id, self.itens_carrinho, regime_venda,
+                )
 
                 # Orçamento aberto no PDV: apenas o vínculo documental é
                 # atualizado junto da venda normal; pagamento/caixa não mudam.
@@ -4622,6 +4532,33 @@ class ModuloPDV(ctk.CTkToplevel):
                         # A rastreabilidade principal está no UPDATE de `vales`;
                         # log auxiliar não deve desfazer uma venda já persistida.
                         pass
+        except sqlite3.IntegrityError as e:
+            # A transação JÁ foi revertida por `get_db_connection` ao sair do
+            # `with`: nenhuma baixa de estoque, lote FEFO, financeiro,
+            # `itens_venda` ou `vendas_dia` sobrevive a este ponto.
+            #
+            # Violacao de UNIQUE em (origem, id_pedido_externo) significa que o
+            # mesmo pedido ja havia sido processado. Nao e falha: e um reenvio.
+            if id_pedido_externo and "UNIQUE" in str(e).upper():
+                self._ultimo_pedido_duplicado = True
+                self._set_status(
+                    f"Pedido {id_pedido_externo} ja processado nesta origem; ignorado.",
+                    "#f1c40f",
+                )
+                try:
+                    registrar_log(
+                        None,
+                        "Webhook Delivery",
+                        "Aviso",
+                        f"Pedido duplicado ignorado: origem="
+                        f"{str(origem_venda or '').upper()} id_pedido_externo={id_pedido_externo}",
+                    )
+                except Exception:
+                    pass
+                return
+            self._set_status(f"Falha ao registrar venda: {e}", "#ff6666")
+            registrar_log(None, "PDV", "Falha", f"Erro ao registrar venda: {e}")
+            return
         except Exception as e:
             self._set_status(f"Falha ao registrar venda: {e}", "#ff6666")
             registrar_log(None, "PDV", "Falha", f"Erro ao registrar venda: {e}")
@@ -5543,7 +5480,13 @@ class ModuloPDV(ctk.CTkToplevel):
         return None
 
     def reentrar_apos_menu(self):
-        """Reexibe o PDV e revalida o ciclo de caixa antes de operar."""
+        """Reexibe o PDV e revalida o ciclo de caixa antes de operar.
+
+        Item 11B — após voltar do menu, o foco vai para o campo de bipagem.
+        Só é AGENDADO, nunca imediato: `verificar_caixa_aberto()` pode abrir o
+        modal de abertura de caixa, e roubar o foco dele quebraria o
+        operador. Por isso conferimos o modal ANTES de focar.
+        """
         try:
             if self._id_after_verificacao_caixa is not None:
                 self.after_cancel(self._id_after_verificacao_caixa)
@@ -5552,6 +5495,7 @@ class ModuloPDV(ctk.CTkToplevel):
             self.lift()
             self.focus_force()
             self.verificar_caixa_aberto()
+            self._safe_after(60, self._focar_campo_apos_reentrada)
         except Exception as e:
             try:
                 registrar_log(None, "Reentrada do PDV", "Falha", f"Erro ao reexibir/verificar caixa: {e}")
@@ -5561,6 +5505,23 @@ class ModuloPDV(ctk.CTkToplevel):
                 self._set_status(f"Falha ao verificar caixa: {e}", "#ff6666")
             except Exception:
                 pass
+
+    def _focar_campo_apos_reentrada(self):
+        """Item 11B: devolve o foco ao campo de código após voltar do menu.
+
+        Não interfere em nada: só chama `_safe_focus`, que já ignora widget
+        destruído. Se o modal de abertura de caixa estiver visível, o foco
+        fica com ele — o operador precisa abrir o caixa primeiro.
+        """
+        try:
+            modal = getattr(self, "modal_abertura", None)
+            if modal is not None and modal.winfo_exists():
+                if modal.state() != "withdrawn":
+                    return None
+            self._safe_focus(getattr(self, "ent_cod_barras", None))
+        except Exception:
+            pass
+        return None
 
     def _ao_reexibir_pdv(self, event=None):
         """Ao restaurar o PDV minimizado, mantém o modal de abertura pendente."""

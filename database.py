@@ -358,6 +358,18 @@ def init_db():
         if "caixa_operacao_id" not in vendas_cols:
             cursor.execute("ALTER TABLE vendas ADD COLUMN caixa_operacao_id INTEGER")
 
+        # Identificador do pedido na plataforma externa. NULL em vendas de
+        # balcao: no SQLite um indice UNIQUE aceita varios NULLs, entao vendas
+        # locais nunca conflitam entre si.
+        if "id_pedido_externo" not in vendas_cols:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN id_pedido_externo TEXT")
+        # Idempotencia do webhook: a identidade do pedido e (origem, id).
+        # Somente o par nao repete; o mesmo id em canais diferentes e valido.
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_vendas_origem_id_pedido_externo"
+            " ON vendas (origem, id_pedido_externo)"
+        )
+
         # Tabela de Orçamentos (Propostas Comerciais)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS orcamentos (

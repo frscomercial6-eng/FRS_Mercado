@@ -631,6 +631,17 @@ def _ensure_aux_schema(conn):
             cursor.execute("ALTER TABLE vendas ADD COLUMN diferenca REAL NOT NULL DEFAULT 0.0")
         if "caixa_operacao_id" not in colunas_vendas:
             cursor.execute("ALTER TABLE vendas ADD COLUMN caixa_operacao_id INTEGER")
+        # Identificador do pedido na plataforma externa. NULL em vendas de
+        # balcao: no SQLite um indice UNIQUE aceita varios NULLs, entao vendas
+        # locais nunca conflitam entre si.
+        if "id_pedido_externo" not in colunas_vendas:
+            cursor.execute("ALTER TABLE vendas ADD COLUMN id_pedido_externo TEXT")
+        # Idempotencia do webhook: a identidade do pedido e (origem, id).
+        # Somente o par nao repete; o mesmo id em canais diferentes e valido.
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_vendas_origem_id_pedido_externo"
+            " ON vendas (origem, id_pedido_externo)"
+        )
 
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vendas_dia'")
     if cursor.fetchone():
