@@ -1,17 +1,53 @@
 import argparse
+import os
 import shutil
 import subprocess
 import zipfile
 from pathlib import Path
 
+from _build_support.build_paths import load_build_paths
 from release_manager import read_version
 
 
 ROOT_DIR = Path(__file__).resolve().parent
 MOBILE_DIR = ROOT_DIR / "mobile_app"
-STAGE_DIR = ROOT_DIR / "_flet_windows_stage"
-INSTALLER_DIR = ROOT_DIR / "installer"
 INNO_SCRIPT = ROOT_DIR / "setup_flet_windows_bundle.iss"
+
+
+def _paths():
+    # 1.0.23 — fail-closed: sem FRS_HOMELOG_ROOT válido, BLOQUEIA em vez de
+    # devolver caminhos da raiz original (evita escrita silenciosa fora do
+    # isolamento). Chamadores validam com _require_not_protected antes de mkdir.
+    p = load_build_paths()  # levanta RuntimeError se protegido/ausente
+    if p.homol_root is None:
+        raise RuntimeError(
+            "Isolamento de homologação ausente para bundle Flet. "
+            "Defina FRS_HOMELOG_ROOT."
+        )
+    return p.homol_root / "_flet_windows_stage", p.installer_dir
+
+
+def _require_not_protected(path: Path, label: str) -> None:
+    try:
+        p = load_build_paths()
+        if p.is_protected(path):
+            raise RuntimeError(f"Caminho protegido detectado no bundle Flet ({label}): {path}")
+        if p.homol_root is not None:
+            try:
+                path.resolve().relative_to(p.homol_root.resolve())
+            except ValueError:
+                raise RuntimeError(
+                    f"{label} fora da raiz de homologação: {path} "
+                    f"(esperado dentro de {p.homol_root})"
+                )
+    except RuntimeError:
+        raise
+    except Exception:
+        # Sem homologação configurada: bloqueia escrita na raiz original.
+        raise RuntimeError(
+            f"Isolamento de homologação ausente para {label} ({path}). "
+            "Defina FRS_HOMELOG_ROOT."
+        )
 
 
 def _find_iscc() -> Path | None:
@@ -48,8 +84,14 @@ def _locate_flet_release_dir() -> Path:
 
 
 def _prepare_stage(app_release_dir: Path, acbr_installer: Path) -> Path:
+    STAGE_DIR, _INSTALLER = _paths()
+    # 1.0.23 — fail-closed ANTES de qualquer rmtree/mkdir/copy.
+    _require_not_protected(STAGE_DIR, "stage_dir")
     if STAGE_DIR.exists():
-        shutil.rmtree(STAGE_DIR)
+        if os.getenv("FRS_SKIP_CLEAN", "0").strip().lower() in {"1", "true", "yes", "sim"}:
+            print("[ISOLAMENTO] FRS_SKIP_CLEAN=1: preservando stage Flet anterior (sem rmtree).")
+        else:
+            shutil.rmtree(STAGE_DIR)
 
     app_stage = STAGE_DIR / "app"
     acbr_stage = STAGE_DIR / "acbr"
@@ -62,8 +104,14 @@ def _prepare_stage(app_release_dir: Path, acbr_installer: Path) -> Path:
 
 
 def _build_portable_zip(version: str, app_stage_dir: Path) -> Path:
+    _, INSTALLER_DIR = _paths()
+    _require_not_protected(INSTALLER_DIR, "installer_dir")
     INSTALLER_DIR.mkdir(parents=True, exist_ok=True)
     zip_path = INSTALLER_DIR / f"FRS_Mercado_FletPortable_{version}.zip"
+    # 1.0.23 — ZipFile("w") trunca ZIP anterior: com SKIP_CLEAN=1 preserva.
+    if zip_path.exists() and os.getenv("FRS_SKIP_CLEAN", "0").strip().lower() in {"1", "true", "yes", "sim"}:
+        print(f"[ISOLAMENTO] FRS_SKIP_CLEAN=1: preservando ZIP Flet anterior: {zip_path}")
+        return zip_path
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for file_path in app_stage_dir.rglob("*"):
@@ -74,6 +122,9 @@ def _build_portable_zip(version: str, app_stage_dir: Path) -> Path:
 
 
 def _compile_inno_bundle(version: str, acbr_installer_name: str) -> Path:
+    STAGE_DIR, INSTALLER_DIR = _paths()
+    _require_not_protected(INSTALLER_DIR, "installer_dir")
+    _require_not_protected(STAGE_DIR, "stage_dir")
     iscc = _find_iscc()
     if iscc is None:
         raise FileNotFoundError("ISCC.exe não encontrado. Instale Inno Setup 6.")

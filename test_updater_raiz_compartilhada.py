@@ -210,9 +210,10 @@ class TestMaquinaDeEstados(BaseRaiz):
             self.assertIsNone(u.checar_atualizacao("owner/repo"))
         self.assertNotEqual(self._estado(), secure.UpdateState.CHECKING.value)
 
-    def test_release_igual_com_sequencia_maior_e_revisao_disponivel(self):
-        # Versão igual com sequence MAIOR que a instalada: aceita como revisão
-        # (gatilho por sequência) e sai de CHECKING com release pendente.
+    def test_versao_igual_nunca_e_oferecida_mesmo_com_sequencia_maior(self):
+        # Regra do fundador 1.0.22: mesma versão anunciada nunca gera oferta
+        # de atualização, independentemente de sequence do manifesto ou
+        # installed_sequence. O gatilho por sequência permanece desativado.
         u = self._updater()
         release = secure.ReleaseInfo(
             version="1.0.22", asset_name="a.zip", asset_url="http://x/a.zip",
@@ -223,7 +224,7 @@ class TestMaquinaDeEstados(BaseRaiz):
         with patch.object(secure, "fetch_update_manifest", return_value=release), \
              patch.object(secure, "compare_versions", return_value=0), \
              patch.object(secure, "get_local_version", return_value="1.0.22"):
-            self.assertIsNotNone(u.checar_atualizacao("owner/repo"))
+            self.assertIsNone(u.checar_atualizacao("owner/repo"))
         self.assertNotEqual(self._estado(), secure.UpdateState.CHECKING.value)
 
 

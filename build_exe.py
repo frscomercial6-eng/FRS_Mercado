@@ -14,18 +14,40 @@ import zipfile
 from pathlib import Path
 from subprocess import CalledProcessError
 
-import PyInstaller.__main__
-from release_manager import prepare_release_artifacts
+try:  # PyInstaller é opcional para os testes de isolamento.
+    import PyInstaller.__main__  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - venv de homologação sem PyInstaller
+    import types as _types
+    import sys as _sys
+
+    _pyi_pkg = _types.ModuleType("PyInstaller")
+    _pyi_main = _types.ModuleType("PyInstaller.__main__")
+
+    def _missing_pyinstaller_run(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(
+            "PyInstaller não está instalado neste ambiente "
+            "(build_venv_1023). Instalação/compilação real bloqueada no ciclo "
+            "de homologação de isolamento."
+        )
+
+    _pyi_main.run = _missing_pyinstaller_run  # type: ignore[attr-defined]
+    _pyi_pkg.__main__ = _pyi_main  # type: ignore[attr-defined]
+    _sys.modules.setdefault("PyInstaller", _pyi_pkg)
+    _sys.modules.setdefault("PyInstaller.__main__", _pyi_main)
+    PyInstaller = _pyi_pkg  # type: ignore[no-redef]
+
+from _build_support.build_paths import load_build_paths
+from release_manager import prepare_release_artifacts, read_version
 
 
-ROOT_DIR = Path(__file__).resolve().parent
-RUNTIME_HOOK_PATH = ROOT_DIR / "_runtime_hook_error_logger.py"
-SUPPORT_DIR = ROOT_DIR / "_build_support"
+PATHS = load_build_paths()
+ROOT_DIR = PATHS.root
+RUNTIME_HOOK_PATH = PATHS.build_dir / "_runtime_hook_error_logger.py"
 APP_EXE_NAME = "FRS_Mercado.exe"
-APP_DIST_DIR = ROOT_DIR / "dist" / "FRS_Mercado"
+APP_DIST_DIR = PATHS.dist_dir
 # O Portable público recebe uma base de distribuição criada pelo schema oficial,
 # sempre sem dados operacionais ou cadastro comercial de clientes.
-PUBLIC_DELIVERY_DB_PATH = ROOT_DIR / "_build_staging" / "mercado_1.0.19_distribuicao_limpa.db"
+PUBLIC_DELIVERY_DB_PATH = PATHS.staging_db
 PUBLIC_ASSET_FILES = ("logo.ico", "frsMercado.ico", "frsMercado.jpeg")
 FORBIDDEN_PUBLIC_NAMES = {
     "credentials.json",
@@ -34,8 +56,41 @@ FORBIDDEN_PUBLIC_NAMES = {
     "client_credentials.sec.json",
     "logo_mercado_mario.jpeg",
 }
-WINDOWS_VERSION_INFO_PATH = ROOT_DIR / "_build_support" / "version_info.txt"
-SECURE_OBFUSCATED_DIR = ROOT_DIR / "_secure_obf"
+WINDOWS_VERSION_INFO_PATH = PATHS.version_info
+SECURE_OBFUSCATED_DIR = PATHS.obf_dir
+SUPPORT_DIR = PATHS.support_dir
+BUILD_DIR = PATHS.build_dir
+PORTABLE_DIR = PATHS.portable_dir
+INSTALLER_DIR = PATHS.installer_dir
+PAYLOAD_DIR = PATHS.payload_dir
+SKIP_CLEAN = PATHS.skip_clean
+SKIP_VERSION_SYNC = PATHS.skip_version_sync
+
+
+def reload_paths() -> None:
+    """Recarrega PATHS e constantes derivadas a partir do ambiente atual.
+
+    Necessário porque os testes alteram FRS_HOMELOG_ROOT via monkeypatch
+    após a primeira importação do módulo.
+    """
+    global PATHS, ROOT_DIR, RUNTIME_HOOK_PATH, APP_DIST_DIR
+    global PUBLIC_DELIVERY_DB_PATH, WINDOWS_VERSION_INFO_PATH
+    global SECURE_OBFUSCATED_DIR, SUPPORT_DIR, BUILD_DIR, PORTABLE_DIR
+    global INSTALLER_DIR, PAYLOAD_DIR, SKIP_CLEAN, SKIP_VERSION_SYNC
+    PATHS = load_build_paths()
+    ROOT_DIR = PATHS.root
+    RUNTIME_HOOK_PATH = PATHS.build_dir / "_runtime_hook_error_logger.py"
+    APP_DIST_DIR = PATHS.dist_dir
+    PUBLIC_DELIVERY_DB_PATH = PATHS.staging_db
+    WINDOWS_VERSION_INFO_PATH = PATHS.version_info
+    SECURE_OBFUSCATED_DIR = PATHS.obf_dir
+    SUPPORT_DIR = PATHS.support_dir
+    BUILD_DIR = PATHS.build_dir
+    PORTABLE_DIR = PATHS.portable_dir
+    INSTALLER_DIR = PATHS.installer_dir
+    PAYLOAD_DIR = PATHS.payload_dir
+    SKIP_CLEAN = PATHS.skip_clean
+    SKIP_VERSION_SYNC = PATHS.skip_version_sync
 
 
 def _parse_args() -> argparse.Namespace:
@@ -54,6 +109,11 @@ def _parse_args() -> argparse.Namespace:
         "--skip-deploy",
         action="store_true",
         help="Nao pergunta deploy ao final do build.",
+    )
+    parser.add_argument(
+        "--skip-clean",
+        action="store_true",
+        help="Nao remove diretórios de build anteriores antes de gerar novos artefatos.",
     )
     return parser.parse_args()
 
@@ -138,6 +198,14 @@ def _resolve_entrypoint(base_dir: Path = ROOT_DIR) -> str:
 
 def _ensure_runtime_hook() -> Path:
     """Cria runtime hook para registrar falhas de import/execucao no executavel."""
+    if PATHS.is_protected(RUNTIME_HOOK_PATH) or RUNTIME_HOOK_PATH == (
+        ROOT_DIR / "_runtime_hook_error_logger.py"
+    ):
+        raise RuntimeError(
+            f"Caminho protegido para runtime hook: {RUNTIME_HOOK_PATH}. "
+            "Defina FRS_HOMELOG_ROOT para homologação isolada."
+        )
+    RUNTIME_HOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
     hook_code = '''import datetime
 import pathlib
 import sys
@@ -175,6 +243,11 @@ sys.excepthook = _log_runtime_error
 
 
 def _ensure_windows_version_file(app_version: str) -> Path:
+    # 1.0.23 — fail-closed: valida destino ANTES de qualquer mkdir/write.
+    if PATHS.is_protected(WINDOWS_VERSION_INFO_PATH):
+        raise RuntimeError(
+            f"Caminho protegido detectado para version_info: {WINDOWS_VERSION_INFO_PATH}"
+        )
     parts = app_version.split(".")
     while len(parts) < 4:
         parts.append("0")
@@ -250,6 +323,17 @@ def _build_pyinstaller_args(
             "assets/logo.ico é obrigatório para customizar o executável e não foi encontrado."
         )
 
+    # Valida que nenhum caminho do PyInstaller aponta para diretório protegido.
+    for label, p in (
+        ("dist_dir", APP_DIST_DIR.parent),
+        ("build_dir", BUILD_DIR),
+        ("version_info", WINDOWS_VERSION_INFO_PATH),
+    ):
+        if PATHS.is_protected(p):
+            raise RuntimeError(
+                f"Caminho protegido detectado no PyInstaller ({label}): {p}"
+            )
+
     args = [
         entrypoint,
         "--noconfirm",
@@ -259,6 +343,9 @@ def _build_pyinstaller_args(
         "--name=FRS_Mercado",
         f"--icon={ROOT_DIR / 'assets' / 'logo.ico'}",
         f"--version-file={version_file}",
+        f"--distpath={APP_DIST_DIR.parent}",
+        f"--workpath={BUILD_DIR}",
+        f"--specpath={BUILD_DIR}",
         f"--add-data={ROOT_DIR / 'assets'};assets",
         f"--add-data={ROOT_DIR / 'version.txt'};.",
         f"--add-data={ROOT_DIR / 'EULA.txt'};.",
@@ -347,10 +434,15 @@ def _build_updater_helper(app_version: str) -> Path:
     helper_entry = ROOT_DIR / "updater_helper.py"
     if not helper_entry.is_file():
         raise FileNotFoundError(f"Helper de atualização ausente: {helper_entry}")
-    helper_dist = ROOT_DIR / "dist" / "UpdateHelper"
-    helper_work = ROOT_DIR / "build" / "UpdateHelper"
-    helper_spec = ROOT_DIR / "build" / "UpdateHelperSpec"
+    helper_dist = INSTALLER_DIR / "UpdateHelper"
+    helper_work = BUILD_DIR / "UpdateHelper"
+    helper_spec = BUILD_DIR / "UpdateHelperSpec"
     version_file = _ensure_windows_version_file(app_version)
+
+    for label, p in (("helper_dist", helper_dist), ("helper_work", helper_work), ("helper_spec", helper_spec)):
+        if PATHS.is_protected(p):
+            raise RuntimeError(f"Caminho protegido detectado no helper ({label}): {p}")
+
     cmd = [
         str(helper_entry), "--noconfirm", "--onefile", "--console",
         "--name=FRS_Mercado_UpdateHelper",
@@ -389,12 +481,23 @@ def _terminate_stale_app_processes() -> None:
         pass
 
 
-def _clean_previous_builds() -> None:
-    """Remove artefatos antigos para evitar empacotamento sujo."""
+def _clean_previous_builds(skip_clean: bool = False) -> None:
+    """Remove artefatos antigos apenas em diretórios isolados de homologação.
+
+    Nunca remove build/, dist/, _secure_obf/, portable_build/, installer/
+    nem _build_staging/ da raiz do projeto.
+
+    1.0.23 — FRS_SKIP_CLEAN=1 (global SKIP_CLEAN) bloqueia TODA limpeza de
+    build. Escrita normal de novos artefatos no diretório isolado continua
+    permitida; apenas remoções (rmtree) são bloqueadas aqui.
+    """
+    if skip_clean or SKIP_CLEAN:
+        print("[ISOLAMENTO] Limpeza desabilitada (--skip-clean / FRS_SKIP_CLEAN=1).")
+        return
+
     _terminate_stale_app_processes()
 
     def _on_rm_error(func, path, _exc_info):
-        # Alguns artefatos do Flutter/Flet ficam read-only no Windows.
         try:
             os.chmod(path, stat.S_IWRITE)
         except Exception:
@@ -404,8 +507,10 @@ def _clean_previous_builds() -> None:
         except FileNotFoundError:
             pass
 
-    for folder_name in ["build", "dist", "_secure_obf"]:
-        target = ROOT_DIR / folder_name
+    # Limpa apenas os diretórios de saída isolados configurados via PATHS.
+    for target in [BUILD_DIR, APP_DIST_DIR.parent, SECURE_OBFUSCATED_DIR, PORTABLE_DIR]:
+        if PATHS.is_protected(target):
+            raise RuntimeError(f"Caminho protegido detectado na limpeza de build: {target}")
         if target.exists() and target.is_dir():
             for _ in range(3):
                 try:
@@ -449,6 +554,11 @@ def _list_sources_for_obfuscation() -> list[str]:
 
 
 def _obfuscate_sources_with_pyarmor() -> tuple[str, Path, Path | None]:
+    # 1.0.23 — fail-closed: PyArmor escreve SECURE_OBFUSCATED_DIR; valida antes.
+    if PATHS.is_protected(SECURE_OBFUSCATED_DIR):
+        raise RuntimeError(
+            f"Caminho protegido detectado na ofuscacao PyArmor: {SECURE_OBFUSCATED_DIR}"
+        )
     pyarmor = _find_pyarmor_cli()
     sources = _list_sources_for_obfuscation()
 
@@ -476,8 +586,11 @@ def _obfuscate_sources_with_pyarmor() -> tuple[str, Path, Path | None]:
     return str(obf_entrypoint), SECURE_OBFUSCATED_DIR, (obf_runtime_hook if obf_runtime_hook.exists() else None)
 
 
-def _build_with_nuitka_secure_fallback(app_version: str = "") -> None:
+def _build_with_nuitka_secure_fallback(app_version: str = "", skip_clean: bool = False) -> None:
     print("[NUITKA] Compilação final oficial com Nuitka.")
+    # 1.0.23 — FRS_SKIP_CLEAN=1 bloqueia remoções de limpeza do Nuitka
+    # (rmtree/rename de saídas anteriores). Escrita de novos artefatos ok.
+    skip_clean_effective = bool(skip_clean or SKIP_CLEAN)
     # A versão do recurso Windows do executável vem da versão resolvida pelo
     # release_manager (version.txt), e não de um valor fixo no código.
     versao_nuitka = str(app_version or "0.0.0").strip() or "0.0.0"
@@ -502,7 +615,7 @@ def _build_with_nuitka_secure_fallback(app_version: str = "") -> None:
         "--include-data-file=updater_public_keys.json=updater_public_keys.json",
         "--include-data-file=licensing/trusted_keys.json=licensing/trusted_keys.json",
         "--include-package=licensing",
-        "--output-dir=dist",
+        f"--output-dir={APP_DIST_DIR.parent}",
         "--output-filename=FRS_Mercado.exe",
         "main.py",
     ]
@@ -513,17 +626,28 @@ def _build_with_nuitka_secure_fallback(app_version: str = "") -> None:
 
     subprocess.run(cmd, cwd=str(ROOT_DIR), check=True)
 
-    produced_dir = ROOT_DIR / "dist" / "main.dist"
-    target_dir = ROOT_DIR / "dist" / "FRS_Mercado"
+    produced_dir = APP_DIST_DIR.parent / "main.dist"
+    target_dir = APP_DIST_DIR
     if not produced_dir.exists() or not produced_dir.is_dir():
         raise FileNotFoundError("Saída esperada do Nuitka não encontrada em dist/main.dist")
 
+    if PATHS.is_protected(target_dir):
+        raise RuntimeError(f"Caminho protegido detectado no Nuitka target: {target_dir}")
     if target_dir.exists():
-        shutil.rmtree(target_dir)
+        if skip_clean_effective:
+            raise RuntimeError(
+                f"[ISOLAMENTO] FRS_SKIP_CLEAN=1: saída Nuitka anterior preservada em {target_dir}; "
+                "rename bloqueado para não substituir artefato preexistente."
+            )
+        else:
+            shutil.rmtree(target_dir)
     produced_dir.rename(target_dir)
 
 
 def _copy_if_exists(src: Path, dst: Path) -> None:
+    # 1.0.23 — helper genérico SEM trava própria: a proteção é obrigação do
+    # CHAMADOR (fail-closed antes de chamar). Auditoria em
+    # test_auditoria_chamadas_escrita_tem_trava_protegida cobre os chamadores.
     if not src.exists():
         return
     if src.is_dir():
@@ -549,6 +673,9 @@ def _es_nome_instalador_acbr(nome: str) -> bool:
 def _montar_instala_acbr_portatil(portable_dir: Path) -> None:
     """Prepara <portatil>/instala/ para o runtime fiscal.
 
+    1.0.23 — fail-closed: o chamador (_create_portable_package) já validou
+    PORTABLE_DIR; aqui revalida o subdiretório efetivo antes de escrever.
+
     1) Com o motor REAL disponível (_build_support/acbr/ACBrMonitor.exe), copia
        o binário para instala/ACBrMonitor.exe (motor pronto, sem instalador).
     2) Sem o motor real, copia o instalador oficial DEMO
@@ -556,6 +683,10 @@ def _montar_instala_acbr_portatil(portable_dir: Path) -> None:
        o runtime (modulo_fiscal/system_monitor) possa instalá-lo no primeiro
        uso com os mesmos parâmetros do setup Inno (/VERYSILENT /NORESTART).
     O instalador (-I/DEMO) jamais é usado como motor fiscal."""
+    if PATHS.is_protected(portable_dir):
+        raise RuntimeError(
+            f"Caminho protegido detectado no instala ACBr: {portable_dir}"
+        )
     monitor_src = SUPPORT_DIR / "acbr" / "ACBrMonitor.exe"
     if monitor_src.exists() and monitor_src.is_file():
         instala_portatil = portable_dir / "instala"
@@ -584,14 +715,34 @@ def _montar_instala_acbr_portatil(portable_dir: Path) -> None:
     )
 
 
-def _create_portable_package(app_version: str) -> Path:
-    """Monta uma versão portátil e gera ZIP em installer/."""
+def _create_portable_package(app_version: str, skip_clean: bool = False) -> Path:
+    """Monta uma versão portátil e gera ZIP em installer/.
+
+    1.0.23 — fail-closed: se o destino (portable_dir, installer_dir ou
+    iss_temp) estiver protegido, interrompe com RuntimeError ANTES de
+    qualquer mkdir, cópia, ZIP ou outra escrita nesse destino.
+    FRS_SKIP_CLEAN=1 bloqueia apenas a limpeza (rmtree) do portable_dir;
+    a escrita normal de novos artefatos no diretório isolado continua.
+    """
+    # Trava 1: destinos de escrita — antes de qualquer operação no FS.
+    for label, p in (
+        ("portable_dir", PORTABLE_DIR),
+        ("installer_dir", INSTALLER_DIR),
+        ("iss_temp", PATHS.iss_temp),
+        ("app_dist", APP_DIST_DIR),
+    ):
+        if PATHS.is_protected(p):
+            raise RuntimeError(f"Caminho protegido detectado no pacote portátil ({label}): {p}")
     if not APP_DIST_DIR.exists() or not APP_DIST_DIR.is_dir():
         raise FileNotFoundError(f"Saída onedir não encontrada para pacote portátil: {APP_DIST_DIR}")
 
-    portable_dir = ROOT_DIR / "portable_build"
-    if portable_dir.exists():
-        shutil.rmtree(portable_dir)
+    portable_dir = PORTABLE_DIR
+    skip_clean_effective = bool(skip_clean or SKIP_CLEAN)
+    if not skip_clean_effective:
+        if portable_dir.exists() and portable_dir.is_dir():
+            shutil.rmtree(portable_dir)
+    else:
+        print("[ISOLAMENTO] FRS_SKIP_CLEAN=1: preservando portable_dir anterior (sem rmtree).")
     portable_dir.mkdir(parents=True, exist_ok=True)
 
     for path in APP_DIST_DIR.rglob("*"):
@@ -616,9 +767,12 @@ def _create_portable_package(app_version: str) -> Path:
     _seed_delivery_db(portable_dir)
     _montar_instala_acbr_portatil(portable_dir)
 
-    installer_dir = ROOT_DIR / "installer"
-    installer_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = installer_dir / f"FRS_Mercado_Portable_{app_version}.zip"
+    INSTALLER_DIR.mkdir(parents=True, exist_ok=True)
+    zip_path = INSTALLER_DIR / f"FRS_Mercado_Portable_{app_version}.zip"
+    # 1.0.23 — ZipFile("w") trunca ZIP anterior: com SKIP_CLEAN=1 preserva.
+    if zip_path.exists() and (skip_clean or SKIP_CLEAN):
+        print(f"[ISOLAMENTO] FRS_SKIP_CLEAN=1: preservando ZIP anterior: {zip_path}")
+        return zip_path
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in portable_dir.rglob("*"):
@@ -683,11 +837,25 @@ def _validate_public_portable(zip_path: Path) -> None:
 
 
 def _create_public_distribution_db() -> Path:
-    """Cria base pública limpa usando database.init_db em APPDATA temporário."""
+    """Cria base pública limpa usando database.init_db em APPDATA temporário.
+
+    1.0.23 — fail-closed: valida PUBLIC_DELIVERY_DB_PATH antes de qualquer
+    mkdir/unlink/copy/sqlite. Nunca usa banco de cliente como origem/destino:
+    a origem é sempre init_db() em APPDATA temporário descartável.
+    """
+    if PATHS.is_protected(PUBLIC_DELIVERY_DB_PATH):
+        raise RuntimeError(
+            f"Caminho protegido detectado para base pública: {PUBLIC_DELIVERY_DB_PATH}"
+        )
     PUBLIC_DELIVERY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     for suffix in ("", "-wal", "-shm", "-journal"):
         candidate = Path(str(PUBLIC_DELIVERY_DB_PATH) + suffix)
         if candidate.exists():
+            if SKIP_CLEAN:
+                raise RuntimeError(
+                    f"[ISOLAMENTO] FRS_SKIP_CLEAN=1: base pública anterior preservada em {candidate}; "
+                    "exclusão/substituição bloqueada."
+                )
             candidate.unlink()
 
     with tempfile.TemporaryDirectory(prefix="frs_public_db_") as temp_dir:
@@ -734,7 +902,14 @@ def _create_public_distribution_db() -> Path:
 
 
 def _seed_delivery_db(portable_dir: Path) -> None:
-    """Cria e copia apenas a base pública limpa para o Portable."""
+    """Cria e copia apenas a base pública limpa para o Portable.
+
+    1.0.23 — fail-closed: revalida portable_dir antes de mkdir/unlink/copy.
+    """
+    if PATHS.is_protected(portable_dir):
+        raise RuntimeError(
+            f"Caminho protegido detectado no seed do banco: {portable_dir}"
+        )
     source_db = _create_public_distribution_db()
     data_dir = portable_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -742,22 +917,50 @@ def _seed_delivery_db(portable_dir: Path) -> None:
     for suffix in ("", "-wal", "-shm", "-journal"):
         candidate = Path(str(destino) + suffix)
         if candidate.exists():
+            if SKIP_CLEAN:
+                raise RuntimeError(
+                    f"[ISOLAMENTO] FRS_SKIP_CLEAN=1: banco portátil anterior preservado em {candidate}; "
+                    "exclusão/substituição bloqueada."
+                )
             candidate.unlink()
     shutil.copy2(source_db, destino)
 
 
-def _prepare_support_payload() -> None:
-    """Prepara payload de suporte para instalador/portátil."""
-    if SUPPORT_DIR.exists() and SUPPORT_DIR.is_dir():
-        shutil.rmtree(SUPPORT_DIR)
-    SUPPORT_DIR.mkdir(parents=True, exist_ok=True)
+def _prepare_support_payload(skip_clean: bool = False) -> None:
+    """Prepara payload de suporte em diretório novo, preservando _build_support/ original.
 
-    # Credenciais e documentos de apoio
-    _copy_if_exists(ROOT_DIR / "checklist_homologacao.md", SUPPORT_DIR / "checklist_homologacao.md")
+    Nunca remove nem sobrescreve _build_support/ da raiz do projeto.
+    1.0.23 — FRS_SKIP_CLEAN=1 (global SKIP_CLEAN) bloqueia TODA limpeza aqui;
+    escrita de novos artefatos no diretório isolado continua permitida.
+    """
+    # Determina o diretório de suporte efetivo: usa payload_dir (isolado)
+    # quando em homologação, ou SUPPORT_DIR original (compatibilidade).
+    effective_support_dir = PAYLOAD_DIR if PATHS.homol_root is not None else SUPPORT_DIR
+    if PATHS.is_protected(effective_support_dir):
+        raise RuntimeError(
+            f"Caminho protegido detectado para payload de suporte: {effective_support_dir}"
+        )
 
-    # ACBrMonitor: el binario REAL del motor y el instalador se empaquetan por
-    # separado. El instalador (-I/DEMO) nunca debe usarse ni renombrarse como motor.
-    acbr_dir = SUPPORT_DIR / "acbr"
+    skip_clean_effective = bool(skip_clean or SKIP_CLEAN)
+    if skip_clean_effective:
+        print(f"[ISOLAMENTO] Limpeza desabilitada; reutilizando {effective_support_dir} se existir.")
+    else:
+        if effective_support_dir.exists() and effective_support_dir.is_dir():
+            shutil.rmtree(effective_support_dir)
+    effective_support_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copia do _build_support/ original para o payload (somente leitura da origem).
+    _copy_if_exists(
+        ROOT_DIR / "_build_support" / "checklist_homologacao.md",
+        effective_support_dir / "checklist_homologacao.md",
+    )
+    _copy_if_exists(
+        ROOT_DIR / "_build_support" / "version_info.txt",
+        effective_support_dir / "version_info.txt",
+    )
+
+    # ACBrMonitor: cópia do payload de suporte, nunca usa o instalador como motor.
+    acbr_dir = effective_support_dir / "acbr"
     acbr_dir.mkdir(parents=True, exist_ok=True)
     instala_dir = ROOT_DIR / "instala"
 
@@ -771,7 +974,6 @@ def _prepare_support_payload() -> None:
     if monitor_real is None and instala_dir.is_dir():
         for arq in instala_dir.glob("*ACBrMonitor*.exe"):
             if _es_nome_instalador_acbr(arq.name):
-                # Saltar instaladores/demo: no son el motor.
                 continue
             monitor_real = arq
             break
@@ -838,39 +1040,125 @@ def _find_iscc() -> Path | None:
 
 
 def _build_installer(app_version: str) -> Path | None:
-    """Compila setup_frs.iss se o Inno Setup estiver instalado."""
+    """Compila .iss temporário isolado se o Inno Setup estiver instalado.
+
+    Nunca modifica setup_frs.iss original. Gera um .iss temporário dentro
+    de iss_temp com OutputDir e Source apontando para caminhos isolados.
+    1.0.23 — fail-closed: valida _iss_temp, installer e dist ANTES de
+    qualquer mkdir/write. Nenhum temporário pode cair na raiz original
+    quando a homologação estiver ativa.
+    """
+    # Trava 1: valida _iss_temp + destinos ANTES de qualquer escrita.
+    for label, p in (
+        ("iss_temp", PATHS.iss_temp),
+        ("installer_dir", INSTALLER_DIR),
+        ("app_dist_parent", APP_DIST_DIR.parent),
+    ):
+        if PATHS.is_protected(p):
+            raise RuntimeError(f"Caminho protegido detectado no instalador ({label}): {p}")
+    if PATHS.homol_root is not None:
+        try:
+            PATHS.iss_temp.resolve().relative_to(PATHS.homol_root.resolve())
+        except ValueError:
+            raise RuntimeError(
+                f"_iss_temp fora da raiz de homologação: {PATHS.iss_temp} "
+                f"(esperado dentro de {PATHS.homol_root})"
+            )
     iscc = _find_iscc()
     if iscc is None:
         print("[AVISO] Inno Setup não encontrado. Instalador não foi gerado automaticamente.")
         return None
 
-    script = ROOT_DIR / "setup_frs.iss"
-    if not script.exists():
+    iss_template = ROOT_DIR / "setup_frs.iss"
+    if not iss_template.exists():
         raise FileNotFoundError("Arquivo setup_frs.iss não encontrado.")
 
-    cmd = [str(iscc), str(script)]
-    print(f"Executando Inno Setup: {' '.join(cmd)}")
+    # Gera .iss temporario com caminhos isolados/absolutos (1.0.23).
+    # O ISCC resolve relativos a partir do .iss; no staging tudo vira
+    # absoluto com "/" (o Inno aceita barra normal como separador).
+    # Zero literais de barra invertida aqui: _BS evita escapes _v/_f.
+    _BS = chr(92)
+    _inno_caminho = lambda _p: str(_p).replace(_BS, "/")  # noqa: E731 - conversao pura str->str, sem escrita
+    _iscc_support_src = SUPPORT_DIR
+    if PATHS.homol_root is not None and (PAYLOAD_DIR / "checklist_homologacao.md").exists():
+        _iscc_support_src = PAYLOAD_DIR
+    PATHS.iss_temp.parent.mkdir(parents=True, exist_ok=True)
+    template_content = iss_template.read_text(encoding="utf-8")
+    _repls = [
+        ("OutputDir=installer",
+         "OutputDir=" + _inno_caminho(INSTALLER_DIR)),
+        ("OutputBaseFilename=FRS_Mercado_Setup",
+         "OutputBaseFilename=FRS_Mercado_Setup_" + app_version),
+        ('Source: "dist' + _BS + 'FRS_Mercado' + _BS + '*";',
+         'Source: "' + _inno_caminho(APP_DIST_DIR.parent / "FRS_Mercado") + '/*";'),
+        ("LicenseFile=EULA.txt",
+         "LicenseFile=" + _inno_caminho(ROOT_DIR / "EULA.txt")),
+        ("SetupIconFile=assets" + _BS + "logo.ico",
+         "SetupIconFile=" + _inno_caminho(ROOT_DIR / "assets" / "logo.ico")),
+        ('Source: "assets' + _BS + 'logo.ico"',
+         'Source: "' + _inno_caminho(ROOT_DIR / "assets") + '/logo.ico"'),
+        ('Source: "assets' + _BS + 'frsMercado.ico"',
+         'Source: "' + _inno_caminho(ROOT_DIR / "assets") + '/frsMercado.ico"'),
+        ('Source: "assets' + _BS + 'frsMercado.jpeg"',
+         'Source: "' + _inno_caminho(ROOT_DIR / "assets") + '/frsMercado.jpeg"'),
+        ('Source: "version.txt"',
+         'Source: "' + _inno_caminho(ROOT_DIR) + '/version.txt"'),
+        ('Source: "config' + _BS + '*"',
+         'Source: "' + _inno_caminho(ROOT_DIR / "config") + '/*"'),
+        ('Source: "EULA.txt"',
+         'Source: "' + _inno_caminho(ROOT_DIR / "EULA.txt") + '"'),
+        ('Source: "_build_support' + _BS + 'checklist_homologacao.md"',
+         'Source: "' + _inno_caminho(_iscc_support_src) + '/checklist_homologacao.md"'),
+        ('Source: "_build_support' + _BS + 'data' + _BS + '*"',
+         'Source: "' + _inno_caminho(_iscc_support_src) + '/data/*"'),
+        ('Source: "_build_support' + _BS + 'acbr' + _BS + 'ACBrMonitor_Installer.exe"',
+         'Source: "' + _inno_caminho(_iscc_support_src) + '/acbr/ACBrMonitor_Installer.exe"'),
+    ]
+    iss_content = template_content
+    for _old, _new in _repls:
+        iss_content = iss_content.replace(_old, _new)
+    PATHS.iss_temp.write_text(iss_content, encoding="utf-8")
+
+    cmd = [str(iscc), str(PATHS.iss_temp)]
+    print(f"Executando Inno Setup (iss temporário isolado): {' '.join(cmd)}")
     subprocess.run(cmd, cwd=str(ROOT_DIR), check=True)
 
-    return ROOT_DIR / "installer" / "FRS_Mercado_Setup.exe"
+    return INSTALLER_DIR / f"FRS_Mercado_Setup_{app_version}.exe"
 
 
 def main() -> None:
     cli_args = _parse_args()
-    app_version = prepare_release_artifacts()
+
+    # Bloqueia prepare_release_artifacts() durante a etapa de isolamento.
+    # A atualização de versão para 1.0.23 fica para etapa posterior.
+    if SKIP_VERSION_SYNC:
+        app_version = read_version()
+        print("[ISOLAMENTO] prepare_release_artifacts() bloqueado por FRS_SKIP_VERSION_SYNC=1.")
+    else:
+        app_version = prepare_release_artifacts()
+
     _validate_security_files()
 
     print(f"Python em uso no build: {sys.executable}")
     print(f"Versão Python: {sys.version}")
+    print(f"Caminho de dist (isolado): {APP_DIST_DIR}")
+    print(f"Caminho de build (isolado): {BUILD_DIR}")
+    print(f"Caminho portátil (isolado): {PORTABLE_DIR}")
+    print(f"Caminho do instalador (isolado): {INSTALLER_DIR}")
+    print(f"Caminho de ofuscação (isolado): {SECURE_OBFUSCATED_DIR}")
+    print(f"Banco de staging (isolado): {PUBLIC_DELIVERY_DB_PATH}")
+    print(f"version_info (isolado): {WINDOWS_VERSION_INFO_PATH}")
+    print(f"Limpeza desabilitada: {SKIP_CLEAN or cli_args.skip_clean}")
 
     assets_dir = ROOT_DIR / "assets"
     if not assets_dir.exists() or not assets_dir.is_dir():
         raise FileNotFoundError("A pasta assets é obrigatória para o build e não foi encontrada.")
 
-    _clean_previous_builds()
-    _prepare_support_payload()
+    skip_clean_effective = SKIP_CLEAN or cli_args.skip_clean
+    _clean_previous_builds(skip_clean=skip_clean_effective)
+    _prepare_support_payload(skip_clean=skip_clean_effective)
     if cli_args.nuitka:
-        _build_with_nuitka_secure_fallback(app_version)
+        _build_with_nuitka_secure_fallback(app_version, skip_clean=skip_clean_effective)
     elif cli_args.secure_obfuscation:
         try:
             entrypoint, obf_path, obf_hook = _obfuscate_sources_with_pyarmor()
@@ -886,7 +1174,7 @@ def main() -> None:
             PyInstaller.__main__.run(args)
         except Exception as exc:
             print(f"[AVISO] PyArmor falhou: {exc}")
-            _build_with_nuitka_secure_fallback(app_version)
+            _build_with_nuitka_secure_fallback(app_version, skip_clean=skip_clean_effective)
     else:
         args = _build_pyinstaller_args(app_version)
         print("\nComando interno do PyInstaller:")
@@ -899,8 +1187,8 @@ def main() -> None:
 
     print("Arquivos/recursos que serão empacotados:")
     print("- Entrypoint: main.py")
-    print("- Saída PyInstaller: dist/FRS_Mercado/")
-    print("- Executável principal: dist/FRS_Mercado/FRS_Mercado.exe")
+    print(f"- Saída PyInstaller: {APP_DIST_DIR}")
+    print(f"- Executável principal: {APP_DIST_DIR / APP_EXE_NAME}")
     print("- Ícone: assets/logo.ico")
     print("- Pasta assets -> assets")
     print("- Runtime hook de log -> FRS_Mercado_runtime_error.log em dist/")
@@ -909,7 +1197,7 @@ def main() -> None:
     if (ROOT_DIR / "config").exists():
         print("- config/ -> config/")
 
-    zip_path = _create_portable_package(app_version)
+    zip_path = _create_portable_package(app_version, skip_clean=skip_clean_effective)
     print(f"Pacote portátil gerado: {zip_path}")
 
     installer_path = _build_installer(app_version)

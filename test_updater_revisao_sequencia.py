@@ -4,11 +4,14 @@ O atualizador distribuído compara APENAS o número de versão
 (`compare_versions(release.version, get_local_version()) <= 0`), então uma
 republicação da MESMA 1.0.22 seria ignorada por clientes já em 1.0.22.
 
-A correção 1.0.22 introduz um gatilho por SEQUÊNCIA: uma revisão de mesma
-versão é aceita somente quando a sequência é estritamente maior que a já
-INSTALADA (`installed_sequence`, gravado só no COMMITTED pelo helper) e
-sempre após `verify_manifest` (assinatura Ed25519, anti-downgrade, hash,
-tamanho, URL https). Nada disso é enfraquecido.
+REGRA DE NEGÓCIO DO FUNDADOR (1.0.22): mesma versão anunciada nunca gera
+oferta de atualização, independentemente da sequência. O gatilho por
+SEQUÊNCIA (revisão de mesma versão aceita quando `installed_sequence` é
+menor que a do manifesto) foi DESATIVADO por esta regra de negócio; o código
+do gatilho permanece no updater, mas `comparacao == 0` agora retorna sempre
+None. Downgrade (versão inferior) nunca é oferecido; versão superior segue o
+fluxo legítimo. Nada da validação criptográfica (assinatura Ed25519,
+anti-downgrade, hash, tamanho, URL https) é enfraquecido.
 
 RETROATIVIDADE (honesto): o atualizador JÁ DISTRIBUÍDO na 1.0.21 e na 1.0.22
 publicada NÃO possui este código. A 1.0.21 aceita o manifesto 1.0.22 corrigido
@@ -114,8 +117,19 @@ class TestRevisaoMesmaVersao(_BaseSequencia):
     local = "1.0.22"
 
     def test_sequencia_maior_que_a_instalada_e_aceita(self):
+        # REGRA DO FUNDADOR: mesma versão nunca é oferecida, mesmo com
+        # sequência maior que a instalada. O gatilho por `installed_sequence`
+        # (seq 3 -> seq 4) não resulta mais em oferta de atualização.
         self._instalada(3)           # já instalou a 1.0.22/seq 3 (publicada)
-        self.assertIsNotNone(self._checar(_release("1.0.22", 4)))
+        self.assertIsNone(self._checar(_release("1.0.22", 4)))
+
+    def test_mesma_versao_nunca_e_oferecida_independente_da_sequencia(self):
+        # Versão anunciada igual à instalada: não mostra atualização,
+        # independentemente de installed_sequence e da sequência do manifesto.
+        for seq_instalada, seq_manifesto in ((0, 3), (3, 4), (4, 4), (5, 4)):
+            with self.subTest(instalada=seq_instalada, manifesto=seq_manifesto):
+                self._instalada(seq_instalada)
+                self.assertIsNone(self._checar(_release("1.0.22", seq_manifesto)))
 
     def test_sequencia_igual_e_recusada(self):
         self._instalada(4)

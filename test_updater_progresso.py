@@ -224,9 +224,43 @@ class TestGateOperacional(unittest.TestCase):
 class TestRejeicaoSeguranca(unittest.TestCase):
     def setUp(self):
         import json
+
+        import app_paths
+
+        # Isola o estado de atualizacao desta classe: verify_manifest consulta a
+        # sequencia ja observada no disco e outros arquivos de teste gravam
+        # estado (ex.: sequence=99/5) no diretorio de dados da sessao. O
+        # monkeypatch de app_paths NAO afeta a referencia ja importada em
+        # updater_secure, entao isola-se via FRS_MERCADO_DATA_ROOT (contrato
+        # 1.0.22) + redefinir_caminhos_apos_raiz(), limpando o latch de raiz
+        # explicita que teria prioridade sobre a variavel de ambiente.
+        self._data_tmp = tempfile.mkdtemp(prefix="frs-manifesto-")
+        self._old_latch = app_paths.raiz_dados_explícita()
+        app_paths.limpar_raiz_dados_explícita()
+        self._old_envroot = os.environ.get("FRS_MERCADO_DATA_ROOT")
+        os.environ["FRS_MERCADO_DATA_ROOT"] = self._data_tmp
+        secure.redefinir_caminhos_apos_raiz()
         self.manifest = json.loads(
             open(os.path.join(RAIZ, "update-manifest.json"), encoding="utf-8").read()
         )
+
+    def tearDown(self):
+        import shutil
+
+        import app_paths
+
+        if self._old_envroot is None:
+            os.environ.pop("FRS_MERCADO_DATA_ROOT", None)
+        else:
+            os.environ["FRS_MERCADO_DATA_ROOT"] = self._old_envroot
+        if self._old_latch is not None:
+            app_paths.definir_raiz_dados_explícita(
+                self._old_latch, origem="teste-restore"
+            )
+        else:
+            app_paths.limpar_raiz_dados_explícita()
+        secure.redefinir_caminhos_apos_raiz()
+        shutil.rmtree(self._data_tmp, ignore_errors=True)
 
     def _rejeitado(self, envelope):
         with self.assertRaises(secure.UpdateSecurityError):

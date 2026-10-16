@@ -18,8 +18,13 @@ MOBILE_PYPROJECT_FILE = ROOT_DIR / "mobile_app" / "pyproject.toml"
 
 
 def read_version() -> str:
+    # 1.0.23 — leitura pura: nunca cria nem altera version.txt oficial.
+    # Se o arquivo não existir, falha explicitamente em vez de gerar "1.0.0".
     if not VERSION_FILE.exists():
-        VERSION_FILE.write_text("1.0.0\n", encoding="utf-8")
+        raise FileNotFoundError(
+            f"Arquivo de versão oficial não encontrado: {VERSION_FILE}. "
+            "read_version() não cria versãoImplicitamente."
+        )
 
     version = VERSION_FILE.read_text(encoding="utf-8").strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):

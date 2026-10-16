@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import webbrowser
 import zipfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -41,6 +42,12 @@ UPDATE_STATE_FILE = Path(obter_caminho_dados("update_state.json"))
 UPDATE_ROOT = Path(obter_caminho_dados("updates"))
 UPDATE_LOCK_FILE = UPDATE_ROOT / "update.lock"
 PUBLIC_KEYS_FILE = Path(__file__).with_name("updater_public_keys.json")
+
+# URL oficial informada pelo fundador: página institucional do FRS Mercado.
+# Direcionamento manual ao cliente quando a atualização automática falha.
+# Não é um link direto para instalador: o cliente acessa a página e baixa o
+# instalador correto por conta própria.
+MANUAL_UPDATE_URL = "https://www.frssolutions.com.br/frs-mercado"
 
 
 def redefinir_caminhos_apos_raiz() -> None:
@@ -664,14 +671,14 @@ class Updater:
             _set_state(UpdateState.AVAILABLE, version="", error="")
             return None
         if comparacao == 0:
-            # Mesma versão: só aceita uma REVISÃO com sequência estritamente
-            # maior que a já instalada (gatilho por sequência, 1.0.22). A
-            # validação de assinatura/Integridade/anti-downgrade do manifesto
-            # já ocorreu em verify_manifest; aqui evita-se apenas repetir a
-            # mesma revisão ou reoferecer uma já aplicada.
-            if int(release.sequence or 0) <= read_installed_sequence():
-                _set_state(UpdateState.AVAILABLE, version="", error="")
-                return None
+            # Regra de negócio aprovada pelo fundador (1.0.22): mesma versão
+            # anunciada nunca gera oferta de atualização, independentemente da
+            # sequência. O gatilho por `installed_sequence` para revisões de
+            # mesma versão fica desativado por esta regra; dowgrade
+            # (comparacao < 0) já é recusado acima e versão superior segue o
+            # fluxo legítimo abaixo.
+            _set_state(UpdateState.AVAILABLE, version="", error="")
+            return None
         if considerar_adiamento and self._should_defer(release.version):
             # Adiamento do usuário: grava DEFERRED (não CHECKING abandonado) e
             # preserva os campos da release para _release_pendente_atual().
@@ -928,10 +935,8 @@ class Updater:
             _log_diagnostico_atualizacao(
                 "launch_helper_falhou", get_local_version(), self.last_error
             )
-            messagebox.showerror(
-                "Atualização",
-                "O componente seguro de atualização não está disponível. O sistema atual continuará funcionando.",
-                parent=self.parent,
+            _mostrar_falha_atualizacao_com_suporte(
+                "", rollback_confirmado=False, parent=self.parent
             )
             return False
         payload = json.loads(job_path.read_text(encoding="utf-8"))
@@ -962,6 +967,14 @@ class Updater:
             self.last_error = str(exc)
             _set_state(UpdateState.FAILED, error=str(exc))
             _log_diagnostico_atualizacao("launch_helper_falhou", "", str(exc))
+            release_versao = str(
+                json.loads(job_path.read_text(encoding="utf-8")).get(
+                    "release", {}
+                ).get("version", "")
+            )
+            _mostrar_falha_atualizacao_com_suporte(
+                release_versao, rollback_confirmado=False, parent=self.parent
+            )
             return False
 
     def preparar_instalacao_no_encerramento(self) -> bool:
@@ -1010,7 +1023,83 @@ class Updater:
             _set_state(UpdateState.FAILED, error=str(exc))
             messagebox.showerror("Atualização", str(exc), parent=self.parent)
             return False
+        # Revalidação de versão imediatamente antes de iniciar a instalação:
+        # garante que a versão destino ainda é estritamente superior à instalada
+        # e que o pacote não perdeu validade entre o stage e o encerramento.
+        try:
+            self._revalidar_antes_de_instalar(release)
+        except UpdateSecurityError as exc:
+            self.last_error = str(exc)
+            _set_state(UpdateState.FAILED, error=str(exc))
+            _mostrar_falha_atualizacao_com_suporte(
+                release.version, rollback_confirmado=False, parent=self.parent
+            )
+            return False
         return self._launch_helper(job_path)
+
+    def _revalidar_antes_de_instalar(self, release: ReleaseInfo) -> None:
+        """Reconfirma que a versão destino ainda é estritamente superior.
+
+        Chamada imediatamente antes de lançar o helper. Recusa se a versão
+        instalada for igual ou superior (downgrade ou versão igual), ou se
+        o pacote não puder ser validado. Não enfraquece assinatura, SHA-256
+        nem verificações de conteúdo.
+        """
+        local_version = get_local_version()
+        comparacao = compare_versions(release.version, local_version)
+        if comparacao < 0:
+            raise UpdateSecurityError(
+                f"Versão destino ({release.version}) inferior à instalada ({local_version}). "
+                "Downgrade não permitido."
+            )
+        if comparacao == 0:
+            raise UpdateSecurityError(
+                f"Versão destino ({release.version}) igual à instalada ({local_version}). "
+                "Não há atualização a aplicar."
+            )
+
+    def _mostrar_falha_atualizacao_com_suporte(
+        self, versao: str, rollback_confirmado: bool, parent=None
+    ) -> None:
+        """Exibe mensagem clara ao cliente quando a atualização automática falha.
+
+        Informa em português:
+          - que a atualização automática não foi concluída;
+          - se a versão anterior foi preservada/restaurada (somente se confirmado);
+          - que o cliente deve acessar o site oficial para atualização manual;
+          - que deve contatar o suporte se a recuperação não pôde ser confirmada.
+
+        Oferece abertura do navegador na página oficial quando disponível,
+        mantendo o endereço visível para cópia manual.
+        """
+        if rollback_confirmado:
+            trecho_versao = (
+                f"A versão {versao} não foi instalada. "
+                "A versão anterior do programa foi preservada e continua funcional."
+            )
+        else:
+            trecho_versao = (
+                f"A versão {versao} não pôde ser instalada. "
+                "Não foi possível confirmar que a versão anterior esteja intacta. "
+                "Não tente reinstalar antes de falar com o suporte."
+            )
+        mensagem = (
+            f"Atualização automática não concluída.\n\n"
+            f"{trecho_versao}\n\n"
+            f"Para atualizar manualmente, acesse o site oficial da FRS Solutions:\n"
+            f"{MANUAL_UPDATE_URL}\n\n"
+            "Se a recuperação não puder ser confirmada, entre em contato com o "
+            "suporte da FRS Solutions antes de tentar novamente.\n"
+        )
+        try:
+            if webbrowser is not None:
+                webbrowser.open(MANUAL_UPDATE_URL, new=0, autoraise=True)
+        except Exception:
+            pass
+        try:
+            messagebox.showwarning("Atualização não concluída", mensagem, parent=parent)
+        except Exception:
+            print(mensagem)
 
     def aplicar_atualizacao(self, repo: str = "") -> bool:
         """Compatibilidade: prepara a atualização; nunca substitui o EXE no PID atual."""

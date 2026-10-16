@@ -1,5 +1,5 @@
 #define MyAppName "FRS Mercado"
-#define MyAppVersion "1.0.22"
+#define MyAppVersion "1.0.23"
 #define MyAppPublisher "FRS Solutions"
 #define MyAppExeName "FRS_Mercado.exe"
 #define PaymentURL "https://invoice.infinitepay.io/plans/frsoficinadepesca/avka57U38g"
