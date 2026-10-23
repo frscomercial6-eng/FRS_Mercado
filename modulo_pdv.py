@@ -31,7 +31,15 @@ _TOLERANCIA_TROCO = 0.0049
 
 
 def _avaliar_troco_pagamento(total, recebido, pagamentos):
-    """Aplica a mesma regra de excesso/troco à tela, venda e comprovante."""
+    """Aplica a mesma regra de excesso/troco à tela, venda e comprovante.
+
+    REGRA CORRIGIDA 1.0.23:
+    - Se a forma de pagamento for DINHEIRO/ESPÉCIE, a venda é aceita e a
+      gaveta é acionada independentemente do valor do troco. O operador não
+      precisa apagar o troco para abrir a gaveta.
+    - Se NÃO for dinheiro, aplica-se a tolerância anterior: se houver troco
+      maior que a tolerância e não houver dinheiro, a venda é rejeitada.
+    """
     total = round(float(total or 0.0), 2)
     recebido = round(float(recebido or 0.0), 2)
     troco = round(recebido - total, 2)
@@ -40,7 +48,14 @@ def _avaliar_troco_pagamento(total, recebido, pagamentos):
         str(forma or "").strip().upper().replace("É", "E") in {"DINHEIRO", "ESPECIE"}
         for forma, _valor in (pagamentos or [])
     )
-    if troco > _TOLERANCIA_TROCO and not tem_dinheiro:
+
+    # Se for pagamento em dinheiro, aceita sem restrição de troco
+    # e a gaveta será acionada posteriormente por _acionar_gaveta_pos_venda
+    if tem_dinheiro:
+        return True, max(0.0, troco)
+
+    # Para outras formas (PIX, DÉBITO, CRÉDITO, etc.), tolerância anterior
+    if troco > _TOLERANCIA_TROCO:
         return False, 0.0
     return True, max(0.0, troco)
 
@@ -121,6 +136,7 @@ class ModuloPDV(ctk.CTkToplevel):
         self.calculadora_tributaria = CalculadoraTributaria()
         self.modal_abertura = None
         self._id_after_verificacao_caixa = None
+        self._id_after_relogio = None
         self.forma_pagamento_selecionada = "DINHEIRO"
         self.forma_pagamento_selecionada = "DINHEIRO"
         # Pagamentos recebidos na venda corrente (regra 2): acumulam o valor
@@ -235,6 +251,35 @@ class ModuloPDV(ctk.CTkToplevel):
                 self.lbl_estado_caixa_topo.configure(text=texto, text_color=cor)
         except Exception:
             pass
+
+    def _iniciar_relogio_topo(self):
+        """Agenda a atualização do relógio da barra superior (1 segundo).
+
+        Cancela qualquer temporizador anterior para evitar duplicatas ao
+        reabrir a tela. O timer é cancelado com segurança em
+        _ao_fechar_janela().
+        """
+        try:
+            if self._id_after_relogio is not None:
+                self.after_cancel(self._id_after_relogio)
+                self._id_after_relogio = None
+            if self.winfo_exists():
+                self._atualizar_relogio_topo()
+        except Exception:
+            pass
+
+    def _atualizar_relogio_topo(self):
+        """Atualiza o texto de data/hora e reagenda a execução a cada segundo."""
+        try:
+            if not self.winfo_exists():
+                self._id_after_relogio = None
+                return
+            agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            if hasattr(self, "lbl_relogio_topo") and self.lbl_relogio_topo.winfo_exists():
+                self.lbl_relogio_topo.configure(text=agora)
+            self._id_after_relogio = self.after(1000, self._atualizar_relogio_topo)
+        except Exception:
+            self._id_after_relogio = None
 
     def _formatar_moeda_br(self, valor):
         try:
@@ -565,6 +610,16 @@ class ModuloPDV(ctk.CTkToplevel):
         self.btn_menu_retratil.pack(side="left", padx=(12, 4), pady=8)
         self.lbl_estado_caixa_topo = ctk.CTkLabel(self.top_bar, text="🔴 CAIXA FECHADO", font=("Roboto", 16, "bold"), text_color="#ff6666")
         self.lbl_estado_caixa_topo.pack(side="left", padx=6)
+
+        # Relógio local na barra superior, à direita do indicador de caixa.
+        self.lbl_relogio_topo = ctk.CTkLabel(
+            self.top_bar,
+            text="",
+            font=("Roboto", 16, "bold"),
+            text_color="#cccccc",
+        )
+        self.lbl_relogio_topo.pack(side="right", padx=12)
+        self._iniciar_relogio_topo()
 
         # Menu retrátil de operações secundárias (abre/fecha pelo ícone "≡").
         self.menu_operacoes = ctk.CTkFrame(self.main_pdv, fg_color="#181818", corner_radius=0, height=0)
@@ -3137,7 +3192,21 @@ class ModuloPDV(ctk.CTkToplevel):
         if valor_pago is None:
             return
 
+        # Item: Abertura da gaveta no clique em Finalizar venda (antes do modal)
+        # Apenas aciona se forma for dinheiro/espécie; misto verifica parciais.
+        # PIX/DÉBITO/CRÉDITO/VOUCHER/VALE ficam bloqueados pela função própria.
+        self._acionar_gaveta_pos_venda(forma_pgto)
+
         escolha = self._perguntar_tipo_impressao()
+
+        if escolha == "VOLTAR":
+            # Resetar acionamento da gaveta pois venda NÃO foi gravada
+            # e itens/valores devem permanecer disponíveis para correção.
+            self._gaveta_solicitada_por_pagamento = False
+            # Usuário escolheu "Voltar às vendas": cancelar a finalização
+            # sem apagar os itens do carrinho, apenas voltar ao fluxo normal
+            self._set_status("Finalização cancelada. Retornando ao PDV.", "#7f8c8d")
+            return
 
         emitir_nfce = escolha == "NFCE"
         self.finalizar_venda_pdv(
@@ -3237,7 +3306,28 @@ class ModuloPDV(ctk.CTkToplevel):
             command=_escolher_nao_imprimir,
         ).pack(fill="x", padx=24, pady=6)
 
+        ctk.CTkButton(
+            janela,
+            text="Voltar às vendas",
+            fg_color="#9b59b6",
+            hover_color="#8e44ad",
+            height=48,
+            font=("Roboto", 13, "bold"),
+            command=lambda: _escolher("VOLTAR"),
+        ).pack(fill="x", padx=24, pady=6)
+
+        ctk.CTkButton(
+            janela,
+            text="Voltar às vendas",
+            fg_color="#9b59b6",
+            hover_color="#8e44ad",
+            height=48,
+            font=("Roboto", 13, "bold"),
+            command=lambda: _escolher("VOLTAR"),
+        ).pack(fill="x", padx=24, pady=6)
+
         # Atalhos LOCAIS ao popup: F10=Cupom, F11=NFC-e, F12=Não imprimir.
+        # F13 = Voltar às vendas (atalho global quando o foco estiver no popup)
         # Válidos somente enquanto o popup está aberto (grab_set redireciona as
         # teclas para este Toplevel e "break" impede propagação); fora dele,
         # F10/F11/F12 mantêm o comportamento global existente do PDV.
@@ -3257,27 +3347,32 @@ class ModuloPDV(ctk.CTkToplevel):
         self.processar_pagamento(modo)
 
     def _ao_pressionar_delete_cancelar_item(self, event=None):
-        """Atalho DELETE -> cancelar_item() somente fora de campos de edição."""
+        """Atalho DELETE -> cancelar_item() somente fora de campos de edição.
+
+        Lógica corrigida:
+        1. Se há item selecionado, cancela o item (prioriza cancelamento sobre DELETE nativo).
+        2. Se não há item selecionado, permite o DELETE nativo do widget se houver foco
+           em campo de edição (Entry, Text, Spinbox, Combobox).
+        3. Se não há item selecionado e nem foco em campo de edição, retorna None sem ação.
+        """"""
         try:
             foco = self.focus_get()
         except Exception:
             foco = None
-        # Foco em campo de edição: preserva o DELETE nativo do widget.
-        try:
-            if foco is not None:
-                classe = type(foco).__name__.lower()
-                if "entry" in classe or "text" in classe or "spinbox" in classe or "combobox" in classe:
-                    return None
-        except Exception:
-            return None
-        # Sem item selecionado: sem efeito, sem interferir no evento.
-        if self.item_selecionado_idx is None:
-            return None
-        try:
-            self.cancelar_item()
-        except Exception:
-            return None
-        return "break"
+        # Se há item selecionado: cancela o item (prioriza sobre DELETE nativo do campo)
+        if self.item_selecionado_idx is not None:
+            try:
+                self.cancelar_item()
+            except Exception:
+                return None
+            return "break"
+        # Sem item selecionado: permite DELETE nativo se houver foco em campo de edição
+        if foco is not None:
+            classe = type(foco).__name__.lower()
+            if "entry" in classe or "text" in classe or "spinbox" in classe or "combobox" in classe:
+                return None  # Permite DELETE nativo em campo de texto
+        # Sem item selecionado e sem foco em campo de edição: sem ação
+        return None
 
     def cancelar_item(self):
         if self.item_selecionado_idx is None:
@@ -4701,8 +4796,14 @@ class ModuloPDV(ctk.CTkToplevel):
             movs = _fin._movs_caixa(conn, self.caixa_id, abertura, fechamento)
             total_sangrias = float(movs.get("total_sangrias", 0.0) or 0.0)
             total_suprimentos = float(movs.get("total_reforcos", 0.0) or 0.0)
+            # Item 5 (1.0.22): Incluir total de vales PENDENTE no cálculo do saldo
+            # Isso corrige o bug de acumulação: o saldo não chega a zero em múltiplas
+            # transações pois o valor dos vales não é considerado no cálculo.
+            vales_total = float(conn.execute(
+                "SELECT COALESCE(SUM(total), 0.0) FROM vales WHERE status = 'PENDENTE'"
+            ).fetchone()[0] or 0.0)
 
-        return (saldo_inicial + vendas_dinheiro + total_suprimentos) - total_sangrias
+        return (saldo_inicial + vendas_dinheiro + total_suprimentos - total_sangrias - vales_total)
 
     def _avaliar_limite_caixa(self):
         try:
@@ -5473,6 +5574,9 @@ class ModuloPDV(ctk.CTkToplevel):
                 parent=self,
             )
             return "break"
+        if self._id_after_relogio is not None:
+            self.after_cancel(self._id_after_relogio)
+            self._id_after_relogio = None
         try:
             self.destroy()
         except Exception:

@@ -112,3 +112,6 @@ _saida_*.txt
 _CORRECAO_*.txt
 _git_*.txt
 stdout.txt
+# Prompts locais de trabalho (Item 6)
+PROMPT_ITEM6.txt
+PROMPT_ITEM6_CORRECAO.txt

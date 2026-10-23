@@ -1,6 +1,6 @@
 [project]
 name = "mercado"
-version = "1.0.23"
+version = "1.0.24"
 description = "FRS Mercado Mobile App"
 requires-python = ">=3.11"
 dependencies = [

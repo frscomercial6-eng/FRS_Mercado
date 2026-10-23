@@ -148,3 +148,6 @@
 ## 1.0.23 - 16/10/2026
 - Release automatizada gerada pelo Mestre de Release.
 
+## 1.0.24 - 23/10/2026
+- Release automatizada gerada pelo Mestre de Release.
+

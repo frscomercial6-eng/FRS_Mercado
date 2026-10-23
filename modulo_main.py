@@ -19,6 +19,10 @@ from modulo_config import (
     salvar_configuracoes,
 )
 from updater_secure import Updater
+# Aviso INDEPENDENTE de release publicada (canal manual, sem manifesto
+# assinado). Distinto do atualizador automático: apenas informa e abre a
+# página oficial da release quando o usuário decide.
+import update_notice
 from system_monitor import SystemMonitor
 
 # Identificacao visual da versao (somente leitura da versao oficial gerada
@@ -66,6 +70,12 @@ class AppPrincipal(ctk.CTk):
         self._backup_executado_no_ciclo_ocioso = False
         self._monitor_ociosidade_ativo = False
         self._updater = Updater(parent=self)
+        # Aviso independente de release publicada no GitHub (canal manual,
+        # sem manifesto assinado). Um diálogo por sessão; consultas rodam
+        # sempre em thread de fundo para nunca travar o PDV.
+        self._aviso_versao_publica_exibido = False
+        self._aviso_versao_thread_ativa = False
+        self._verificacao_manual_em_andamento = False
         self._system_monitor = None
         self._fiscal_alerta_em_exibicao = False
         # Placeholder inicial: NÃO é uma expiração real. O estado autoritativo
@@ -96,6 +106,13 @@ class AppPrincipal(ctk.CTk):
             )
             self.fechar_sistema()
             return
+
+        # Janela principal maximizada após validação de sessão.
+        try:
+            self.state("zoomed")
+        except Exception:
+            # Alguns window managers não suportam "zoomed"; mantém geometry padrão.
+            pass
 
         # Se já veio logado, inicializa direto.
         self.login_concluido(self.usuario_atual)
@@ -804,8 +821,68 @@ class AppPrincipal(ctk.CTk):
                 enabled=enabled,
                 remind_hours=remind_hours,
             )
+            self._iniciar_aviso_versao_publica(repo, enabled)
         except Exception as e:
             _log_debug("Falha na inicialização do auto-update (ignorado)", e)
+
+    def _iniciar_aviso_versao_publica(self, repo: str, enabled: bool) -> None:
+        """Aviso independente da release publicada no GitHub (canal manual).
+
+        Distinto do atualizador automático assinado: consulta a API pública
+        de Releases do GitHub em thread de fundo (nunca trava o PDV) e, se
+        houver versão publicada superior à instalada, exibe UM aviso por
+        sessão oferecendo abrir a página oficial no navegador. O usuário
+        decide quando atualizar; nada é baixado nem instalado por aqui.
+        Manifesto, assinatura e chaves do atualizador automático NÃO são
+        tocados. Falhas de rede ou respostas inválidas são ignoradas.
+        """
+        if not str(repo or "").strip() or not enabled:
+            return
+        if self._aviso_versao_thread_ativa:
+            return
+        self._aviso_versao_thread_ativa = True
+
+        def _worker():
+            try:
+                # Evita diálogo concorrente com o check assinado silencioso.
+                limite = time.time() + 120
+                while getattr(self._updater, "_check_running", False) and time.time() < limite:
+                    time.sleep(2.0)
+                resultado = update_notice.consultar_versao_publica(repo)
+                if resultado.status != update_notice.STATUS_DISPONIVEL or resultado.aviso is None:
+                    return
+                if self._aviso_versao_publica_exibido:
+                    return
+                self._aviso_versao_publica_exibido = True
+                aviso = resultado.aviso
+                try:
+                    self.after(0, lambda: self._mostrar_aviso_versao_publica(aviso))
+                except Exception:
+                    pass
+            except Exception as e:
+                _log_debug("Falha no aviso independente de versão (ignorado)", e)
+            finally:
+                self._aviso_versao_thread_ativa = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _mostrar_aviso_versao_publica(self, aviso) -> None:
+        """Diálogo único por sessão; a ação é abrir a página oficial (do usuário)."""
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            confirmar = messagebox.askyesno(
+                "Nova versão disponível",
+                update_notice.mensagem_aviso(aviso, update_notice.versao_local()),
+                parent=self,
+            )
+        except Exception:
+            return
+        if confirmar:
+            update_notice.abrir_pagina_oficial(aviso)
 
     def configurar_interface(self):
         # Limpar widgets se houver (para logout/re-login)
@@ -1451,11 +1528,10 @@ class AppPrincipal(ctk.CTk):
             _log_debug("Falha ao abrir pasta do APK", exc)
 
         msg = (
-            "APK local pronto para envio.\\n\\n"
-            f"Arquivo: {apk_path.name}\\n"
-            f"Pasta: {pasta_apk}\\n\\n"
-            "A pasta será aberta agora para anexar o arquivo no WhatsApp Desktop.\\n"
-            "Deseja também abrir o WhatsApp Web com mensagem pronta?"
+            "APK em desenvolvimento — não disponível para envio.\n\n"
+            f"Arquivo localizado: {apk_path.name}\n"
+            f"Pasta: {pasta_apk}\n\n"
+            "Este APK é uma build interna de desenvolvimento e ainda não foi liberada para distribuição.\n"
         )
         abrir_web = messagebox.askyesno("APP de celular", msg)
         if abrir_web:
@@ -1466,27 +1542,102 @@ class AppPrincipal(ctk.CTk):
             webbrowser.open(f"https://wa.me/?text={texto}")
 
     def verificar_atualizacoes_manual(self):
-        """Gatilho manual para checagem imediata de atualização no GitHub."""
+        """Gatilho manual para checagem imediata de atualização no GitHub.
+
+        1.0.23 — a consulta roda em thread de fundo para nunca travar o PDV.
+        O fluxo assinado do atualizador automático permanece intacto e com
+        prioridade. Quando o manifesto assinado não anuncia atualização, um
+        aviso INDEPENDENTE consulta a release pública no GitHub e oferece
+        abrir a página oficial para download manual do instalador — sem
+        substituir o atualizador automático e sem tocar em assinatura,
+        manifesto ou chaves. O usuário decide quando atualizar.
+        """
+        if self._verificacao_manual_em_andamento:
+            return
         try:
             config = carregar_configuracoes()
             repo = str(config.get("auto_update_repo", "") or "").strip()
-            if not repo:
-                messagebox.showwarning("Atualização", "Repositório de atualização não configurado.")
-                return
-
-            release = self._updater.checar_atualizacao(repo)
-            if release is None:
-                messagebox.showinfo("Atualização", "Você já está na versão mais recente.")
-                return
-
-            confirmar = messagebox.askyesno(
-                "Atualização disponível",
-                f"Nova versão encontrada: {release.version}. Deseja atualizar agora?",
-            )
-            if confirmar:
-                self._updater.aplicar_atualizacao(repo)
         except Exception as e:
             messagebox.showwarning("Atualização", f"Falha ao iniciar verificação manual: {e}")
+            return
+        if not repo:
+            messagebox.showwarning("Atualização", "Repositório de atualização não configurado.")
+            return
+        self._verificacao_manual_em_andamento = True
+        threading.Thread(
+            target=lambda: self._verificar_atualizacoes_worker(repo),
+            daemon=True,
+        ).start()
+
+    def _verificar_atualizacoes_worker(self, repo: str) -> None:
+        """Executa a checagem assinada e, se vazia, o aviso independente."""
+        try:
+            try:
+                release = self._updater.checar_atualizacao(repo)
+            except Exception as e:
+                release = None
+                _log_debug("Falha na checagem assinada de atualização", e)
+            if release is not None:
+                try:
+                    self.after(0, lambda: self._confirmar_atualizacao_assinada(repo, release))
+                except Exception:
+                    pass
+                return
+            resultado = update_notice.consultar_versao_publica(repo)
+            try:
+                self.after(0, lambda: self._resultado_verificacao_manual(repo, resultado))
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.after(
+                    0,
+                    lambda: messagebox.showwarning(
+                        "Atualização", f"Falha ao iniciar verificação manual: {e}"
+                    ),
+                )
+            except Exception:
+                pass
+        finally:
+            self._verificacao_manual_em_andamento = False
+
+    def _confirmar_atualizacao_assinada(self, repo: str, release) -> None:
+        """Oferece a atualização automática ASSINADA já conhecida (intacta)."""
+        confirmar = messagebox.askyesno(
+            "Atualização disponível",
+            f"Nova versão encontrada: {release.version}. Deseja atualizar agora?",
+        )
+        if confirmar:
+            self._updater.aplicar_atualizacao(repo)
+
+    def _resultado_verificacao_manual(self, repo: str, resultado) -> None:
+        """Apresenta o resultado da checagem independente ao usuário.
+
+        ``disponivel``: informa a versão nova e oferece abrir a página
+        oficial da release (ação explícita do usuário). ``sem_atualizacao``:
+        informa que já está na mais recente. ``indisponivel``: informa a
+        falha sem travar nada e mostra a página oficial como alternativa.
+        """
+        if resultado.status == update_notice.STATUS_DISPONIVEL and resultado.aviso is not None:
+            aviso = resultado.aviso
+            confirmar = messagebox.askyesno(
+                "Nova versão disponível",
+                update_notice.mensagem_aviso(aviso, update_notice.versao_local()),
+                parent=self,
+            )
+            if confirmar:
+                update_notice.abrir_pagina_oficial(aviso)
+            return
+        if resultado.status == update_notice.STATUS_SEM_ATUALIZACAO:
+            messagebox.showinfo("Atualização", "Você já está na versão mais recente.")
+            return
+        messagebox.showwarning(
+            "Atualização",
+            "Não foi possível verificar atualizações agora "
+            "(fonte pública indisponível ou resposta inválida).\n"
+            "Tente novamente mais tarde ou acesse a página oficial:\n"
+            f"{update_notice.pagina_liberacoes(repo)}",
+        )
 
     def verificar_ia_loop(self):
         """Verifica alertas e atualiza faturamento a cada 60 segundos."""

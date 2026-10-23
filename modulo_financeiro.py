@@ -1,4 +1,4 @@
-import sqlite3
+﻿import sqlite3
 import customtkinter as ctk
 from tkinter import messagebox
 from datetime import datetime
@@ -530,8 +530,14 @@ def obter_resumo_fluxo_caixa_dia(caixa_id=None):
         return resumo
 
 
-def obter_resumo_fluxo_caixa_periodo(data_ini, data_fim):
-    """Retorna resumo por período para relatório fiscal/BI."""
+def obter_resumo_fluxo_caixa_periodo(data_ini, data_fim, caixa_id=None):
+    """Retorna resumo com valores bruto, impostos retidos e líquido para um período.
+
+    Parameters:
+        data_ini: Data inicial no formato AAAA-MM-DD.
+        data_fim: Data final no formato AAAA-MM-DD.
+        caixa_id: ID do caixa para somar apenas o ciclo do caixa (opcional).
+    """
     resumo = {
         "valor_bruto": 0.0,
         "valor_impostos": 0.0,
@@ -543,6 +549,83 @@ def obter_resumo_fluxo_caixa_periodo(data_ini, data_fim):
         "valor_cbs": 0.0,
     }
     try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            # Build WHERE clause for date filter and optional caixa_id
+            date_where = "WHERE date(v.data_venda) BETWEEN date(?) AND date(?)"
+            params = [data_ini, data_fim]
+            if caixa_id is not None:
+                date_where += " AND v.caixa_id = ?"
+                params.append(caixa_id)
+            
+            # Query main vendas table
+            cursor.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(valor_total), 0.0),
+                    COALESCE(SUM(valor_impostos_retidos), 0.0),
+                    COALESCE(SUM(valor_icms), 0.0),
+                    COALESCE(SUM(valor_pis), 0.0),
+                    COALESCE(SUM(valor_cofins), 0.0),
+                    COALESCE(SUM(valor_ibs), 0.0),
+                    COALESCE(SUM(valor_cbs), 0.0),
+                    COALESCE(SUM(
+                        CASE
+                            WHEN COALESCE(valor_liquido, 0) = 0 AND COALESCE(valor_impostos_retidos, 0) = 0
+                            THEN valor_total
+                            ELSE valor_liquido
+                        END
+                    ), 0.0)
+                FROM vendas v
+                {date_where}
+                """,
+                tuple(params),
+            )
+            bruto, impostos, icms, pis, cofins, ibs, cbs, liquido = cursor.fetchone()
+
+            if float(bruto or 0.0) <= 0:
+                # Fallback to vendas_dia table
+                date_where_dia = "WHERE date(data_venda) BETWEEN date(?) AND date(?)"
+                params_dia = [data_ini, data_fim]
+                if caixa_id is not None:
+                    date_where_dia += " AND caixa_id = ?"
+                    params_dia.append(caixa_id)
+                
+                cursor.execute(
+                    f"""
+                    SELECT
+                        COALESCE(SUM(valor_total), 0.0),
+                        COALESCE(SUM(valor_impostos_retidos), 0.0),
+                        COALESCE(SUM(valor_icms), 0.0),
+                        COALESCE(SUM(valor_pis), 0.0),
+                        COALESCE(SUM(valor_cofins), 0.0),
+                        COALESCE(SUM(valor_ibs), 0.0),
+                        COALESCE(SUM(valor_cbs), 0.0),
+                        COALESCE(SUM(
+                            CASE
+                                WHEN COALESCE(valor_liquido, 0) = 0 AND COALESCE(valor_impostos_retidos, 0) = 0
+                                THEN valor_total
+                                ELSE valor_liquido
+                            END
+                        ), 0.0)
+                    FROM vendas_dia
+                    {date_where_dia}
+                    """,
+                    tuple(params_dia),
+                )
+                bruto, impostos, icms, pis, cofins, ibs, cbs, liquido = cursor.fetchone()
+
+        resumo["valor_bruto"] = float(bruto or 0.0)
+        resumo["valor_impostos"] = float(impostos or 0.0)
+        resumo["valor_liquido"] = float(liquido or 0.0)
+        resumo["valor_icms"] = float(icms or 0.0)
+        resumo["valor_pis"] = float(pis or 0.0)
+        resumo["valor_cofins"] = float(cofins or 0.0)
+        resumo["valor_ibs"] = float(ibs or 0.0)
+        resumo["valor_cbs"] = float(cbs or 0.0)
+        return resumo
+    except Exception as e:
+        registrar_log(None, "Resumo Fluxo Caixa", "Falha", f"Erro: {e}")
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(

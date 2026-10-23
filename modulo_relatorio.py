@@ -2,7 +2,7 @@ import customtkinter as ctk
 from tkinter import messagebox
 import sqlite3
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 from pathlib import Path
 
@@ -50,7 +50,7 @@ class ModuloRelatorio(ctk.CTkToplevel):
 
         ctk.CTkLabel(self.frame_filtros, text="Data Inicial (AAAA-MM-DD):").pack(side="left", padx=10)
         self.data_ini = ctk.CTkEntry(self.frame_filtros, width=120)
-        self.data_ini.insert(0, datetime.now().strftime('%Y-%m-01'))
+        self.data_ini.insert(0, (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d'))
         self.data_ini.pack(side="left", padx=5)
 
         ctk.CTkLabel(self.frame_filtros, text="Data Final (AAAA-MM-DD):").pack(side="left", padx=10)
@@ -58,12 +58,19 @@ class ModuloRelatorio(ctk.CTkToplevel):
         self.data_fim.insert(0, datetime.now().strftime('%Y-%m-%d'))
         self.data_fim.pack(side="left", padx=5)
 
+        ctk.CTkLabel(self.frame_filtros, text="Cliente (nome):").pack(side="left", padx=10)
+        self.filtro_cliente = ctk.CTkEntry(self.frame_filtros, width=150)
+        self.filtro_cliente.pack(side="left", padx=5)
+
         self.btn_filtrar = ctk.CTkButton(self.frame_filtros, text="Atualizar BI", command=self.atualizar_dados)
+
+
         self.btn_filtrar.pack(side="left", padx=20)
 
 # L6: o caminho legado "PDF & Drive" foi desativado. O Drive agora e
         # exclusivamente o mecanismo do contrato L5 (backup automatico em
         # FRS Mercado/<market_id>/backups) + download em Configuracoes.
+
         # O metodo gerar_e_subir_pdf permanece no codigo, inalcancavel pela UI.
         #
         # ACHADO/PENDENCIA (1.0.22 - Item 5): `gerar_e_subir_pdf` depende de
@@ -214,6 +221,7 @@ class ModuloRelatorio(ctk.CTkToplevel):
                     FROM vendas
                     WHERE date(data_venda) BETWEEN date(?) AND date(?) AND status_pedido != 'ESTORNADO'
                     ORDER BY id DESC
+LIMIT 15
                     """,
                     (ini, fim),
                 ).fetchall()
@@ -286,18 +294,21 @@ class ModuloRelatorio(ctk.CTkToplevel):
             # Filtro de período respeitado (antes listava todos os vales).
             ini = self.data_ini.get().strip()
             fim = self.data_fim.get().strip()
+            filtro_cliente = self.filtro_cliente.get().strip()
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                vales = cursor.execute(
-                    """
+                sql = """
                     SELECT v.id, v.numero, COALESCE(c.nome, 'Cliente não informado'), v.data_criacao, v.total, v.status, v.data_quitacao
                     FROM vales v
                     LEFT JOIN clientes c ON c.id = v.cliente_id
                     WHERE date(v.data_criacao) BETWEEN date(?) AND date(?)
-                    ORDER BY v.numero DESC
-                    """,
-                    (ini, fim),
-                ).fetchall()
+                """
+                params = [ini, fim]
+                if filtro_cliente:
+                    sql += " AND c.nome LIKE ?"
+                    params.append(f"%{filtro_cliente}%")
+                sql += " ORDER BY v.numero DESC"
+                vales = cursor.execute(sql, tuple(params)).fetchall()
         except Exception as e:
             ctk.CTkLabel(self.scroll_tabelas, text=f"Erro ao consultar vales: {e}", text_color="#ff6666").pack(pady=10)
             return
@@ -649,6 +660,7 @@ class ModuloRelatorio(ctk.CTkToplevel):
                     WHERE status_pedido = 'ESTORNADO'
                       AND date(data_venda) BETWEEN date(?) AND date(?)
                     ORDER BY id DESC
+LIMIT 15
                     """,
                     (ini, fim),
                 ).fetchall()
@@ -884,6 +896,7 @@ class ModuloRelatorio(ctk.CTkToplevel):
             registrar_log(None, "Relatório SPED Base", "Sucesso", f"Arquivo gerado: {nome_arquivo}")
         except Exception as e:
             messagebox.showerror("Erro", f"Falha ao gerar esboço SPED: {e}")
+
             registrar_log(None, "Relatório SPED Base", "Falha", str(e))
 
     @staticmethod

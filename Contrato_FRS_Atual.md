@@ -1,8 +1,8 @@
 # CONTRATO DE LICENCA DE USO DE SOFTWARE
 
 Sistema: FRS Mercado
-Versao Atual: 1.0.23
-Data de Vigencia: 16/10/2026
+Versao Atual: 1.0.24
+Data de Vigencia: 23/10/2026
 
 ## 1. Objeto
 Este contrato regula o uso do software FRS Mercado pelo cliente licenciado.
