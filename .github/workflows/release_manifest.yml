@@ -42,7 +42,7 @@ jobs:
 
       - name: Download portable_zip asset
         run: |
-          $version = ${{ github.event.inputs.version }}
+          $version = "${{ github.event.inputs.version }}"
           $url = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Portable_$version.zip"
           $dest = "FRS_Mercado_Portable_$version.zip"
           Write-Host "Downloading: $url"
@@ -73,7 +73,7 @@ jobs:
 
       - name: Download installer_exe asset
         run: |
-          $version = ${{ github.event.inputs.version }}
+          $version = "${{ github.event.inputs.version }}"
           $url = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Setup.exe"
           $dest = "FRS_Mercado_Setup.exe"
           Write-Host "Downloading: $url"
