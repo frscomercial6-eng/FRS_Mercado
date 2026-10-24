@@ -47,11 +47,7 @@ jobs:
           $dest = "FRS_Mercado_Portable_$version.zip"
           Write-Host "Downloading: $url"
           try {
-            $response = Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-            if ($response.StatusCode -ne 200) {
-              Write-Error "HTTP error: $($response.StatusCode)"
-              exit 1
-            }
+            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
           } catch {
             Write-Error "Failed to download: $_"
             exit 1
@@ -78,11 +74,7 @@ jobs:
           $dest = "FRS_Mercado_Setup.exe"
           Write-Host "Downloading: $url"
           try {
-            $response = Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-            if ($response.StatusCode -ne 200) {
-              Write-Error "HTTP error: $($response.StatusCode)"
-              exit 1
-            }
+            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
           } catch {
             Write-Error "Failed to download: $_"
             exit 1
