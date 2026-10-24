@@ -1,279 +1,245 @@
 name: FRS Mercado Update Manifest Signing
 
 on:
-workflow_dispatch:
-inputs:
-version:
-description: "Version number"
-required: true
-default: "1.0.24"
-type: string
-sequence:
-description: "Update sequence number"
-required: true
-default: "6"
-type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number"
+        required: true
+        default: "1.0.24"
+        type: string
+      sequence:
+        description: "Update sequence number"
+        required: true
+        default: "6"
+        type: string
 
 permissions:
-contents: write
-actions: read
+  contents: write
+  actions: read
 
 concurrency:
-group: update-manifest-${{ github.event.inputs.version }}-${{ github.event.inputs.sequence }}
-cancel-in-progress: false
+  group: update-manifest-${{ github.event.inputs.version }}-${{ github.event.inputs.sequence }}
+  cancel-in-progress: false
 
 jobs:
-generate-manifest:
-runs-on: windows-latest
+  generate-manifest:
+    runs-on: windows-latest
 
-steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
-    with:
-      ref: main
-      persist-credentials: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
 
-  - name: Validate inputs
-    shell: pwsh
-    env:
-      VERSION: ${{ inputs.version }}
-      SEQUENCE: ${{ inputs.sequence }}
-    run: |
-      if ($env:VERSION -ne "1.0.24") {
-        throw "This workflow currently validates only version 1.0.24."
-      }
+      - name: Validate inputs
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+          SEQUENCE: ${{ inputs.sequence }}
+        run: |
+          if ($env:VERSION -ne "1.0.24") {
+            throw "This workflow currently validates only version 1.0.24."
+          }
+          if ($env:SEQUENCE -ne "6") {
+            throw "This workflow currently validates only sequence 6."
+          }
+          if (-not (Test-Path "release_manifest.py")) {
+            throw "release_manifest.py is missing from the repository."
+          }
+          if (-not (Test-Path "updater_secure.py")) {
+            throw "updater_secure.py is missing from the repository."
+          }
 
-      if ($env:SEQUENCE -ne "6") {
-        throw "This workflow currently validates only sequence 6."
-      }
+      - name: Preserve committed manifest for comparison
+        shell: pwsh
+        run: |
+          if (Test-Path "update-manifest.json") {
+            Copy-Item "update-manifest.json" "committed-manifest.json"
+            Write-Host "Existing committed manifest preserved."
+          } else {
+            Write-Host "No existing committed manifest."
+          }
 
-      if (-not (Test-Path "release_manifest.py")) {
-        throw "release_manifest.py is missing from the repository."
-      }
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      if (-not (Test-Path "updater_secure.py")) {
-        throw "updater_secure.py is missing from the repository."
-      }
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to upgrade pip."
+          }
+          python -m pip install cryptography
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install cryptography."
+          }
 
-  - name: Preserve committed manifest for comparison
-    shell: pwsh
-    run: |
-      if (Test-Path "update-manifest.json") {
-        Copy-Item "update-manifest.json" "committed-manifest.json"
-        Write-Host "Existing committed manifest preserved."
-      } else {
-        Write-Host "No existing committed manifest."
-      }
+      - name: Download and validate portable ZIP
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $version = $env:VERSION
+          $url = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Portable_$version.zip"
+          $dest = "FRS_Mercado_Portable_$version.zip"
+          Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+          if (-not (Test-Path $dest)) {
+            throw "Portable ZIP was not downloaded."
+          }
+          $file = Get-Item $dest
+          if ($file.Length -ne 88078571) {
+            throw "Portable ZIP size mismatch: $($file.Length)"
+          }
+          $expectedHash = "a544d96a0266408eebbdabc0de61dedb23a1e15c67e9f892e81b2b63a043aa17"
+          $actualHash = (Get-FileHash -Path $dest -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Portable ZIP SHA-256 mismatch."
+          }
+          Write-Host "Portable ZIP size and SHA-256 validated."
 
-  - name: Set up Python
-    uses: actions/setup-python@v5
-    with:
-      python-version: "3.11"
+      - name: Download and validate installer
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $version = $env:VERSION
+          $url = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Setup.exe"
+          $dest = "FRS_Mercado_Setup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+          if (-not (Test-Path $dest)) {
+            throw "Installer was not downloaded."
+          }
+          $file = Get-Item $dest
+          if ($file.Length -ne 114068976) {
+            throw "Installer size mismatch: $($file.Length)"
+          }
+          $expectedHash = "d2d0456a8a638604da1fa68e61e0d3e1355500d5d2ee5ee5e94475d2ed3550d1"
+          $actualHash = (Get-FileHash -Path $dest -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Installer SHA-256 mismatch."
+          }
+          Write-Host "Installer size and SHA-256 validated."
 
-  - name: Install dependencies
-    shell: pwsh
-    run: |
-      python -m pip install --upgrade pip
-      if ($LASTEXITCODE -ne 0) {
-        throw "Failed to upgrade pip."
-      }
+      - name: Generate signed manifest
+        shell: pwsh
+        env:
+          FRS_UPDATER_PRIVATE_KEY: ${{ secrets.FRS_UPDATER_PRIVATE_KEY }}
+          VERSION: ${{ inputs.version }}
+          SEQUENCE: ${{ inputs.sequence }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:FRS_UPDATER_PRIVATE_KEY)) {
+            throw "The FRS_UPDATER_PRIVATE_KEY secret is missing or empty."
+          }
+          $version = $env:VERSION
+          $sequence = $env:SEQUENCE
+          $portableUrl = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Portable_$version.zip"
+          $installerUrl = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Setup.exe"
+          python release_manifest.py `
+            --version $version `
+            --sequence $sequence `
+            --key-id frs-mercado-updater-official-v2 `
+            --asset portable_zip $portableUrl "FRS_Mercado_Portable_$version.zip" `
+            --asset installer_exe $installerUrl "FRS_Mercado_Setup.exe" `
+            --out update-manifest.json
+          if ($LASTEXITCODE -ne 0) {
+            throw "Manifest generation failed."
+          }
+          if (-not (Test-Path "update-manifest.json")) {
+            throw "Generated manifest was not found."
+          }
 
-      python -m pip install cryptography
-      if ($LASTEXITCODE -ne 0) {
-        throw "Failed to install cryptography."
-      }
+      - name: Verify manifest signature
+        shell: pwsh
+        run: |
+          @'
+          import json
+          from updater_secure import verify_manifest
 
-  - name: Download and validate portable ZIP
-    shell: pwsh
-    env:
-      VERSION: ${{ inputs.version }}
-    run: |
-      $version = $env:VERSION
-      $url = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Portable_$version.zip"
-      $dest = "FRS_Mercado_Portable_$version.zip"
+          with open("update-manifest.json", "r", encoding="utf-8") as f:
+              envelope = json.load(f)
 
-      Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+          verify_manifest(envelope)
+          print("Manifest signature verified.")
+          '@ | Set-Content -Encoding utf8 verify_manifest_check.py
+          python verify_manifest_check.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "Manifest signature verification failed."
+          }
 
-      if (-not (Test-Path $dest)) {
-        throw "Portable ZIP was not downloaded."
-      }
+      - name: Validate manifest metadata
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+          SEQUENCE: ${{ inputs.sequence }}
+        run: |
+          $manifest = Get-Content "update-manifest.json" -Raw | ConvertFrom-Json
+          $payload = $manifest
+          if ($manifest.payload) {
+            $payload = $manifest.payload
+          } elseif ($manifest.manifest) {
+            $payload = $manifest.manifest
+          }
+          $json = $payload | ConvertTo-Json -Depth 30
+          if ($json -notmatch [regex]::Escape($env:VERSION)) {
+            throw "Expected version was not found in the manifest."
+          }
+          if ($json -notmatch [regex]::Escape($env:SEQUENCE)) {
+            throw "Expected sequence was not found in the manifest."
+          }
+          Write-Host "Manifest metadata checked. Signature verification passed."
 
-      $file = Get-Item $dest
-      if ($file.Length -ne 88078571) {
-        throw "Portable ZIP size mismatch: $($file.Length)"
-      }
+      - name: Check manifest against committed version
+        id: check_manifest
+        shell: pwsh
+        run: |
+          $generated = Get-Content "update-manifest.json" -Raw
+          if (Test-Path "committed-manifest.json") {
+            $committed = Get-Content "committed-manifest.json" -Raw
+            if ($committed -eq $generated) {
+              "unchanged=true" >> $env:GITHUB_OUTPUT
+              Write-Host "Manifest unchanged."
+            } else {
+              "unchanged=false" >> $env:GITHUB_OUTPUT
+              Write-Host "Manifest changed."
+            }
+          } else {
+            "unchanged=false" >> $env:GITHUB_OUTPUT
+            Write-Host "No previous manifest; publishing new manifest."
+          }
 
-      $expectedHash = "a544d96a0266408eebbdabc0de61dedb23a1e15c67e9f892e81b2b63a043aa17"
-      $actualHash = (Get-FileHash -Path $dest -Algorithm SHA256).Hash.ToLowerInvariant()
+      - name: Commit and push manifest to main
+        if: steps.check_manifest.outputs.unchanged == 'false'
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+          SEQUENCE: ${{ inputs.sequence }}
+        run: |
+          git config user.name "frscomercial6-eng-bot"
+          git config user.email "bot@frscomercial6-eng.com"
+          git add -- update-manifest.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "No staged changes to publish."
+            exit 0
+          }
+          git commit -m "chore: update FRS Mercado manifest to version $env:VERSION, sequence $env:SEQUENCE [skip ci]"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Manifest commit failed."
+          }
+          git push origin HEAD:main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Manifest push failed."
+          }
+          Write-Host "Manifest committed and pushed to main."
 
-      if ($actualHash -ne $expectedHash) {
-        throw "Portable ZIP SHA-256 mismatch."
-      }
-
-      Write-Host "Portable ZIP size and SHA-256 validated."
-
-  - name: Download and validate installer
-    shell: pwsh
-    env:
-      VERSION: ${{ inputs.version }}
-    run: |
-      $version = $env:VERSION
-      $url = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Setup.exe"
-      $dest = "FRS_Mercado_Setup.exe"
-
-      Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-
-      if (-not (Test-Path $dest)) {
-        throw "Installer was not downloaded."
-      }
-
-      $file = Get-Item $dest
-      if ($file.Length -ne 114068976) {
-        throw "Installer size mismatch: $($file.Length)"
-      }
-
-      $expectedHash = "d2d0456a8a638604da1fa68e61e0d3e1355500d5d2ee5ee5e94475d2ed3550d1"
-      $actualHash = (Get-FileHash -Path $dest -Algorithm SHA256).Hash.ToLowerInvariant()
-
-      if ($actualHash -ne $expectedHash) {
-        throw "Installer SHA-256 mismatch."
-      }
-
-      Write-Host "Installer size and SHA-256 validated."
-
-  - name: Generate signed manifest
-    shell: pwsh
-    env:
-      FRS_UPDATER_PRIVATE_KEY: ${{ secrets.FRS_UPDATER_PRIVATE_KEY }}
-      VERSION: ${{ inputs.version }}
-      SEQUENCE: ${{ inputs.sequence }}
-    run: |
-      if ([string]::IsNullOrWhiteSpace($env:FRS_UPDATER_PRIVATE_KEY)) {
-        throw "The FRS_UPDATER_PRIVATE_KEY secret is missing or empty."
-      }
-
-      $version = $env:VERSION
-      $sequence = $env:SEQUENCE
-
-      $portableUrl = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Portable_$version.zip"
-      $installerUrl = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Setup.exe"
-
-      python release_manifest.py `
-        --version $version `
-        --sequence $sequence `
-        --key-id frs-mercado-updater-official-v2 `
-        --asset portable_zip $portableUrl "FRS_Mercado_Portable_$version.zip" `
-        --asset installer_exe $installerUrl "FRS_Mercado_Setup.exe" `
-        --out update-manifest.json
-
-      if ($LASTEXITCODE -ne 0) {
-        throw "Manifest generation failed."
-      }
-
-      if (-not (Test-Path "update-manifest.json")) {
-        throw "Generated manifest was not found."
-      }
-
-  - name: Verify manifest signature
-    shell: pwsh
-    run: |
-      @'
-      import json
-      from updater_secure import verify_manifest
-
-      with open("update-manifest.json", "r", encoding="utf-8") as f:
-          envelope = json.load(f)
-
-      verify_manifest(envelope)
-      print("Manifest signature verified.")
-      '@ | Set-Content -Encoding utf8 verify_manifest_check.py
-
-      python verify_manifest_check.py
-      if ($LASTEXITCODE -ne 0) {
-        throw "Manifest signature verification failed."
-      }
-
-  - name: Validate manifest metadata
-    shell: pwsh
-    env:
-      VERSION: ${{ inputs.version }}
-      SEQUENCE: ${{ inputs.sequence }}
-    run: |
-      $manifest = Get-Content "update-manifest.json" -Raw | ConvertFrom-Json
-
-      $payload = $manifest
-      if ($manifest.payload) {
-        $payload = $manifest.payload
-      } elseif ($manifest.manifest) {
-        $payload = $manifest.manifest
-      }
-
-      $json = $payload | ConvertTo-Json -Depth 30
-
-      if ($json -notmatch [regex]::Escape($env:VERSION)) {
-        throw "Expected version was not found in the manifest."
-      }
-
-      if ($json -notmatch [regex]::Escape($env:SEQUENCE)) {
-        throw "Expected sequence was not found in the manifest."
-      }
-
-      Write-Host "Manifest metadata checked. Signature verification passed."
-
-  - name: Check manifest against committed version
-    id: check_manifest
-    shell: pwsh
-    run: |
-      $generated = Get-Content "update-manifest.json" -Raw
-
-      if (Test-Path "committed-manifest.json") {
-        $committed = Get-Content "committed-manifest.json" -Raw
-
-        if ($committed -eq $generated) {
-          "unchanged=true" >> $env:GITHUB_OUTPUT
-          Write-Host "Manifest unchanged."
-        } else {
-          "unchanged=false" >> $env:GITHUB_OUTPUT
-          Write-Host "Manifest changed."
-        }
-      } else {
-        "unchanged=false" >> $env:GITHUB_OUTPUT
-        Write-Host "No previous manifest; publishing new manifest."
-      }
-
-  - name: Commit and push manifest to main
-    if: steps.check_manifest.outputs.unchanged == 'false'
-    shell: pwsh
-    env:
-      VERSION: ${{ inputs.version }}
-      SEQUENCE: ${{ inputs.sequence }}
-    run: |
-      git config user.name "frscomercial6-eng-bot"
-      git config user.email "bot@frscomercial6-eng.com"
-
-      git add -- update-manifest.json
-      git diff --cached --quiet
-
-      if ($LASTEXITCODE -eq 0) {
-        Write-Host "No staged changes to publish."
-        exit 0
-      }
-
-      git commit -m "chore: update FRS Mercado manifest to version $env:VERSION, sequence $env:SEQUENCE [skip ci]"
-      if ($LASTEXITCODE -ne 0) {
-        throw "Manifest commit failed."
-      }
-
-      git push origin HEAD:main
-      if ($LASTEXITCODE -ne 0) {
-        throw "Manifest push failed."
-      }
-
-      Write-Host "Manifest committed and pushed to main."
-
-  - name: Upload manifest as audit artifact
-    uses: actions/upload-artifact@v4
-    with:
-      name: update-manifest
-      path: update-manifest.json
-      retention-days: 30
+      - name: Upload manifest as audit artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-manifest
+          path: update-manifest.json
+          retention-days: 30
