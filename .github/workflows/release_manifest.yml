@@ -100,7 +100,11 @@ jobs:
         run: python release_manifest.py --version ${{ github.event.inputs.version }} --sequence ${{ github.event.inputs.sequence }} --key-id frs-mercado-updater-official-v1 --asset portable_zip "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v${{ github.event.inputs.version }}/FRS_Mercado_Portable_${{ github.event.inputs.version }}.zip" "FRS_Mercado_Portable_${{ github.event.inputs.version }}.zip" --asset installer_exe "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v${{ github.event.inputs.version }}/FRS_Mercado_Setup.exe" "FRS_Mercado_Setup.exe" --out update-manifest.json
 
       - name: Verify manifest signature
-        run: python -c "import json; from updater_secure import verify_manifest; envelope = json.load(open('update-manifest.json')); verify_manifest(envelope)"
+        run: |
+          import json
+          from updater_secure import verify_manifest
+          envelope = json.load(open('update-manifest.json'))
+          verify_manifest(envelope)
         shell: python
 
       - name: Confirm valid signature
