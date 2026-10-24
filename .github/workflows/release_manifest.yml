@@ -1,0 +1,58 @@
+name: FRS Mercado Update Manifest Signing
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number (e.g., 1.0.24)"
+        required: true
+        default: "1.0.24"
+      sequence:
+        description: "Update sequence number"
+        required: true
+        default: "6"
+
+jobs:
+  generate-manifest:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+
+      - name: Download portable_zip asset
+        run: |
+          $version = ${{ github.event.inputs.version }}
+          $url = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Portable_$version.zip"
+          $dest = "FRS_Mercado_Portable_$version.zip"
+          Invoke-WebRequest -Uri $url -OutFile $dest
+
+      - name: Download installer_exe asset
+        run: |
+          $version = ${{ github.event.inputs.version }}
+          $url = "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v$version/FRS_Mercado_Setup.exe"
+          $dest = "FRS_Mercado_Setup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $dest
+
+      - name: Generate signed manifest
+        env:
+          FRS_UPDATER_PRIVATE_KEY: ${{ secrets.FRS_UPDATER_PRIVATE_KEY }}
+        run: python release_manifest.py --version ${{ github.event.inputs.version }} --sequence ${{ github.event.inputs.sequence }} --key-id frs-mercado-updater-official-v2 --asset portable_zip "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v${{ github.event.inputs.version }}/FRS_Mercado_Portable_${{ github.event.inputs.version }}.zip" "FRS_Mercado_Portable_${{ github.event.inputs.version }}.zip" --asset installer_exe "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v${{ github.event.inputs.version }}/FRS_Mercado_Setup.exe" "FRS_Mercado_Setup.exe" --out update-manifest.json
+
+      - name: Verify manifest signature
+        run: python -c "import json; from updater_secure import verify_manifest; envelope = json.load(open('update-manifest.json')); verify_manifest(envelope)"
+
+      - name: Confirm valid signature
+        run: |
+          Write-Host "Manifest signed and verified successfully"
+          Write-Host "Version: ${{ github.event.inputs.version }}"
+          Write-Host "Sequence: ${{ github.event.inputs.sequence }}"
+          Write-Host "Key ID: frs-mercado-updater-official-v2"
