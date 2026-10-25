@@ -183,12 +183,16 @@ class TestRecusasDeSeguranca(_BaseSequencia):
         # O contrato criptográfico real permanece intacto.
         self.assertTrue(secure.verify_manifest(MANIFESTO_1021))
 
-    def test_manifesto_publicado_e_1022_sequence_3(self):
-        # O manifesto publicado no repositório é a 1.0.22/sequence 3 (assinada);
-        # a progressão desde a última release é 1.0.21/seq 2 -> 1.0.22/seq 3.
-        self.assertEqual(MANIFESTO_1021["payload"]["version"], "1.0.22")
-        self.assertEqual(int(MANIFESTO_1021["payload"]["sequence"]), 3)
-        self.assertEqual(int(MANIFESTO_1021["payload"]["sequence"]), 2 + 1)
+    def test_manifesto_publicado_e_1024_sequence_6(self):
+        # O manifesto publicado no repositório é a 1.0.24/sequence 6 (assinada com chave v2);
+        # a progressão desde a última release é 1.0.22/seq 3 -> 1.0.24/seq 6.
+        self.assertEqual(MANIFESTO_1021["payload"]["version"], "1.0.24")
+        self.assertEqual(int(MANIFESTO_1021["payload"]["sequence"]), 6)
+        self.assertEqual(MANIFESTO_1021["key_id"], "frs-mercado-updater-official-v2")
+        self.assertEqual(MANIFESTO_1021["schema"], "FRS-MERCADO-UPDATE-MANIFEST-V1")
+        self.assertEqual(MANIFESTO_1021["payload"]["product"], "FRS-Mercado")
+        self.assertEqual(MANIFESTO_1021["payload"]["channel"], "stable")
+        self.assertEqual(MANIFESTO_1021["payload"]["auto_update"], True)
 
 
     def test_versao_inferior_nunca_e_oferecida(self):

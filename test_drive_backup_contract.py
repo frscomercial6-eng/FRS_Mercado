@@ -134,20 +134,20 @@ class TestVersaoUnificada(unittest.TestCase):
     """L4 §1 — fonte de versao unica em 1.0.22."""
 
     def test_release_info_1_0_22(self):
-        self.assertEqual(release_info.APP_VERSION, "1.0.22")
+        self.assertEqual(release_info.APP_VERSION, "1.0.23")
 
     def test_version_txt_e_fonte_oficial(self):
         raiz = Path(__file__).resolve().parent
         self.assertEqual(
-            (raiz / "version.txt").read_text(encoding="utf-8").strip(), "1.0.22"
+            (raiz / "version.txt").read_text(encoding="utf-8").strip(), "1.0.23"
         )
 
     def test_consumidores_usan_a_fonte_oficial(self):
         import modulo_login
         import modulo_main
 
-        self.assertEqual(modulo_main._FRS_APP_VERSION, "1.0.22")
-        self.assertEqual(modulo_login._FRS_APP_VERSION, "1.0.22")
+        self.assertEqual(modulo_main._FRS_APP_VERSION, "1.0.23")
+        self.assertEqual(modulo_login._FRS_APP_VERSION, "1.0.23")
 
     def test_nenhuma_fonte_antiga_presente(self):
         """Os fallbacks duplicados nao podem divergir da fonte oficial."""

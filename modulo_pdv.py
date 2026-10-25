@@ -266,20 +266,37 @@ class ModuloPDV(ctk.CTkToplevel):
             if self.winfo_exists():
                 self._atualizar_relogio_topo()
         except Exception:
-            pass
+            # Se falhar a cancelamento ou verificação, tenta novamente
+            self._id_after_relogio = self.after(100, self._iniciar_relogio_topo)
 
     def _atualizar_relogio_topo(self):
-        """Atualiza o texto de data/hora e reagenda a execução a cada segundo."""
+        """Atualiza o texto de data/hora e reagenda a execução a cada segundo.
+        
+        Robustez: garante que o timer seja reagendado mesmo se houver
+        erro temporário, para o relógio não parar de atualizar.
+        """
         try:
             if not self.winfo_exists():
                 self._id_after_relogio = None
                 return
             agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             if hasattr(self, "lbl_relogio_topo") and self.lbl_relogio_topo.winfo_exists():
-                self.lbl_relogio_topo.configure(text=agora)
+                try:
+                    self.lbl_relogio_topo.configure(text=agora)
+                except Exception:
+                    # Se o label desapareceu, reinicializar
+                    self.lbl_relogio_topo = ctk.CTkLabel(
+                        self.top_bar,
+                        text=agora,
+                        font=("Roboto", 16, "bold"),
+                        text_color="#cccccc",
+                    )
+                    self.lbl_relogio_topo.pack(side="right", padx=12)
+            # Sempre reagenda o timer, mesmo que houveram problemas acima
             self._id_after_relogio = self.after(1000, self._atualizar_relogio_topo)
         except Exception:
-            self._id_after_relogio = None
+            # Em caso de erro inesperado, tentar novamente no próximo ciclo
+            self._id_after_relogio = self.after(1000, self._atualizar_relogio_topo)
 
     def _formatar_moeda_br(self, valor):
         try:

@@ -60,7 +60,7 @@ from updater_secure import (
 
 PRIVATE_KEY_ENV = "FRS_UPDATER_PRIVATE_KEY"
 ASSET_TYPES = ("portable_zip", "installer_exe", "traditional_exe")
-DEFAULT_KEY_ID = "frs-mercado-updater-official-v1"
+DEFAULT_KEY_ID = "frs-mercado-updater-official-v2"
 
 
 class ManifestError(RuntimeError):

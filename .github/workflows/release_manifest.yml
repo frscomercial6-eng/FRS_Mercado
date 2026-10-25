@@ -4,13 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version number (e.g., 1.0.24)"
+        description: 'Version number (e.g., 1.0.24)'
         required: true
-        default: "1.0.24"
+        default: '1.0.24'
       sequence:
-        description: "Update sequence number"
+        description: 'Update sequence number'
         required: true
-        default: "6"
+        default: '6'
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: update-manifest-${{ github.event.inputs.version }}-${{ github.event.inputs.sequence }}
+  cancel-in-progress: false
+
+env:
+  MANIFEST_FILE: update-manifest.json
 
 jobs:
   generate-manifest:
@@ -22,7 +33,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
@@ -89,12 +100,12 @@ jobs:
             Write-Error "SHA256 mismatch: expected $expectedHash, got $actualHash"
             exit 1
           }
-          Write-Host "validated: size and SHA256 OK"
+          
 
       - name: Generate signed manifest
         env:
           FRS_UPDATER_PRIVATE_KEY: ${{ secrets.FRS_UPDATER_PRIVATE_KEY }}
-        run: python release_manifest.py --version ${{ github.event.inputs.version }} --sequence ${{ github.event.inputs.sequence }} --key-id frs-mercado-updater-official-v2 --asset portable_zip "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v${{ github.event.inputs.version }}/FRS_Mercado_Portable_${{ github.event.inputs.version }}.zip" "FRS_Mercado_Portable_${{ github.event.inputs.version }}.zip" --asset installer_exe "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v${{ github.event.inputs.version }}/FRS_Mercado_Setup.exe" "FRS_Mercado_Setup.exe" --out update-manifest.json
+        run: python release_manifest.py --version ${{ github.event.inputs.version }} --sequence ${{ github.event.inputs.sequence }} --key-id frs-mercado-updater-official-v1 --asset portable_zip "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v${{ github.event.inputs.version }}/FRS_Mercado_Portable_${{ github.event.inputs.version }}.zip" "FRS_Mercado_Portable_${{ github.event.inputs.version }}.zip" --asset installer_exe "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v${{ github.event.inputs.version }}/FRS_Mercado_Setup.exe" "FRS_Mercado_Setup.exe" --out update-manifest.json
 
       - name: Verify manifest signature
         run: python -c "import json; from updater_secure import verify_manifest; envelope = json.load(open('update-manifest.json')); verify_manifest(envelope)"
@@ -105,9 +116,43 @@ jobs:
           Write-Host "Manifest signed and verified successfully"
           Write-Host "Version: ${{ github.event.inputs.version }}"
           Write-Host "Sequence: ${{ github.event.inputs.sequence }}"
-          Write-Host "Key ID: frs-mercado-updater-official-v2"
+          Write-Host "Key ID: frs-mercado-updater-official-v1"
 
-      - name: Upload manifest as artifact
+      - name: Check manifest against committed version
+        id: check_manifest
+        run: |
+          $manifestPath = 'update-manifest.json'
+          $committedPath = '$GITHUB_WORKSPACE/$env:MANIFEST_FILE'
+          if (Test-Path $committedPath) {
+            $current = Get-Content $committedPath -Raw
+            $generated = Get-Content $manifestPath -Raw
+            if ($current -eq $generated) {
+              Write-Host "Manifest unchanged - skipping push"
+              echo "unchanged=true" >> $env:GITHUB_OUTPUT
+            } else {
+              Write-Host "Manifest changed - will push"
+              echo "unchanged=false" >> $env:GITHUB_OUTPUT
+            }
+          } else {
+            Write-Host "No committed manifest found - will push"
+            echo "unchanged=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Commit and push update-manifest.json to main
+        if: steps.check_manifest.outputs.unchanged == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FRS_UPDATER_PRIVATE_KEY: ${{ secrets.FRS_UPDATER_PRIVATE_KEY }}
+        run: |
+          $manifestPath = 'update-manifest.json'
+          $branch = 'main'
+          git config user.name 'frscomercial6-eng-bot'
+          git config user.email 'bot@frscomercial6-eng.com'
+          git add $manifestPath
+          git commit -m "chore: update FRS Mercado manifest to version ${{ github.event.inputs.version }}, sequence ${{ github.event.inputs.sequence }} [skip ci]"
+          git push origin $branch
+
+      - name: Upload manifest as artifact (audit copy)
         uses: actions/upload-artifact@v4
         with:
           name: update-manifest

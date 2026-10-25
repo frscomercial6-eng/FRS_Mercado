@@ -30,7 +30,9 @@ from system_monitor import SystemMonitor
 try:
     from release_info import APP_VERSION as _FRS_APP_VERSION
 except Exception:
-    _FRS_APP_VERSION = "1.0.22"
+    # Fallback consistente com a versao oficial.
+    # A versao autoritativa eh sempre definida no release_manager.
+    _FRS_APP_VERSION = "1.0.24"
 
 COMPRAR_LICENCA_URL = "https://www.frssolutions.com.br/planos"
 
