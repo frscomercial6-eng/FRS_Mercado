@@ -4,26 +4,33 @@
     "assets": [
       {
         "asset_type": "portable_zip",
-        "name": "FRS_Mercado_Portable_1.0.24.zip",
-        "sha256": "77f22adbce08b8fa3c85fbcd51052230af92d22638ea86c2b00f10df5b06f338",
-        "size": 88019438,
-        "url": "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v1.0.24/FRS_Mercado_Portable_1.0.24.zip"
+        "name": "FRS_Mercado_Portable_1.0.25.zip",
+        "sha256": "9edfe3b446a4567a3db3a559711e3f36d8296924d3ee7357fb573ff49aedf210",
+        "size": 135145898,
+        "url": "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v1.0.25/FRS_Mercado_Portable_1.0.25.zip"
       },
       {
         "asset_type": "installer_exe",
         "name": "FRS_Mercado_Setup.exe",
-        "sha256": "d2d0456a8a638604da1fa68e61e0d3e1355500d5d2ee5ee5e94475d2ed3550d1",
-        "size": 114068976,
-        "url": "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v1.0.24/FRS_Mercado_Setup.exe"
+        "sha256": "085ce1f058939aeafa388ae7e4c366db1b4c628d6fd675522bbd6c214412d864",
+        "size": 112018939,
+        "url": "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v1.0.25/FRS_Mercado_Setup.exe"
+      },
+      {
+        "asset_type": "traditional_exe",
+        "name": "FRS_Mercado_UpdateHelper.exe",
+        "sha256": "266ee9903db92ea42909f2bace5fceb6f7122266877a043abc63a99deeac48c3",
+        "size": 35929605,
+        "url": "https://github.com/frscomercial6-eng/FRS_Mercado/releases/download/v1.0.25/FRS_Mercado_UpdateHelper.exe"
       }
     ],
     "auto_update": true,
     "channel": "stable",
-    "issued_at": "2026-10-25T10:50:17.350401+00:00",
+    "issued_at": "2026-10-28T18:07:22.160440+00:00",
     "product": "FRS-Mercado",
-    "sequence": 6,
-    "version": "1.0.24"
+    "sequence": 7,
+    "version": "1.0.25"
   },
   "schema": "FRS-MERCADO-UPDATE-MANIFEST-V1",
-  "signature": "3QFLrisngcdVF9wp64NALGtA1+8hF9SOXHeJZVay1CwkICQjKGBZs911YtXqvRZD/3yNAuoWjNepfruZvb1vAQ=="
+  "signature": "7oqNTJqsw3egMJRxPCquGj5MjF5l7h+MCLKSoxIcJAP07wuS493A10XvDQpfm6hikJvdgeGS+1SsEo5vhfhaDA=="
 }
