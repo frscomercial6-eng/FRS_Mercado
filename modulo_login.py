@@ -17,7 +17,7 @@ from license_manager import LicenseManager
 try:
     from release_info import APP_VERSION as _FRS_APP_VERSION
 except Exception:
-    _FRS_APP_VERSION = "1.0.22"
+    _FRS_APP_VERSION = "1.0.25"
 
 COMPRAR_LICENCA_URL = "https://www.frssolutions.com.br/planos"
 
@@ -130,8 +130,16 @@ def copiar_chave_instalacao_ui(janela_pai, rotulo_feedback=None):
     threading.Thread(target=_trabalho, daemon=True).start()
 
     def _aguardar():
+        try:
+            if not janela_pai.winfo_exists():
+                return
+        except Exception:
+            return
         if resultado_q.empty():
-            janela_pai.after(80, _aguardar)
+            try:
+                janela_pai.after(80, _aguardar)
+            except Exception:
+                pass
             return
         _processar()
 
@@ -211,6 +219,7 @@ class ModuloLogin(ctk.CTkToplevel):
             except:
                 pass
         self._after_ids.clear()
+
         super().destroy()
 
     def _iniciar_system_monitor(self):
@@ -397,7 +406,7 @@ class ModuloLogin(ctk.CTkToplevel):
             wraplength=440, justify="left",
         ).pack(pady=(12, 4))
         ctk.CTkButton(
-            self.frame_activacao,
+            self.frame_ativacao,
             text="COPIAR CHAVE DA INSTALAÇÃO", fg_color="#0f766e", hover_color="#115e59",
             command=self._copiar_chave_instalacao,
         ).pack(fill="x", padx=34, pady=4)
@@ -575,9 +584,21 @@ class ModuloLogin(ctk.CTkToplevel):
 
             if resultado:
                 if self.winfo_exists():
-                    print(f"Resultado da busca no banco: [SUCESSO] - Usuário ID {resultado[0]} autenticado.")
+                    print(f"[LOGIN-DIAG] Usuário autenticado: ID={resultado[0]}, nome={resultado[1]}, permissao={resultado[2]}")
                     user_info = {"id": resultado[0], "nome": resultado[1], "permissao": resultado[2]}
                     registrar_log(user_info["id"], "Login", "Sucesso", f"Usuário {user_info['nome']} iniciou sessão.")
+                    print(f"[LOGIN-DIAG] Chamando callback_sucesso com user_info (deferido via after)")
+                    # Usa after(10) para deferred callback - evita AttributeError _after_ids
+                    # ao destruir a janela de login imediatamente após o callback.
+                    # A deferência garante que a janela permaneça viva durante a execução do callback.
+                    try:
+                        if self.parent and self.parent.winfo_exists():
+                            self.parent.after(10, lambda: self.callback_sucesso(user_info))
+                        else:
+                            self.callback_sucesso(user_info)
+                    except Exception:
+                        self.callback_sucesso(user_info)
+                    print(f"[LOGIN-DIAG] callback_sucesso agendado")
 
                     # Ordem crítica para evitar 'grab failed':
                     # 1. Desativa interação, 2. Libera o foco, 3. Oculta, 4. Inicia próximo módulo
@@ -596,16 +617,6 @@ class ModuloLogin(ctk.CTkToplevel):
                             self.destroy()
                     except Exception:
                         pass
-                    
-                    if self.callback_sucesso:
-                        # Notifica a tela principal após a destruição do login.
-                        try:
-                            if self.parent and self.parent.winfo_exists():
-                                self.parent.after(10, lambda: self.callback_sucesso(user_info))
-                            else:
-                                self.callback_sucesso(user_info)
-                        except Exception:
-                            self.callback_sucesso(user_info)
                     
                     print(f"Sessão iniciada: {user_info['nome']} ({user_info['permissao']})")
 

@@ -1,5 +1,5 @@
 #define MyAppName "FRS Mercado"
-#define MyAppVersion "1.0.24"
+#define MyAppVersion "1.0.25"
 #define MyAppPublisher "FRS Solutions"
 #define MyAppExeName "FRS_Mercado.exe"
 #define PaymentURL "https://invoice.infinitepay.io/plans/frsoficinadepesca/avka57U38g"
@@ -32,6 +32,7 @@ Name: "instalaracbr"; Description: "Instalar e configurar ACBrMonitor (motor fis
 
 [Files]
 Source: "dist\FRS_Mercado\*"; DestDir: "{app}"; Excludes: "data\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "credentials.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "assets\logo.ico"; DestDir: "{app}\assets"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "assets\frsMercado.ico"; DestDir: "{app}\assets"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "assets\frsMercado.jpeg"; DestDir: "{app}\assets"; Flags: ignoreversion skipifsourcedoesntexist

@@ -87,7 +87,7 @@ def calcular_dv_ean13(base12):
 def parse_etiqueta_balanca_filizola(codigo):
     """Parser isolado da etiqueta de peso/preço variável (Filizola Platina 15).
 
-    Formato: 2 | PPPPP | VVVVVV | DV — 13 dígitos numéricos com DV EAN-13 válido,
+    Formato: 2 | PPPPP | VVVVVV | DV - 13 dígitos numéricos com DV EAN-13 válido,
     onde PPPPP é o PLU do produto (5 dígitos) e VVVVVV é o total da pesagem em
     centavos (valor já calculado pela balança).
 
@@ -128,7 +128,7 @@ class ModuloPDV(ctk.CTkToplevel):
         # FASE 1 UN/KG: modo atual da mascara do campo Qtd do PDV.
         # "UN" = inteiro (padrao historico); "KG" = decimal ate 3 casas.
         self._mascara_qtd_pdv = "UN"
-        # Atalho <End>: ABRIR A GAVETA (somente isso — nenhum outro fluxo).
+        # Atalho <End>: ABRIR A GAVETA (somente isso - nenhum outro fluxo).
         self._ligar_atalho_end_gaveta()
         self.limite_caixa_atual = obter_limite_sangria_preventiva()
         self.excesso_caixa_atual = 0.0
@@ -266,37 +266,20 @@ class ModuloPDV(ctk.CTkToplevel):
             if self.winfo_exists():
                 self._atualizar_relogio_topo()
         except Exception:
-            # Se falhar a cancelamento ou verificação, tenta novamente
-            self._id_after_relogio = self.after(100, self._iniciar_relogio_topo)
+            pass
 
     def _atualizar_relogio_topo(self):
-        """Atualiza o texto de data/hora e reagenda a execução a cada segundo.
-        
-        Robustez: garante que o timer seja reagendado mesmo se houver
-        erro temporário, para o relógio não parar de atualizar.
-        """
+        """Atualiza o texto de data/hora e reagenda a execução a cada segundo."""
         try:
             if not self.winfo_exists():
                 self._id_after_relogio = None
                 return
             agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             if hasattr(self, "lbl_relogio_topo") and self.lbl_relogio_topo.winfo_exists():
-                try:
-                    self.lbl_relogio_topo.configure(text=agora)
-                except Exception:
-                    # Se o label desapareceu, reinicializar
-                    self.lbl_relogio_topo = ctk.CTkLabel(
-                        self.top_bar,
-                        text=agora,
-                        font=("Roboto", 16, "bold"),
-                        text_color="#cccccc",
-                    )
-                    self.lbl_relogio_topo.pack(side="right", padx=12)
-            # Sempre reagenda o timer, mesmo que houveram problemas acima
+                self.lbl_relogio_topo.configure(text=agora)
             self._id_after_relogio = self.after(1000, self._atualizar_relogio_topo)
         except Exception:
-            # Em caso de erro inesperado, tentar novamente no próximo ciclo
-            self._id_after_relogio = self.after(1000, self._atualizar_relogio_topo)
+            self._id_after_relogio = None
 
     def _formatar_moeda_br(self, valor):
         try:
@@ -797,7 +780,7 @@ class ModuloPDV(ctk.CTkToplevel):
         self.footer_content = ctk.CTkFrame(self.footer, fg_color="transparent")
         self.footer_content.pack(expand=True, fill="both", pady=6)
 
-        # === PAINEL GRANDE — TELA DO CLIENTE (3 áreas horizontais equivalentes) ===
+        # === PAINEL GRANDE - TELA DO CLIENTE (3 áreas horizontais equivalentes) ===
         # ESQUERDA: VALOR PAGO (amarelo) | CENTRO: TROCO (vermelho) | DIREITA: TOTAL DA VENDA (verde).
         # Este painel é da VENDA: o status do caixa fica SÓ no indicador compacto do topo.
         self.pago_frame = ctk.CTkFrame(self.footer_content, fg_color="transparent")
@@ -856,7 +839,7 @@ class ModuloPDV(ctk.CTkToplevel):
         # === RODAPÉ FRS Solutions (identidade, discreta) ===
         self.lbl_rodape_frs = ctk.CTkLabel(
             self.main_pdv,
-            text="Desenvolvido por FRS Solutions — www.frssolutions.com.br",
+            text="Desenvolvido por FRS Solutions - www.frssolutions.com.br",
             font=("Arial", 9, "normal"),
             text_color="#7f8c8d",
             cursor="hand2",
@@ -889,7 +872,7 @@ class ModuloPDV(ctk.CTkToplevel):
             pass
 
     def _avanco_tab_para_valor_pago(self):
-        """TAB → VALOR PAGO somente com a venda pronta em DINHEIRO (regra 4).
+        """TAB -> VALOR PAGO somente com a venda pronta em DINHEIRO (regra 4).
 
         Demais formas (PIX/DÉBITO/CRÉDITO/VOUCHER/DIVERSOS/MÚLTIPLO)
         mantêm exatamente o comportamento de TAB anterior.
@@ -1589,7 +1572,7 @@ class ModuloPDV(ctk.CTkToplevel):
         if not entrada:
             # Recuperação: o leitor pode ter bipado com o foco no campo de quantidade.
             # HOTFIX 1.0.21 (BUG 2): a decisão NÃO é mais pelo TAMANHO da
-            # string, e sim pelo BANCO — um código curto (1 a 3 dígitos) é
+            # string, e sim pelo BANCO - um código curto (1 a 3 dígitos) é
             # resgatado quando existe produto com esse código. Isso elimina
             # (a) bipagens curtas descartadas em silêncio e (b) um PESO em KG
             # ("1,250" -> "1250") ser interpretado como código de barras.
@@ -1665,7 +1648,7 @@ class ModuloPDV(ctk.CTkToplevel):
             # Primeiro tenta localizar um produto com este código de barras curto
             produto_curto = self.buscar_produto_por_ean(entrada)
             if produto_curto:
-                # Produto encontrado → adiciona ao carrinho respeitando a
+                # Produto encontrado -> adiciona ao carrinho respeitando a
                 # quantidade digitada no campo Qtd (ou o multiplicador atual).
                 qtd_item_curto = qtd_digitada if qtd_especificada else self.multiplicador_atual
                 self._adicionar_item_produto(produto_curto, qtd_item_curto)
@@ -1765,10 +1748,10 @@ class ModuloPDV(ctk.CTkToplevel):
         preco_unitario = round(float(preco_unitario), 2)
 
         if unidade == "KG":
-            # FASE 1 — produto vendido por KG: a quantidade é o PESO (kg),
+            # FASE 1 - produto vendido por KG: a quantidade é o PESO (kg),
             # decimal até 3 casas. Se o operador digitou um peso válido no
             # campo Qtd (diferente de 1, padrão vazio do PDV), reaproveita-o;
-            # caso contrário pergunta o peso — nunca assume 1 KG silenciosamente.
+            # caso contrário pergunta o peso - nunca assume 1 KG silenciosamente.
             peso = None
             try:
                 qtd_numerica = float(qtd_item) if qtd_item is not None else None
@@ -1796,7 +1779,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 "origem": "BALCAO",
             }
         else:
-            # FASE 1 — UN (preserva comportamento atual): qtd_item inteira,
+            # FASE 1 - UN (preserva comportamento atual): qtd_item inteira,
             # multiplicador 12* intacto.
             item = {
                 "id": produto[0],
@@ -2277,7 +2260,7 @@ class ModuloPDV(ctk.CTkToplevel):
 
         ``detalhes`` é [(forma, valor)] com valores já parseados (> 0).
         Reutiliza as regras existentes de pagamento: nenhuma regra de troco
-        paralela é criada — excesso acima do total só é aceito quando há
+        paralela é criada - excesso acima do total só é aceito quando há
         DINHEIRO na divisão (troco segue o fluxo existente, regra 5).
 
         Retorna (ok: bool, mensagem: str, soma: float).
@@ -2323,8 +2306,8 @@ class ModuloPDV(ctk.CTkToplevel):
         ``pagamentos_parciais`` e ``valor_pago_acumulado`` são repovoados
         atomicamente com a divisão confirmada (nenhum segundo sistema é
         criado) e a finalização passa pelo fluxo existente
-        (``finalizar_venda_com_confirmacoes`` → ``_validar_e_obter_valor_pagamento``
-        → ``finalizar_venda_pdv`` → ``_resolver_forma_pagamento_registro``,
+        (``finalizar_venda_com_confirmacoes`` -> ``_validar_e_obter_valor_pagamento``
+        -> ``finalizar_venda_pdv`` -> ``_resolver_forma_pagamento_registro``,
         que registra "MISTO" quando há mais de uma forma).
 
         - restante recalculado dinamicamente;
@@ -2492,7 +2475,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 self._set_status(msg, "#ff6666")
                 return
 
-            # Repõe ATOMICAMENTE as estruturas existentes de pagamento —
+            # Repõe ATOMICAMENTE as estruturas existentes de pagamento -
             # nenhum sistema paralelo é criado; a forma gravada continua
             # sendo resolvida por _resolver_forma_pagamento_registro ("MISTO").
             self.limpar_pagamentos_recebidos()
@@ -2673,7 +2656,7 @@ class ModuloPDV(ctk.CTkToplevel):
     def _reconfigurar_mascara_qtd_pdv(self, unidade):
         """Máscara do campo Qtd do PDV coerente com a unidade (FASE 1 UN/KG).
 
-        UN: inteiro (comportamento histórico — multiplicador 12* inclusive).
+        UN: inteiro (comportamento histórico - multiplicador 12* inclusive).
         KG: decimal até 3 casas (1,250).
 
         Só reaplica os bindings quando o modo MUDA: evita acumular
@@ -2704,7 +2687,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 pass
 
     def buscar_imagem_produto(self, ean):
-        """Localiza a imagem do produto por EAN (DB → assets locais).
+        """Localiza a imagem do produto por EAN (DB -> assets locais).
 
         Correção 1.0.16: este corpo estava definido erroneamente como
         '_adicionar_item_produto' (def duplicada), o que sobrescrevia o
@@ -3371,7 +3354,7 @@ class ModuloPDV(ctk.CTkToplevel):
         2. Se não há item selecionado, permite o DELETE nativo do widget se houver foco
            em campo de edição (Entry, Text, Spinbox, Combobox).
         3. Se não há item selecionado e nem foco em campo de edição, retorna None sem ação.
-        """"""
+        """
         try:
             foco = self.focus_get()
         except Exception:
@@ -3515,8 +3498,8 @@ class ModuloPDV(ctk.CTkToplevel):
     def _formatar_quantidade_cupom(self, qtd, unidade="UN"):
         """Quantidade para o cupom: inteiro em UN, decimal + unidade em KG.
 
-        UN mantém exatamente o formato anterior (int(qtd) → "3").
-        KG preserva as 3 casas (1,250 KG) — sem truncamento int().
+        UN mantém exatamente o formato anterior (int(qtd) -> "3").
+        KG preserva as 3 casas (1,250 KG) - sem truncamento int().
         """
         unidade_txt = str(unidade or "UN").strip().upper() or "UN"
         try:
@@ -3695,7 +3678,7 @@ class ModuloPDV(ctk.CTkToplevel):
 
         Fluxo FASE 1: o preço unitário continua sendo o preço cadastrado por KG
         (produtos.preco_venda) e o total da linha é calculado como
-        peso × preço/KG. Diferente do fluxo legado (_obter_preco_kg, mantido
+        peso x preço/KG. Diferente do fluxo legado (_obter_preco_kg, mantido
         apenas como referência), aqui NÃO se pergunta o valor total: pergunta-se
         o peso, permitindo 1,250 KG. A conversão usa o parser numérico único do
         projeto (validacao_numerica.parse_numero), aceitando vírgula decimal.
@@ -3713,7 +3696,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 f"Preço: {self._formatar_moeda_br(preco_kg)}/KG\n"
                 "Ex.: 1,250"
             ),
-            title="Produto KG – Peso (KG)",
+            title="Produto KG - Peso (KG)",
         )
         texto = dialog.get_input()
         if not texto or not str(texto).strip():
@@ -3737,7 +3720,7 @@ class ModuloPDV(ctk.CTkToplevel):
 
         ATENÇÃO: O FRS não possui balança integrada. O operador informa
         diretamente o valor final cobrado (ex.: R$ 8,75).
-        Esse valor é o preço efetivo da venda — NÃO é um peso em kg.
+        Esse valor é o preço efetivo da venda - NÃO é um peso em kg.
         Nenhum peso é calculado ou gravado.
 
         Retorna float (preço informado) ou None se o operador cancelar.
@@ -3745,7 +3728,7 @@ class ModuloPDV(ctk.CTkToplevel):
         nome_produto = produto[2] if len(produto) > 2 else "KG"
         dialog = ctk.CTkInputDialog(
             text=f"Informe o PREÇO TOTAL (R$) para:\n{nome_produto}",
-            title="Produto KG – Preço Final",
+            title="Produto KG - Preço Final",
         )
         valor_str = dialog.get_input()
         if not valor_str or not valor_str.strip():
@@ -3940,7 +3923,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 data_str = str(v_data or "")[:16]
                 btn_v = ctk.CTkButton(
                     scroll_vales,
-                    text=f"Vale #{v_num} — {data_str} — Total: {self._formatar_moeda_br(float(v_tot or 0.0))}",
+                    text=f"Vale #{v_num} - {data_str} - Total: {self._formatar_moeda_br(float(v_tot or 0.0))}",
                     fg_color="#2c3e50",
                     hover_color="#1a252f",
                     anchor="w",
@@ -4038,7 +4021,7 @@ class ModuloPDV(ctk.CTkToplevel):
 
         largura = self._largura_cupom_chars()
         separador = "-" * largura
-        # Identidade do estabelecimento: Nome Fantasia (config) — sem hardcode
+        # Identidade do estabelecimento: Nome Fantasia (config) - sem hardcode
         # de cliente e sem "MERCADO FRS" como identidade impressa.
         nome_fantasia = str(
             self.config.get("nome_fantasia")
@@ -4140,7 +4123,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 ]
             )
 
-        # PARTE C (BLOCO 2) — recebido/troco: usa os valores reais do fluxo.
+        # PARTE C (BLOCO 2) - recebido/troco: usa os valores reais do fluxo.
         # Não se aplica a orçamento: cupom não fiscal de orçamento não tem
         # pagamento, recebimento ou troco associado.
         try:
@@ -4536,7 +4519,7 @@ class ModuloPDV(ctk.CTkToplevel):
         total_cofins = round(total_cofins, 2)
         total_ibs = round(total_ibs, 2)
         total_cbs = round(total_cbs, 2)
-        # ITEM 9 — FONTE ÚNICA: total, impostos e taxa passam a ser calculados
+        # ITEM 9 - FONTE ÚNICA: total, impostos e taxa passam a ser calculados
         # pelo mesmo módulo usado na conversão de orçamento.
         totais = venda_fonte_unica.calcular_totais(
             valor_bruto, valor_impostos, forma_pgto, modulo_financeiro.obter_taxas(),
@@ -4549,7 +4532,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 cursor = conn.cursor()
                 # ITEM 9: a introspecção de colunas migrou para
                 # `venda_fonte_unica` (com cache por transação). Aqui não há
-                # mais ramificação por schema — é esse o ganho do Item 9.
+                # mais ramificação por schema - é esse o ganho do Item 9.
                 cx_id = getattr(self, "caixa_id", None)
                 vales_para_quitar = list(dict.fromkeys(
                     int(vale_id) for vale_id in (getattr(self, "_vales_para_quitar", None) or [])
@@ -4564,7 +4547,7 @@ class ModuloPDV(ctk.CTkToplevel):
                     if not caixa_vale or str(caixa_vale[0] or "").upper() != "ABERTO":
                         raise RuntimeError("O caixa do Vale não está aberto para a operação atual.")
 
-                # ITEM 9 — FONTE ÚNICA: `vendas`, `vendas_dia` e `financeiro`
+                # ITEM 9 - FONTE ÚNICA: `vendas`, `vendas_dia` e `financeiro`
                 # passam a ser gravados pelo mesmo módulo do orçamento. As
                 # ramificações por schema (`caixa_operacao_id` presente ou
                 # ausente) e o rateio de tributos por item viviam aqui em
@@ -4735,7 +4718,7 @@ class ModuloPDV(ctk.CTkToplevel):
                     "impostos_retidos": valor_impostos,
                     "liquido": valor_liquido,
                     "forma_pagamento": forma_pgto,
-                    # PARTE C (BLOCO 2): valor efetivamente recebido — permite ao
+                    # PARTE C (BLOCO 2): valor efetivamente recebido - permite ao
                     # cupom apresentar RECEBIDO/TROCO (reutiliza cálculo existente).
                     "valor_recebido": valor_pago,
                     # MISTO: parciais reais (forma, valor) para detalhe no cupom.
@@ -4744,9 +4727,9 @@ class ModuloPDV(ctk.CTkToplevel):
             )
 
         # RESÍDUO VISUAL PÓS-VENDA REMOVIDO (regra de exibição): a faixa
-        # intermediária NÃO mostra mais o antigo resumo da venda — nem a
+        # intermediária NÃO mostra mais o antigo resumo da venda - nem a
         # linha de conclusão e nem os valores de Bruto, Impostos, Líquido
-        # ou Recebido — tampouco qualquer outro resumo pós-venda. A faixa
+        # ou Recebido - tampouco qualquer outro resumo pós-venda. A faixa
         # é limpa no bloco final desta finalização e permanece somente
         # "Desenvolvido por FRS Solutions".
         # Lógica da venda/pagamentos/gaveta/cupom/fechamento: NÃO alterada.
@@ -4776,7 +4759,7 @@ class ModuloPDV(ctk.CTkToplevel):
         # finalizada, sem resíduo de resumo/automação/status na tela.
         # Ao final permanece SOMENTE "Desenvolvido por FRS Solutions".
         # O painel grande inferior (VALOR PAGO | TROCO | TOTAL DA VENDA)
-        # NÃO é tocado aqui — tamanho, posição e cores inalterados.
+        # NÃO é tocado aqui - tamanho, posição e cores inalterados.
         self._set_status("")
         if hasattr(self, "_retornar_foco_pdv"):
             self._retornar_foco_pdv()
@@ -4955,7 +4938,7 @@ class ModuloPDV(ctk.CTkToplevel):
         """Modal de conferência cega: somente o valor contado (informado).
 
         Por segurança, NÃO exibe total do sistema, diferenças ou valores
-        esperados durante a digitação — o operador informa apenas quanto
+        esperados durante a digitação - o operador informa apenas quanto
         efetivamente contou por modalidade. Sistema/Diferença aparecem
         somente no resumo pós-fechamento.
 
@@ -5053,7 +5036,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 saldo_inicial = float(linha_saldo[0] or 0.0) if linha_saldo else 0.0
             # Movimentações (sangrias/reforços) lidas FORA da conexão acima:
             # a rotina abre a própria conexão e, se aninhada, recebia
-            # "database is locked" — o que zerava sangrias/reforços na
+            # "database is locked" - o que zerava sangrias/reforços na
             # composição do DINHEIRO do ciclo.
             movs = modulo_financeiro.obter_movimentacoes_caixa(self.caixa_id)
             total_sangrias = float(movs.get("total_sangrias", 0.0) or 0.0)
@@ -5122,7 +5105,7 @@ class ModuloPDV(ctk.CTkToplevel):
             total_informado = round(sum(informado.values()), 2)
             diferenca_geral = round(total_informado - total_sistema_ciclo, 2)
             caixa_fechado_id = self.caixa_id
-            # TOTAL DE VALE DO CICLO — SOMENTE INFORMATIVO.
+            # TOTAL DE VALE DO CICLO - SOMENTE INFORMATIVO.
             # Leitura isolada dos Vales GERADOS (criados) neste ciclo de caixa.
             # NAO entra em DINHEIRO, TOTAL DO SISTEMA, VALOR INFORMADO,
             # DIFERENCA nem em qualquer outra composicao financeira do
@@ -5147,7 +5130,7 @@ class ModuloPDV(ctk.CTkToplevel):
                     f"Caixa {caixa_fechado_id} fechado. Sistema {total_sistema:.2f} | Informado {total_informado:.2f} "
                     f"| Diferença geral {diferenca_geral:+.2f} | Divergências: {divergencias}",
                 )
-                # PARTES A/B (BLOCO 2) — pergunta de impressão e resumo visual.
+                # PARTES A/B (BLOCO 2) - pergunta de impressão e resumo visual.
                 # Reutiliza os dados já calculados/persistidos (esperado, informado,
                 # totais, caixa encerrado). O resumo aparece nos dois casos (SIM/NÃO).
                 dados_resumo = {
@@ -5214,7 +5197,7 @@ class ModuloPDV(ctk.CTkToplevel):
         """Pergunta SIM/NÃO sobre imprimir o resumo do fechamento (BLOCO 2, Parte B).
 
         Retorna True (IMPRIMIR) ou False (NÃO IMPRIMIR). Em ambiente sem UI
-        (checklist/testes), retorna False — nunca bloqueia o fluxo.
+        (checklist/testes), retorna False - nunca bloqueia o fluxo.
         """
         from tkinter import messagebox
 
@@ -5293,7 +5276,7 @@ class ModuloPDV(ctk.CTkToplevel):
                 # caractere de preenchimento, que poluia a coluna).
                 return f"{_v:>+9.2f}"
             return f"{_v:>9.2f}"
-        # REGRA 1.0.20 — tabela superior de conferencia (sem abertura):
+        # REGRA 1.0.20 - tabela superior de conferencia (sem abertura):
         # SISTEMA = SISTEMA DO CICLO (calculado ja vem sem abertura);
         # INFORMADO = exatamente o valor informado pelo operador (0.00 se
         # nao informado); DIFERENCA = INFORMADO - SISTEMA.
@@ -5335,7 +5318,7 @@ class ModuloPDV(ctk.CTkToplevel):
             f"VALOR DE ABERTURA DO CAIXA: R$ {_abertura:>9.2f}",
         ))
         linhas.append(sep)
-        # REGRA 1.0.20 — resumo inferior: abertura separada, DINHEIRO somente
+        # REGRA 1.0.20 - resumo inferior: abertura separada, DINHEIRO somente
         # com a movimentacao do ciclo (sem abertura), TOTAL DO SISTEMA com
         # abertura + movimentacao, e DIFERENCA = INFORMADO x SISTEMA DO CICLO.
         linhas.extend(_linha_valor(
@@ -5390,7 +5373,7 @@ class ModuloPDV(ctk.CTkToplevel):
         # TOTAL DE VALE GERADO DURANTE O DIA: informa o total dos Vales GERADOS
         # (criados) neste ciclo de caixa. NAO entra em DINHEIRO, TOTAL DO
         # SISTEMA, VALOR INFORMADO, DIFERENCA nem em qualquer outra composicao
-        # financeira acima — nenhuma linha de calculo do fechamento foi
+        # financeira acima - nenhuma linha de calculo do fechamento foi
         # alterada por causa desta informacao.
         try:
             _vales = round(float(dados.get("total_vales_gerados", 0.0) or 0.0), 2)
@@ -5419,13 +5402,13 @@ class ModuloPDV(ctk.CTkToplevel):
         """Exibe o modal de resumo visual pós-fechamento (BLOCO 2, Parte A).
 
         Permanece visível para conferência/foto; aparece tanto no SIM quanto
-        no NÃO da impressão ("não imprimir" ≠ "não mostrar").
-        Ao fechar (botão FECHAR ou X), executa ``ao_concluir`` — pergunta
+        no NÃO da impressão ("não imprimir" != "não mostrar").
+        Ao fechar (botão FECHAR ou X), executa ``ao_concluir`` - pergunta
         "ABRIR NOVO CAIXA?" e só abre a tela de contagem no SIM (no NÃO o
         caixa permanece fechado e o programa pode ser encerrado).
         """
         resumo = ctk.CTkToplevel(self)
-        resumo.title("FECHAMENTO DE CAIXA — RESUMO")
+        resumo.title("FECHAMENTO DE CAIXA - RESUMO")
         resumo.geometry("560x620")
         try:
             resumo.transient(self)
@@ -5485,8 +5468,8 @@ class ModuloPDV(ctk.CTkToplevel):
     def _perguntar_abertura_novo_caixa(self):
         """Após o resultado final do fechamento: pergunta "ABRIR NOVO CAIXA?".
 
-        SIM → abre a tela de CONTAGEM DE ABERTURA (ciclo existente).
-        NÃO → o caixa permanece FECHADO (``caixa_id = None``, indicador
+        SIM -> abre a tela de CONTAGEM DE ABERTURA (ciclo existente).
+        NÃO -> o caixa permanece FECHADO (``caixa_id = None``, indicador
         🔴 CAIXA FECHADO), a janela do PDV é encerrada e o foco volta
         automaticamente ao MENU PRINCIPAL. A tela de contagem NUNCA abre
         automaticamente depois de um fechamento.
@@ -5603,7 +5586,7 @@ class ModuloPDV(ctk.CTkToplevel):
     def reentrar_apos_menu(self):
         """Reexibe o PDV e revalida o ciclo de caixa antes de operar.
 
-        Item 11B — após voltar do menu, o foco vai para o campo de bipagem.
+        Item 11B - após voltar do menu, o foco vai para o campo de bipagem.
         Só é AGENDADO, nunca imediato: `verificar_caixa_aberto()` pode abrir o
         modal de abertura de caixa, e roubar o foco dele quebraria o
         operador. Por isso conferimos o modal ANTES de focar.
@@ -5632,7 +5615,7 @@ class ModuloPDV(ctk.CTkToplevel):
 
         Não interfere em nada: só chama `_safe_focus`, que já ignora widget
         destruído. Se o modal de abertura de caixa estiver visível, o foco
-        fica com ele — o operador precisa abrir o caixa primeiro.
+        fica com ele - o operador precisa abrir o caixa primeiro.
         """
         try:
             modal = getattr(self, "modal_abertura", None)

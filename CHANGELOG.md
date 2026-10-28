@@ -154,3 +154,6 @@
 ## 1.0.25 - 23/10/2026
 - Release automatizada gerada pelo Mestre de Release.
 
+## 1.0.25 - 28/10/2026
+- Release automatizada gerada pelo Mestre de Release.
+

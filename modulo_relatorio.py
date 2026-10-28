@@ -900,10 +900,28 @@ LIMIT 15
             registrar_log(None, "Relatório SPED Base", "Falha", str(e))
 
     @staticmethod
-    def _obter_drive_service():
+    @staticmethod
+    def _obter_drive_service(credenciais=None):
         """Autentica via OAuth2, reaproveitando token local para evitar novo login."""
-        if not GOOGLE_CREDS["credentials"]:
+        # [DRIVE-DIAG] Início de _obter_drive_service
+        import sys, os, traceback
+        from pathlib import Path
+
+        print(f"[DRIVE-DIAG] _obter_drive_service chamado, credenciais_fornecidas={credenciais is not None}")
+        print(f"[DRIVE-DIAG] GOOGLE_CREDS tipo={type(GOOGLE_CREDS).__name__ if GOOGLE_CREDS else None}")
+        if GOOGLE_CREDS:
+            print(f"[DRIVE-DIAG]   GOOGLE_CREDS credentials={'EXISTE' if GOOGLE_CREDS.get('credentials') else 'AUSENTE'}")
+
+        # Usar credenciais fornecidas ou fallback para GOOGLE_CREDS
+        creds_dict = credenciais or GOOGLE_CREDS
+
+        if not (creds_dict or {}).get("credentials"):
+            print(f"[DRIVE-DIAG] ERRO: credentials não encontrado em credenciais fornecidas nem em GOOGLE_CREDS")
             raise Exception("Credenciais do Google (credentials.json) não encontradas.")
+
+        creds_path = creds_dict.get("credentials")
+        print(f"[DRIVE-DIAG]   caminho_credentials={creds_path}")
+        print(f"[DRIVE-DIAG]   credenciais_existe={Path(creds_path).exists() if creds_path else False}")
 
         SCOPES = ['https://www.googleapis.com/auth/drive.file']
         creds = None
@@ -916,12 +934,12 @@ LIMIT 15
                 "Google Drive requer as bibliotecas Google instaladas. "
                 "A configuração de Drive não está disponível."
             ) from exc
-        
+
         # Gerenciamento de token para evitar login repetitivo
         if os.path.exists(token_path):
             with open(token_path, 'rb') as token:
                 creds = pickle.load(token)
-        
+
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
@@ -936,12 +954,16 @@ LIMIT 15
                         "Google Drive requer a biblioteca google-auth-oauthlib, "
                         "que não está instalada."
                     ) from exc
-                flow = InstalledAppFlow.from_client_secrets_file(GOOGLE_CREDS["credentials"], SCOPES)
+                print(f"[DRIVE-DIAG] Iniciando fluxo OAuth com credentials.json: {creds_path}")
+                flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+                print(f"[DRIVE-DIAG] Chamando flow.run_local_server(port=0) - abrirá navegador")
                 creds = flow.run_local_server(port=0)
+                print(f"[DRIVE-DIAG] fluxo OAuth concluído, credenciais obtidas")
             with open(token_path, 'wb') as token:
                 pickle.dump(creds, token)
 
         return build('drive', 'v3', credentials=creds)
+
 
     @staticmethod
     def upload_para_drive(file_path, folder_id):

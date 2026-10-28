@@ -79,8 +79,8 @@ def garantir_pasta_backups(service, market_id: str) -> str:
     return arvore["backups_folder_id"]
 
 
-def obter_service():
-    return _modulo_relatorio()._obter_drive_service()
+def obter_service(credenciais=None):
+    return _modulo_relatorio()._obter_drive_service(credenciais=credenciais)
 
 
 def registrar(usuario_id, acao, status, detalhes):

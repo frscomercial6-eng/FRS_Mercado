@@ -155,7 +155,7 @@ def conta_autorizada(service) -> str:
     return email
 
 
-def conectar(email_informado, service=None):
+def conectar(email_informado, service=None, credenciais=None):
     """Autoriza no Google, persiste a conta REAL e garante a arvore do mercado.
 
     O e-mail informado e validado, mas quem manda e o Google: se as contas
@@ -167,7 +167,7 @@ def conectar(email_informado, service=None):
 
     import backup_drive as drive
 
-    servico = service or drive.obter_service()
+    servico = service or drive.obter_service(credenciais=credenciais)
     conta_real = conta_autorizada(servico)
     informada = str(email_informado or "").strip()
 

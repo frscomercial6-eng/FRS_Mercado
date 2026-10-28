@@ -76,9 +76,15 @@ def _config_padrao():
         "app_executable_path": "",
         "update_executable_path": "",
         "email_cliente": "",
+    # E-mail utilizado para backup do Google Drive (mantido para referência)
+    # Campo de credenciais removido - localização automática
+        "google_oauth_credentials_path": "client_secret.json",
         "drive_credentials_path": "",
+    # Campo removido da interface - credenciais localizadas automaticamente
         "drive_backup_folder_id": "",
     "google_drive_conta": "",
+    # Campo removido da interface: credenciais do Google são localizadas automaticamente
+    # sem necessidade de o usuário fornecer caminhos manuais.
         "emissor_fiscal_path": "",
         "pasta_entrada_fiscal": obter_caminho_dados("fiscal_in"),
         "pasta_retorno_fiscal": obter_caminho_dados("fiscal_out"),
@@ -213,17 +219,43 @@ def carregar_credenciais_google():
     """
     import sys
 
+    from modulo_config import carregar_configuracoes
+
+    configuracao = carregar_configuracoes() or {}
     diretorio_base = Path(__file__).parent.resolve()
     diretorio_exe = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else diretorio_base
 
-    credenciais_seguras = load_client_credentials()
+    # Usar caminho configurado do novo cliente OAuth se disponível
+    caminho_oauth = configuracao.get("google_oauth_credentials_path")
+    if caminho_oauth:
+        # Caminho relativo ao projeto, não ao diretório de trabalho atual
+        caminho_projeto = Path(__file__).parent.resolve() / caminho_oauth
+        if caminho_projeto.exists():
+            # Usar o client_secret.json configurado, sem processamento complexo
+            try:
+                import json
+                with open(Path(__file__).parent.resolve() / caminho_oauth, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if 'installed' in data or 'web' in data:
+                    credenciais_seguras = {
+                        "credentials": str(Path(__file__).parent.resolve() / caminho_oauth),
+                        "google_services": str(Path(__file__).parent.resolve() / caminho_oauth.with_name("google-services.json"))
+                    }
+                else:
+                    credenciais_seguras = load_client_credentials()
+            except Exception as e:
+                credenciais_seguras = load_client_credentials()
+        else:
+            credenciais_seguras = load_client_credentials()
+    else:
+        credenciais_seguras = load_client_credentials()
 
     valor_creds_seguro = str(
-        credenciais_seguras.get("google_oauth_credentials_path")
+        credenciais_seguras.get("credentials")
         or credenciais_seguras.get("drive_credentials_path")
         or ""
     ).strip()
-    valor_services_seguro = str(credenciais_seguras.get("google_services_path") or "").strip()
+    valor_services_seguro = str(credenciais_seguras.get("google_services") or credenciais_seguras.get("google_services_path") or "").strip()
     caminho_creds_seguro = Path(valor_creds_seguro) if valor_creds_seguro else None
     caminho_services_seguro = Path(valor_services_seguro) if valor_services_seguro else None
 
@@ -235,16 +267,23 @@ def carregar_credenciais_google():
     if caminho_services_seguro and caminho_services_seguro.exists():
         caminho_services = caminho_services_seguro
 
-    if not caminho_creds.exists():
+    # Priorizar caminhos configurados (do novo cliente OAuth) antes de cair back para defaults
+    if caminho_creds_seguro and caminho_creds_seguro.exists():
+        caminho_creds = caminho_creds_seguro
+    elif not caminho_creds.exists():
         caminho_creds = diretorio_base / "credentials.json"
-    if not caminho_services.exists():
+    
+    if caminho_services_seguro and caminho_services_seguro.exists():
+        caminho_services = caminho_services_seguro
+    elif not caminho_services.exists():
         caminho_services = diretorio_base / "google-services.json"
-
+    
+    # Apenas usar AppData se os caminhos configurados nÃ£o existirem
     appdata_creds = Path(obter_caminho_dados("credentials.json"))
     appdata_services = Path(obter_caminho_dados("google-services.json"))
-    if appdata_creds.exists():
+    if appdata_creds.exists() and not caminho_creds_seguro:
         caminho_creds = appdata_creds
-    if appdata_services.exists():
+    if appdata_services.exists() and not caminho_services_seguro:
         caminho_services = appdata_services
 
     credenciais = {
@@ -252,12 +291,13 @@ def carregar_credenciais_google():
         "google_services": str(caminho_services) if caminho_services.exists() else None,
     }
 
-    if not credenciais["credentials"] or not credenciais["google_services"]:
+    if not credenciais["credentials"]:
         from database_manager import registrar_log
 
-        msg = "Integração Google indisponível: Arquivos 'credentials.json' ou 'google-services.json' não encontrados."
+        msg = "Integração Google indisponível: Arquivo credentials.json não encontrado para OAuth."
         registrar_log(None, "Segurança/Config", "Falha", msg)
-        print(f"Erro de Integração: {msg}")
+        print(f"Aviso de integracao Google: {msg}")
+        return {}
 
     return credenciais
 
@@ -455,64 +495,74 @@ def exibir_configuracoes(master=None):
     frame_fiscal = ctk.CTkScrollableFrame(tabview.tab("Fiscal"))
     frame_fiscal.pack(fill="both", expand=True)
 
+    # --- SEÇÕES DA ABA GERAL (criadas antes dos campos para servir de pai) ---
+    frame_cadastro = ctk.CTkFrame(frame_geral)
+    frame_cadastro.grid(row=0, column=0, columnspan=2, padx=8, pady=(8, 4), sticky="ew")
+    ctk.CTkLabel(
+        frame_cadastro, text="🏢 CADASTRO DA EMPRESA",
+        font=("Arial", 14, "bold"),
+    ).grid(row=0, column=0, columnspan=2, padx=10, pady=(12, 8), sticky="w")
+
+    frame_drive = ctk.CTkFrame(frame_geral)
+    frame_drive.grid(row=1, column=0, columnspan=2, padx=8, pady=(12, 8), sticky="ew")
+    ctk.CTkLabel(
+        frame_drive, text="☁️ BACKUP E GOOGLE DRIVE",
+        font=("Arial", 14, "bold"),
+    ).grid(row=0, column=0, columnspan=2, padx=10, pady=(8, 4), sticky="w")
+
     # --- ABA GERAL ---
-    ctk.CTkLabel(frame_geral, text="Nome Fantasia:").grid(row=0, column=0, padx=10, pady=6, sticky="e")
-    entry_fantasia = ctk.CTkEntry(frame_geral, width=360)
+    ctk.CTkLabel(frame_cadastro, text="Nome Fantasia:").grid(row=1, column=0, padx=10, pady=6, sticky="e")
+    entry_fantasia = ctk.CTkEntry(frame_cadastro, width=360)
     entry_fantasia.insert(0, config_atual.get("nome_fantasia", "") or config_atual.get("nome_estabelecimento", ""))
-    entry_fantasia.grid(row=0, column=1, padx=10, pady=6)
+    entry_fantasia.grid(row=1, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="Razão Social:").grid(row=1, column=0, padx=10, pady=6, sticky="e")
-    entry_razao = ctk.CTkEntry(frame_geral, width=360)
+    ctk.CTkLabel(frame_cadastro, text="Razão Social:").grid(row=2, column=0, padx=10, pady=6, sticky="e")
+    entry_razao = ctk.CTkEntry(frame_cadastro, width=360)
     entry_razao.insert(0, config_atual.get("razao_social", ""))
-    entry_razao.grid(row=1, column=1, padx=10, pady=6)
+    entry_razao.grid(row=2, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="CNPJ:").grid(row=2, column=0, padx=10, pady=6, sticky="e")
-    entry_cnpj = ctk.CTkEntry(frame_geral, width=360)
+    ctk.CTkLabel(frame_cadastro, text="CNPJ:").grid(row=3, column=0, padx=10, pady=6, sticky="e")
+    entry_cnpj = ctk.CTkEntry(frame_cadastro, width=360)
     entry_cnpj.insert(0, config_atual.get("cnpj", ""))
-    entry_cnpj.grid(row=2, column=1, padx=10, pady=6)
+    entry_cnpj.grid(row=3, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="Endereço — Logradouro:").grid(row=3, column=0, padx=10, pady=6, sticky="e")
-    entry_logradouro = ctk.CTkEntry(frame_geral, width=280)
+    ctk.CTkLabel(frame_cadastro, text="Endereço — Logradouro:").grid(row=4, column=0, padx=10, pady=6, sticky="e")
+    entry_logradouro = ctk.CTkEntry(frame_cadastro, width=280)
     entry_logradouro.insert(0, config_atual.get("logradouro", ""))
-    entry_logradouro.grid(row=3, column=1, padx=(10, 0), pady=6, sticky="w")
-    ctk.CTkLabel(frame_geral, text="Nº:").grid(row=3, column=1, padx=(0, 0), pady=6, sticky="e")
-    entry_numero = ctk.CTkEntry(frame_geral, width=70)
+    entry_logradouro.grid(row=4, column=1, padx=(10, 0), pady=6, sticky="w")
+    ctk.CTkLabel(frame_cadastro, text="Nº:").grid(row=4, column=1, padx=(0, 0), pady=6, sticky="e")
+    entry_numero = ctk.CTkEntry(frame_cadastro, width=70)
     entry_numero.insert(0, config_atual.get("numero", ""))
-    entry_numero.grid(row=3, column=1, padx=(0, 10), pady=6, sticky="e")
+    entry_numero.grid(row=4, column=1, padx=(0, 10), pady=6, sticky="e")
 
-    ctk.CTkLabel(frame_geral, text="Complemento:").grid(row=4, column=0, padx=10, pady=6, sticky="e")
-    entry_complemento = ctk.CTkEntry(frame_geral, width=360)
+    ctk.CTkLabel(frame_cadastro, text="Complemento:").grid(row=5, column=0, padx=10, pady=6, sticky="e")
+    entry_complemento = ctk.CTkEntry(frame_cadastro, width=360)
     entry_complemento.insert(0, config_atual.get("complemento", ""))
-    entry_complemento.grid(row=4, column=1, padx=10, pady=6)
+    entry_complemento.grid(row=5, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="Bairro:").grid(row=5, column=0, padx=10, pady=6, sticky="e")
-    entry_bairro = ctk.CTkEntry(frame_geral, width=360)
+    ctk.CTkLabel(frame_cadastro, text="Bairro:").grid(row=6, column=0, padx=10, pady=6, sticky="e")
+    entry_bairro = ctk.CTkEntry(frame_cadastro, width=360)
     entry_bairro.insert(0, config_atual.get("bairro", ""))
-    entry_bairro.grid(row=5, column=1, padx=10, pady=6)
+    entry_bairro.grid(row=6, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="Cidade:").grid(row=6, column=0, padx=10, pady=6, sticky="e")
-    entry_cidade = ctk.CTkEntry(frame_geral, width=220)
+    ctk.CTkLabel(frame_cadastro, text="Cidade:").grid(row=7, column=0, padx=10, pady=6, sticky="e")
+    entry_cidade = ctk.CTkEntry(frame_cadastro, width=220)
     entry_cidade.insert(0, config_atual.get("cidade", ""))
-    entry_cidade.grid(row=6, column=1, padx=(10, 0), pady=6, sticky="w")
-    ctk.CTkLabel(frame_geral, text="UF:").grid(row=6, column=1, padx=(0, 90), pady=6, sticky="e")
-    entry_uf = ctk.CTkEntry(frame_geral, width=60)
+    entry_cidade.grid(row=7, column=1, padx=(10, 0), pady=6, sticky="w")
+    ctk.CTkLabel(frame_cadastro, text="UF:").grid(row=7, column=1, padx=(0, 90), pady=6, sticky="e")
+    entry_uf = ctk.CTkEntry(frame_cadastro, width=60)
     entry_uf.insert(0, config_atual.get("uf", ""))
-    entry_uf.grid(row=6, column=1, padx=(0, 10), pady=6, sticky="e")
+    entry_uf.grid(row=7, column=1, padx=(0, 10), pady=6, sticky="e")
 
-    ctk.CTkLabel(frame_geral, text="CEP:").grid(row=7, column=0, padx=10, pady=6, sticky="e")
-    entry_cep = ctk.CTkEntry(frame_geral, width=360)
+    ctk.CTkLabel(frame_cadastro, text="CEP:").grid(row=8, column=0, padx=10, pady=6, sticky="e")
+    entry_cep = ctk.CTkEntry(frame_cadastro, width=360)
     entry_cep.insert(0, config_atual.get("cep", ""))
-    entry_cep.grid(row=7, column=1, padx=10, pady=6)
+    entry_cep.grid(row=8, column=1, padx=10, pady=6)
 
-    ctk.CTkLabel(frame_geral, text="E-mail do Cliente:").grid(row=8, column=0, padx=10, pady=6, sticky="e")
-    entry_email_cliente = ctk.CTkEntry(frame_geral, width=360)
+    ctk.CTkLabel(frame_cadastro, text="E-mail da Empresa:").grid(row=9, column=0, padx=10, pady=6, sticky="e")
+    entry_email_cliente = ctk.CTkEntry(frame_cadastro, width=360)
     entry_email_cliente.insert(0, config_atual.get("email_cliente", ""))
-    entry_email_cliente.grid(row=8, column=1, padx=10, pady=6)
-
-    ctk.CTkLabel(frame_geral, text="Emissor Fiscal (.exe):").grid(row=9, column=0, padx=10, pady=6, sticky="e")
-    entry_emissor = ctk.CTkEntry(frame_geral, width=270)
-    entry_emissor.insert(0, config_atual.get("emissor_fiscal_path", ""))
-    entry_emissor.grid(row=9, column=1, padx=(10, 0), pady=6, sticky="w")
+    entry_email_cliente.grid(row=9, column=1, padx=10, pady=6)
 
     fiscal_ativo_var = ctk.BooleanVar(value=bool(config_atual.get("fiscal_ativo", False)))
     check_fiscal_ativo = ctk.CTkCheckBox(
@@ -528,24 +578,10 @@ def exibir_configuracoes(master=None):
     # O "ID Pasta Backup" saiu da UI: o destino agora e sempre resolvido como
     # FRS Mercado/<market_id>/backups. A chave legada continua sendo gravada
     # (abaixo) apenas para preservar o valor ja existente no config.json.
-    frame_cadastro = ctk.CTkFrame(frame_geral)
-    frame_cadastro.grid(row=0, column=0, columnspan=2, padx=8, pady=(8, 4), sticky="ew")
-    ctk.CTkLabel(
-        frame_cadastro, text="🏢 CADASTRO DA EMPRESA",
-        font=("Arial", 14, "bold"),
-    ).grid(row=0, column=0, columnspan=2, padx=10, pady=(8, 4), sticky="w")
 
-    frame_drive = ctk.CTkFrame(frame_geral)
-    frame_drive.grid(row=1, column=0, columnspan=2, padx=8, pady=(12, 8), sticky="ew")
-    ctk.CTkLabel(
-        frame_drive, text="☁️ BACKUP E GOOGLE DRIVE",
-        font=("Arial", 14, "bold"),
-    ).grid(row=0, column=0, columnspan=2, padx=10, pady=(8, 4), sticky="w")
-
-    ctk.CTkLabel(frame_geral, text="Google Drive (Credenciais):").grid(row=2, column=0, padx=10, pady=6, sticky="e")
-    entry_drive_creds = ctk.CTkEntry(frame_geral, width=360)
-    entry_drive_creds.insert(0, config_atual.get("drive_credentials_path", ""))
-    entry_drive_creds.grid(row=2, column=1, padx=10, pady=6)
+    # Campo de credenciais do Google Drive removido da interface - localização automática
+    # O arquivo credentials.json é localizado automaticamente pelo sistema de prioridades
+    # (caminho executável -> diretório base -> APPDATA do usuário)
 
     ctk.CTkLabel(frame_geral, text="Pasta Entrada Fiscal:").grid(row=12, column=0, padx=10, pady=6, sticky="e")
     entry_in = ctk.CTkEntry(frame_geral, width=270)
@@ -605,6 +641,51 @@ def exibir_configuracoes(master=None):
         email = entry_gmail_backup.get().strip()
         import drive_conexao as _conexao
 
+        # [DRIVE-DIAG] Início do clique em Conectar ao Google Drive
+        import sys, os, traceback
+        from pathlib import Path
+        from modulo_config import carregar_credenciais_google
+
+        print("[DRIVE-DIAG] Clique em Conectar ao Google Drive iniciado")
+        print(f"[DRIVE-DIAG] email_informado={email}")
+        print(f"[DRIVE-DIAG] sys.executable={sys.executable}")
+        print(f"[DRIVE-DIAG] sys.frozen={getattr(sys, 'frozen', False)}")
+        print(f"[DRIVE-DIAG] os.getcwd()={os.getcwd()}")
+        print(f"[DRIVE-DIAG] Path(__file__).parent.resolve()={Path(__file__).parent.resolve()}")
+        if getattr(sys, 'frozen', False):
+            print(f"[DRIVE-DIAG] diretorio_exe={Path(sys.executable).resolve().parent}")
+            print(f"[DRIVE-DIAG] sys._MEIPASS={getattr(sys, '_MEIPASS', 'N/A')}")
+
+        # Carregar credenciais fresh no momento do clique
+        creds = carregar_credenciais_google()
+        print(f"[DRIVE-DIAG] carregar_credenciais_google() retornou: type={type(creds).__name__}")
+        print(f"[DRIVE-DIAG]   credentials={'EXISTE' if creds.get('credentials') else 'AUSENTE'}")
+        if creds.get('credentials'):
+            print(f"[DRIVE-DIAG]   caminho_credentials={creds['credentials']}")
+            print(f"[DRIVE-DIAG]   credenciais_existe={Path(creds['credentials']).exists()}")
+        print(f"[DRIVE-DIAG]   google_services={'EXISTE' if creds.get('google_services') else 'AUSENTE'}")
+        if creds.get('google_services'):
+            print(f"[DRIVE-DIAG]   caminho_google_services={creds['google_services']}")
+            print(f"[DRIVE-DIAG]   google_services_existe={Path(creds['google_services']).exists()}")
+
+        # Verificar se credentials.json existe (necessário para OAuth2)
+        creds_path = creds.get("credentials")
+        creds_ok = bool(creds_path and Path(creds_path).exists())
+        print(f"[DRIVE-DIAG] credenciais_validas={creds_ok}")
+
+        if not creds_ok:
+            # Credenciais OAuth2 não encontradas
+            msg_erro = ("Integração Google indisponível: Arquivo 'credentials.json' não encontrado. "
+                        "Verifique se o arquivo está incluído no pacote do executável.")
+            print(f"[DRIVE-DIAG] ERRO: {msg_erro}")
+            from database_manager import registrar_log
+            registrar_log(None, "Segurança/Config", "Falha", msg_erro)
+            status_label.configure(
+                text="Arquivo credentials.json não encontrado para OAuth.", text_color="#ff6666",
+            )
+            return
+
+        # Credenciais disponíveis - prosseguir com conexão
         ok, motivo = _conexao.validar_gmail(email)
         if not ok:
             status_label.configure(text=motivo, text_color="#ff6666")
@@ -613,7 +694,10 @@ def exibir_configuracoes(master=None):
             lbl_status_backup_drive.configure(
                 text="Aguardando autorização no Google…", text_color="#f1c40f",
             )
-            resultado = _conexao.conectar(email)
+            # [DRIVE-DIAG] Chamar conectar com credenciais fresh
+            print(f"[DRIVE-DIAG] Chamando _conexao.conectar(email, credenciais=creds)")
+            resultado = _conexao.conectar(email, credenciais=creds)
+            print(f"[DRIVE-DIAG] conectar() retornou com sucesso: conta={resultado.get('conta')}")
             entry_gmail_backup.delete(0, "end")
             entry_gmail_backup.insert(0, resultado["conta"])
             atualizar_alerta_backup_drive()
@@ -625,10 +709,11 @@ def exibir_configuracoes(master=None):
                 )
             else:
                 status_label.configure(
-                    text="Google Drive conectado. Backups automáticos ativados.",
-                    text_color="#2ecc71",
+                    text="Google Drive conectado. Backups automáticos ativados.", text_color="#2ecc71",
                 )
         except Exception as e:
+            print(f"[DRIVE-DIAG] EXCEÇÃO em conectar(): {e}")
+            print(f"[DRIVE-DIAG] Traceback: {traceback.format_exc()}")
             atualizar_alerta_backup_drive()
             status_label.configure(text=f"Falha ao conectar o Drive: {e}", text_color="#ff6666")
 
@@ -859,6 +944,222 @@ def exibir_configuracoes(master=None):
                 hover_color="#772222", command=lambda i=item: _escolher(i),
             ).pack(side="right", padx=8)
 
+def acao_restaurar_drive_threaded():
+    import backup_restore as restore
+    import threading
+    from tkinter import messagebox
+
+    # Protecao contra cliques duplicados
+    if getattr(acao_restaurar_drive_threaded, "_em_execucao", False):
+        return
+    acao_restaurar_drive_threaded._em_execucao = True
+
+    # Atualizar UI para indicar processamento
+    try:
+        if janela_config.winfo_exists():
+            janela_config.after(0, lambda: _status_l7("Conectando ao Google Drive...", "#f1c40f"))
+    except Exception:
+        pass
+
+    resultado_container = {"disponiveis": None, "erro": None, "finalizado": False}
+    evento_final = threading.Event()
+
+    def _trabalho_restaurar():
+        try:
+            disponiveis = restore.listar_backups()
+            resultado_container["disponiveis"] = disponiveis
+        except Exception as erro:
+            resultado_container["erro"] = str(erro)
+        finally:
+            resultado_container["finalizado"] = True
+            evento_final.set()
+
+    thread = threading.Thread(target=_trabalho_restaurar, daemon=True)
+    thread.start()
+    # REMOVIDO: thread.join(timeout=120) - bloqueava a thread principal do Tkinter
+    # Usar polling via after() para manter a UI responsiva durante a autenticacao
+    def _verificar_conclusao():
+        if not janela_config.winfo_exists():
+            return
+        if thread.is_alive():
+            janela_config.after(500, _verificar_conclusao)
+            return
+        acao_restaurar_drive_threaded._em_execucao = False
+        try:
+            if not janela_config.winfo_exists():
+                return
+        except Exception:
+            return
+        if resultado_container["erro"]:
+            _status_l7(f"Falha ao listar backups: {resultado_container['erro']}", "#ff6666")
+            try:
+                if janela_config.winfo_exists():
+                    messagebox.showerror("Restaurar do Google Drive", f"Falha na conexao: {resultado_container['erro']}", parent=janela_config)
+            except Exception:
+                pass
+            return
+        disponiveis = resultado_container["disponiveis"]
+        if not disponiveis:
+            try:
+                if janela_config.winfo_exists():
+                    messagebox.showinfo("Restaurar do Google Drive", "Nenhum backup encontrado para este mercado.", parent=janela_config)
+            except Exception:
+                pass
+            _status_l7("Nenhum backup encontrado no Google Drive.", "#f1c40f")
+            return
+        try:
+            if not janela_config.winfo_exists():
+                return
+            janela_lista = ctk.CTkToplevel(janela_config)
+            janela_lista.title("Restaurar backup do Google Drive")
+            janela_lista.geometry("580x440")
+            janela_lista.transient(janela_config)
+            janela_lista.grab_set()
+            ctk.CTkLabel(janela_lista, text="ATENCAO: restaurar SUBSTITUI os dados atuais pelo backup.", font=("Arial", 12, "bold"), text_color="#f1c40f").pack(padx=10, pady=(10, 8))
+            lista = ctk.CTkFrame(janela_lista)
+            lista.pack(fill="both", expand=True, padx=10, pady=10)
+            def _escolher(item):
+                janela_lista.destroy()
+                if not messagebox.askyesno("Confirmar restauracao", f"Restaurar o backup?\\n\\nIdentificacao: {item['backup_id']}\\nData: {item['data_hora']}  |  Tipo: {item['tipo']}\\n\\nSeus dados atuais serao SUBSTITUIDOS pelos dados do backup.\\nUma copia de seguranca do estado atual sera criada antes.", parent=janela_config):
+                    _status_l7("Restauracao cancelada pelo usuario.", "#f1c40f")
+                    return
+                _executar_restauracao_drive(item)
+            for item in disponiveis:
+                linha = ctk.CTkFrame(lista)
+                linha.pack(fill="x", pady=3)
+                ctk.CTkLabel(linha, text=f"{item['data_hora']}  .  {item['tipo']}", anchor="w").pack(side="left", padx=8)
+                ctk.CTkButton(linha, text="RESTAURAR", width=110, fg_color="#aa3333", hover_color="#772222", command=lambda i=item: _escolher(i)).pack(side="right", padx=8)
+            _status_l7(f"Backups listados: {len(disponiveis)} disponiveis.", "#2ecc71")
+        except Exception as e:
+            _status_l7(f"Falha ao exibir lista: {e}", "#ff6666")
+            try:
+                if janela_config.winfo_exists():
+                    from tkinter import messagebox
+                    messagebox.showerror("Restaurar do Google Drive", f"Erro: {e}", parent=janela_config)
+            except Exception:
+                pass
+        janela_config.after(100, _verificar_conclusao)
+
+    # Atualizar UI para indicar processamento
+    try:
+        if janela_config.winfo_exists():
+            janela_config.after(0, lambda: _status_l7("Conectando ao Google Drive...", "#f1c40f"))
+    except Exception:
+        pass
+
+    resultado_container = {"disponiveis": None, "erro": None, "finalizado": False}
+    evento_final = threading.Event()
+
+    def _trabalho_restaurar():
+        try:
+            disponiveis = restore.listar_backups()
+            resultado_container["disponiveis"] = disponiveis
+        except Exception as erro:
+            resultado_container["erro"] = str(erro)
+        finally:
+            resultado_container["finalizado"] = True
+            evento_final.set()
+
+    thread = threading.Thread(target=_trabalho_restaurar, daemon=True)
+    thread.start()
+    # REMOVIDO: thread.join(timeout=120) - bloqueava a thread principal do Tkinter
+    # Usar polling via after() para manter a UI responsiva durante a autenticacao
+
+    # Atualizar UI para indicar processamento
+    try:
+        if janela_config.winfo_exists():
+            janela_config.after(0, lambda: _status_l7("Conectando ao Google Drive...", "#f1c40f"))
+    except Exception:
+        pass
+
+    resultado_container = {"disponiveis": None, "erro": None, "finalizado": False}
+    evento_final = threading.Event()
+
+    def _trabalho_restaurar():
+        try:
+            disponiveis = restore.listar_backups()
+            resultado_container["disponiveis"] = disponiveis
+        except Exception as erro:
+            resultado_container["erro"] = str(erro)
+        finally:
+            resultado_container["finalizado"] = True
+            evento_final.set()
+
+    thread = threading.Thread(target=_trabalho_restaurar, daemon=True)
+     
+    thread.start()
+    # Nao bloquear a thread principal - usar polling via after()
+    # thread.join foi removido para manter UI responsiva
+    
+
+    if thread.is_alive():
+        resultado_container["erro"] = "Operacao Google Drive demorou mais de 2 minutos. Verifique o navegador."
+        evento_final.set()
+
+    evento_final.wait(timeout=5)
+    acao_restaurar_drive_threaded._em_execucao = False
+
+    # Processar resultado na thread principal
+    try:
+        if not janela_config.winfo_exists():
+            return
+    except Exception:
+        return
+
+    if resultado_container["erro"]:
+        _status_l7(f"Falha ao listar backups: {resultado_container['erro']}", "#ff6666")
+        try:
+            if janela_config.winfo_exists():
+                messagebox.showerror("Restaurar do Google Drive", f"Falha na conexao: {resultado_container['erro']}", parent=janela_config)
+        except Exception:
+            pass
+        return
+
+    disponiveis = resultado_container["disponiveis"]
+    if not disponiveis:
+        try:
+            if janela_config.winfo_exists():
+                messagebox.showinfo("Restaurar do Google Drive", "Nenhum backup encontrado para este mercado.", parent=janela_config)
+        except Exception:
+            pass
+        _status_l7("Nenhum backup encontrado no Google Drive.", "#f1c40f")
+        return
+
+    # Criar janela de lista de backups (na thread principal)
+    try:
+        if not janela_config.winfo_exists():
+            return
+        janela_lista = ctk.CTkToplevel(janela_config)
+        janela_lista.title("Restaurar backup do Google Drive")
+        janela_lista.geometry("580x440")
+        janela_lista.transient(janela_config)
+        janela_lista.grab_set()
+        ctk.CTkLabel(janela_lista, text="ATENCAO: restaurar SUBSTITUI os dados atuais pelo backup.", font=("Arial", 12, "bold"), text_color="#f1c40f").pack(padx=10, pady=(10, 8))
+        lista = ctk.CTkFrame(janela_lista)
+        lista.pack(fill="both", expand=True, padx=10, pady=10)
+
+        def _escolher(item):
+            janela_lista.destroy()
+            if not messagebox.askyesno("Confirmar restauracao", f"Restaurar o backup?\\n\\nIdentificacao: {item['backup_id']}\\nData: {item['data_hora']}  |  Tipo: {item['tipo']}\\n\\nSeus dados atuais serao SUBSTITUIDOS pelos dados do backup.\\nUma copia de seguranca do estado atual sera criada antes.", parent=janela_config):
+                _status_l7("Restauracao cancelada pelo usuario.", "#f1c40f")
+                return
+            _executar_restauracao_drive(item)
+
+        for item in disponiveis:
+            linha = ctk.CTkFrame(lista)
+            linha.pack(fill="x", pady=3)
+            ctk.CTkLabel(linha, text=f"{item['data_hora']}  .  {item['tipo']}", anchor="w").pack(side="left", padx=8)
+            ctk.CTkButton(linha, text="RESTAURAR", width=110, fg_color="#aa3333", hover_color="#772222", command=lambda i=item: _escolher(i)).pack(side="right", padx=8)
+
+        _status_l7(f"Backups listados: {len(disponiveis)} disponiveis.", "#2ecc71")
+    except Exception as e:
+        _status_l7(f"Falha ao exibir lista: {e}", "#ff6666")
+        try:
+            if janela_config.winfo_exists():
+                from tkinter import messagebox
+                messagebox.showerror("Restaurar do Google Drive", f"Erro: {e}", parent=janela_config)
+        except Exception:
+            pass
     def _popup_explicativo_backup_geral() -> bool:
         dialogo = ctk.CTkToplevel(janela_config)
         dialogo.title("Backup Geral")
@@ -1137,7 +1438,7 @@ def exibir_configuracoes(master=None):
     ).grid(row=0, column=0, columnspan=3, padx=10, pady=(8, 4), sticky="w")
 
     ctk.CTkButton(
-        frame_l7, text="RESTAURAR DO GOOGLE DRIVE", command=acao_restaurar_drive,
+        frame_l7, text="RESTAURAR DO GOOGLE DRIVE", command=acao_restaurar_drive_threaded
     ).grid(row=2, column=0, padx=8, pady=6, sticky="ew")
     ctk.CTkButton(
         frame_l7, text="BACKUP GERAL", command=acao_backup_geral,
@@ -1291,4 +1592,97 @@ if __name__ == "__main__":
     btn_abrir = ctk.CTkButton(root, text="Abrir Configurações", command=exibir_configuracoes)
     btn_abrir.pack(expand=True)
 
+def _executar_fluxo_oauth_com_timeout(janela, timeout_segundos=120):
+    import webbrowser, json, time, urllib.parse, threading
+    resultado = {"sucesso": False, "credenciais": None, "erro": None}
+    evento_final = threading.Event()
+    url_autorizacao_definida = [False]
+    def _obter_url_autorizacao():
+        try:
+            configuracao = carregar_configuracoes() or {}
+            caminho_oauth = configuracao.get("google_oauth_credentials_path")
+            if not caminho_oauth: return None
+            caminho_projeto = Path(__file__).parent.resolve() / caminho_oauth
+            if not caminho_projeto.exists(): return None
+            with open(caminho_projeto, 'r', encoding='utf-8') as f: data = json.load(f)
+            if 'installed' not in data and 'web' not in data: return None
+            params = {'client_id': data['installed'].get('client_id') or data['web'].get('client_id'),
+                      'redirect_uri': 'urn:ietf:wg:oauth:2.0:oob', 'response_type': 'code',
+                      'scope': 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive',
+                      'access_type': 'offline', 'prompt': 'consent'}
+            base = data['installed'].get('auth_uri') or data['web'].get('auth_uri')
+            if not base: return None
+            query = urllib.parse.urlencode(params)
+            return f"{base}?{query}"
+        except Exception: return None
+    def _trabalho_oauth():
+        nonlocal url_autorizacao_definida
+        try:
+            url_auth = _obter_url_autorizacao()
+            if not url_auth: resultado["erro"] = "Nao foi possivel construir a URL de autorizacao do Google."; evento_final.set(); return
+            try: webbrowser.open(url_auth, new=2)
+            except Exception: pass
+            codigo_autorizacao = None
+            tempo_inicio = time.time()
+            while time.time() - tempo_inicio < timeout_segundos:
+                if url_autorizacao_definida[0]: break
+                time.sleep(2)
+                if evento_final.is_set(): break
+            if url_autorizacao_definida[0] and codigo_autorizacao:
+                try:
+                    caminho_oauth = configuracao.get("google_oauth_credentials_path")
+                    caminho_projeto = Path(__file__).parent.resolve() / caminho_oauth
+                    with open(caminho_projeto, 'r', encoding='utf-8') as f: data = json.load(f)
+                    client_id = data['installed'].get('client_id')
+                    client_secret = data['installed'].get('client_secret')
+                    token_uri = data['installed'].get('token_uri')
+                    if not all([client_id, client_secret, token_uri]): raise ValueError("OAuth dados incompletos")
+                    token_data = {'code': codigo_autorizacao, 'client_id': client_id, 'client_secret': client_secret,
+                                  'redirect_uri': 'urn:ietf:wg:oauth:2.0:oob', 'grant_type': 'authorization_code'}
+                    import urllib.request
+                    req = urllib.request.Request(token_uri, data=json.dumps(token_data).encode('utf-8'),
+                        headers={'Content-Type': 'application/json'})
+                    with urllib.request.urlopen(req, timeout=30) as resp: token_response = json.loads(resp.read().decode('utf-8'))
+                    credenciais = {"credentials": str(Path(__file__).parent.resolve() / caminho_oauth),
+                        "google_services": str(Path(__file__).parent.resolve() / caminho_oauth.with_name("google-services.json")),
+                        "token": token_response.get('access_token'), "refresh_token": token_response.get('refresh_token'),
+                        "expires_in": token_response.get('expires_in'), "scope": token_response.get('scope')}
+                    resultado["sucesso"] = True; resultado["credenciais"] = credenciais; return
+                except Exception as e: resultado["erro"] = f"Falha ao trocar codigo por token: {str(e)[:200]}"; evento_final.set(); return
+            else: resultado["erro"] = "Autorizacao expirada ou cancelada pelo usuario."; evento_final.set()
+        except Exception as e: resultado["erro"] = f"Erro inesperado no fluxo OAuth: {str(e)[:300]}"; evento_final.set()
+    thread = threading.Thread(target=_trabalho_oauth, daemon=True)
+    thread.start()
+    # Nao bloquear a thread principal - usar polling via after()
+    def _verificar_oauth_conclusao():
+        if not janela.winfo_exists():
+            return
+        if thread.is_alive():
+            janela.after(500, _verificar_oauth_conclusao)
+            return
+    if thread.is_alive(): resultado["erro"] = f"Operacao OAuth demorou mais de {timeout_segundos}s e foi cancelada"; return False, None, resultado["erro"]
+    if resultado["erro"]:
+        try:
+            if janela and janela.winfo_exists():
+                janela.after(0, lambda: _mostrar_mensagem_google(janela, "Google Drive", resultado["erro"], "error"))
+        except Exception:
+            pass
+        return False, None, resultado["erro"]
+    if resultado["sucesso"] and resultado["credenciais"]:
+        try:
+            if janela and janela.winfo_exists():
+                janela.after(0, lambda: _mostrar_mensagem_google(janela, "Google Drive Sucesso", "Conexao Google Drive estabelecida com sucesso!\\nCredenciais salvas e backup agora disponivel.", "info"))
+                janela.after(0, lambda: None)
+        except Exception:
+            pass
+        return True, resultado["credenciais"], None
+    return False, None, resultado["erro"]
+def _mostrar_mensagem_google(janela, titulo, mensagem, tipo="info"):
+    try:
+        from tkinter import messagebox
+        if janela and janela.winfo_exists():
+            if tipo == "info": messagebox.showinfo(titulo, mensagem, parent=janela)
+            elif tipo == "error": messagebox.showerror(titulo, mensagem, parent=janela)
+            elif tipo == "warning": messagebox.showwarning(titulo, mensagem, parent=janela)
+    except Exception: pass
     root.mainloop()

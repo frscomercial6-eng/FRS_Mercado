@@ -968,6 +968,7 @@ def get_db_connection():
 
         try:
             conn = sqlite3.connect(get_db_path())
+            print(f"[SQLITE-DIAG] Conexão aberta: {get_db_path()}")
             _configure_sqlite_connection(conn)
             _ensure_produtos_schema(conn)
             _ensure_aux_schema(conn)
@@ -1007,10 +1008,13 @@ def get_db_connection():
             except Exception:
                 pass
         if isinstance(e, sqlite3.Error):
-            print(f"Erro no banco de dados: {e}")
+            import traceback
+            print(f"[SQLITE-DIAG] Erro no banco de dados: {e}")
+            print(f"[SQLITE-DIAG] Traceback: {traceback.format_exc()}")
         raise # Re-lança a exceção para que o chamador possa tratá-la
     finally:
         if conn:
+            print(f"[SQLITE-DIAG] Conexão fechada: {get_db_path()}")
             conn.close()
 
 def registrar_log(usuario_id, acao, status, detalhes=None, *, conn=None):
@@ -1031,5 +1035,7 @@ def registrar_log(usuario_id, acao, status, detalhes=None, *, conn=None):
 try:
     from modulo_config import carregar_credenciais_google
     GOOGLE_CREDS = carregar_credenciais_google()
+    if GOOGLE_CREDS is None:
+        GOOGLE_CREDS = {"credentials": None, "google_services": None}
 except ImportError:
     GOOGLE_CREDS = {"credentials": None, "google_services": None}

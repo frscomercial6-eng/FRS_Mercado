@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import os
 import json
 import time
@@ -32,7 +32,7 @@ try:
 except Exception:
     # Fallback consistente com a versao oficial.
     # A versao autoritativa eh sempre definida no release_manager.
-    _FRS_APP_VERSION = "1.0.24"
+    _FRS_APP_VERSION = "1.0.25"
 
 COMPRAR_LICENCA_URL = "https://www.frssolutions.com.br/planos"
 
@@ -49,6 +49,8 @@ def _log_debug(contexto: str, erro: Exception | None = None) -> None:
 
 class AppPrincipal(ctk.CTk):
     def __init__(self, usuario_sessao=None):
+        # Inicializar _after_ids ANTES de super().__init__()
+        self._after_ids = set()
         super().__init__()
         self.title("Sistema PDV - Mercado FRS")
         self.geometry("1100x700")
@@ -59,6 +61,7 @@ class AppPrincipal(ctk.CTk):
         self._poll_venda_ativa = False
         self._vendas_iniciais = 0
         self._watchdog_janela_ativo = True
+        # _after_ids already initialized before super().__init__()
         self._modulos_abertos = {}
         self._modulos_em_abertura = set()
         self._erro_abertura_em_exibicao = set()
@@ -91,8 +94,8 @@ class AppPrincipal(ctk.CTk):
         # Define o protocolo para encerramento total do processo ao fechar a janela
         self.protocol("WM_DELETE_WINDOW", self.fechar_sistema)
         
-        self.usuario_atual = usuario_sessao or {}
-        self._after_ids = [] # Lista para rastrear loops (IA, Dashboard, etc)
+        self.usuario_atual = usuario_sessao
+        # _after_ids already initialized as set() at line 53 - do not reassign
         # Lazy loading: evita consulta ao banco durante o __init__.
         self.admin_cadastrado = False
 
@@ -106,7 +109,6 @@ class AppPrincipal(ctk.CTk):
                 "Sessão inválida",
                 "Não foi possível iniciar sem autenticação. Reinicie pelo inicializador principal.",
             )
-            self.fechar_sistema()
             return
 
         # Janela principal maximizada após validação de sessão.
@@ -116,8 +118,42 @@ class AppPrincipal(ctk.CTk):
             # Alguns window managers não suportam "zoomed"; mantém geometry padrão.
             pass
 
-        # Se já veio logado, inicializa direto.
-        self.login_concluido(self.usuario_atual)
+        # login_concluido será chamado em iniciar_sistema() após __init__ completar
+
+
+    def __after_original(self, ms, func=None, *args):
+        """Wrapper around Tkinter after() to track callback IDs for cleanup."""
+        # Ensure _after_ids exists before trying to use it - this prevents AttributeError
+        # during initialization when after() might be called by the parent class
+        if not hasattr(self, "_after_ids"):
+            self._after_ids = set()
+        if func is None:
+            # after(ms) - just delay, no callback
+            return super().after(ms)
+        after_id = super().after(ms, func, *args)
+        self._after_ids.add(after_id)
+        return after_id
+
+    def after(self, ms, func=None, *args):
+        """Track after() callback IDs so they can be cancelled on destroy."""
+        # Safely call the wrapper, ensuring _after_ids is initialized first
+        if not hasattr(self, "_after_ids"):
+            self._after_ids = set()
+        return self.__after_original(ms, func, *args)
+
+    def destroy(self):
+        """Cancel all pending after() callbacks before destroying the window."""
+        import tkinter as tk
+        # Cancel all tracked after() callbacks
+        for after_id in list(self._after_ids):
+            try:
+                self.after_cancel(after_id)
+            except tk.TclError:
+                pass  # Already cancelled or window destroyed
+        self._after_ids.clear()
+        # [TK-DIAG] Registro do encerramento da janela
+        print(f"[TK-DIAG] Janela destruída, {len(self._after_ids)} callbacks após cancelamento")
+        super().destroy()
 
     def _get_ia_gestao(self):
         if self._ia_gestao is None:
@@ -628,7 +664,7 @@ class AppPrincipal(ctk.CTk):
         """Agenda uma tarefa e armazena o ID para cancelamento seguro."""
         if self.winfo_exists():
             id_after = self.after(ms, command)
-            self._after_ids.append(id_after)
+            self._after_ids.add(id_after)
             return id_after
 
     def fechar_sistema(self):
@@ -677,7 +713,11 @@ class AppPrincipal(ctk.CTk):
                 self.destroy()
         except Exception:
             pass
-        raise SystemExit(0)
+        try:
+            self.quit()
+        except Exception:
+            pass
+        # Encerra a janela sem SystemExit para não matar o processo inesperadamente
 
     def cancelar_loops(self):
         """Cancela todos os loops de IA e interface pendentes."""
@@ -2167,13 +2207,37 @@ class AppPrincipal(ctk.CTk):
 
 def iniciar_sistema(usuario=None):
     """Função centralizadora para iniciar a aplicação."""
-    app = AppPrincipal(usuario_sessao=usuario)
+    print(f"[LOGIN-DIAG] iniciar_sistema chamado com usuario_sessao={usuario}")
     try:
-        app.deiconify()
-        app.focus_force()
-    except Exception:
-        pass
-    app.mainloop()
+        app = AppPrincipal(usuario_sessao=usuario)
+        print(f"[LOGIN-DIAG] AppPrincipal criado com sucesso, usuario_atual={app.usuario_atual}")
+        try:
+            app.login_concluido(app.usuario_atual)
+            print(f"[LOGIN-DIAG] login_concluido chamado")
+        except Exception as e:
+            import traceback
+            print(f"[LOGIN-DIAG] login_concluido falhou: {e}")
+            traceback.print_exc()
+        try:
+            app.deiconify()
+            print(f"[LOGIN-DIAG] app.deiconify() chamado")
+        except Exception as e:
+            import traceback
+            print(f"[LOGIN-DIAG] app.deiconify() falhou: {e}")
+            traceback.print_exc()
+        try:
+            app.focus_force()
+            print(f"[LOGIN-DIAG] app.focus_force() chamado")
+        except Exception as e:
+            print(f"[LOGIN-DIAG] app.focus_force() falhou: {e}")
+        print(f"[LOGIN-DIAG] Chamando app.mainloop()")
+        app.mainloop()
+        print(f"[LOGIN-DIAG] app.mainloop() retornou")
+    except Exception as e:
+        import traceback
+        print(f"[LOGIN-DIAG] EXCEÇÃO em iniciar_sistema: {e}")
+        traceback.print_exc()
+        _log_debug("Falha ao carregar/inicializar modulo_main", e)
 
 if __name__ == "__main__":
     iniciar_sistema()
