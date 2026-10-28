@@ -1,0 +1,89 @@
+name: FRS Mercado Master Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Numero da versao (ex.: 1.0.25)'
+        required: true
+        default: '1.0.25'
+      sequence:
+        description: 'Numero de sequencia do atualizador'
+        required: true
+        default: '7'
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  PYTHON_VERSION: '3.11'
+  MANIFEST_SEQUENCE: ${{ github.event.inputs.sequence }}
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyInstaller cryptography customtkinter psutil PIL reportlab
+
+      - name: Check Inno Setup availability
+        shell: pwsh
+        run: |
+          $iscc = Get-ChildItem -Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe", "C:\Program Files\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) {
+            Write-Error "Inno Setup 6 (ISCC.exe) nao encontrado. O instalador nao pode ser compilado."
+            exit 1
+          }
+          Write-Host "Inno Setup encontrado em: $($iscc.FullName)"
+
+      - name: Run Master Build
+        shell: pwsh
+        env:
+          FRS_UPDATER_PRIVATE_KEY: ${{ secrets.FRS_UPDATER_PRIVATE_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          $sequence = "${{ github.event.inputs.sequence }}"
+          Write-Host "=== MESTRE BUILD v$version (sequencia do atualizador: $sequence) ==="
+          python mestre_build.py
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Mestre build falhou com codigo $LASTEXITCODE"
+            exit 1
+          }
+
+      - name: Upload build artifacts (audit copy)
+        uses: actions/upload-artifact@v4
+        with:
+          name: frs-mercado-build-v${{ github.event.inputs.version }}
+          path: |
+            installer/FRS_Mercado_Setup.exe
+            installer/FRS_Mercado_Portable_*.zip
+            installer/UpdateHelper/FRS_Mercado_UpdateHelper.exe
+            update-manifest-*.json
+          retention-days: 30
+
+      - name: Confirm release published
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json" }
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/frscomercial6-eng/FRS_Mercado/releases/tags/v$version" -Headers $headers -Method GET
+          Write-Host "Release: $($release.name) (id=$($release.id))"
+          Write-Host "Draft: $($release.draft) | Prerelease: $($release.prerelease)"
+          Write-Host "URL: $($release.html_url)"
+          $release.assets | ForEach-Object { Write-Host "  Asset: $($_.name) ($($_.size) bytes)" }
